@@ -2530,6 +2530,94 @@ test("observed damage learning skips windows with sourced HP changes", async () 
   assert.equal(airSlash?.currentTarget.observedRange, undefined);
 });
 
+test("observed critical-hit damage is normalized before entering observed history", async () => {
+  const before = makeSnapshot({
+    roomId: "battle-observed-crit-before",
+    yourSide: {
+      slot: "p1",
+      name: "You",
+      active: makePokemon({
+        ident: "p1a: Fezandipiti",
+        species: "Fezandipiti",
+        displayName: "Fezandipiti",
+        active: true,
+        hpPercent: 100,
+        knownMoves: ["Moonblast"],
+        stats: { hp: 380, atk: 176, def: 262, spa: 176, spd: 262, spe: 260 },
+        types: ["Poison", "Fairy"]
+      }),
+      team: [makePokemon({
+        ident: "p1a: Fezandipiti",
+        species: "Fezandipiti",
+        displayName: "Fezandipiti",
+        active: true,
+        hpPercent: 100,
+        knownMoves: ["Moonblast"],
+        stats: { hp: 380, atk: 176, def: 262, spa: 176, spd: 262, spe: 260 },
+        types: ["Poison", "Fairy"]
+      })]
+    },
+    opponentSide: {
+      slot: "p2",
+      name: "Opponent",
+      active: makePokemon({
+        ident: "p2a: Pincurchin",
+        species: "Pincurchin",
+        displayName: "Pincurchin",
+        active: true,
+        hpPercent: 74,
+        stats: { hp: 288, atk: 265, def: 296, spa: 229, spd: 226, spe: 140 },
+        types: ["Electric"]
+      }),
+      team: [makePokemon({
+        ident: "p2a: Pincurchin",
+        species: "Pincurchin",
+        displayName: "Pincurchin",
+        active: true,
+        hpPercent: 74,
+        stats: { hp: 288, atk: 265, def: 296, spa: 229, spd: 226, spe: 140 },
+        types: ["Electric"]
+      })]
+    },
+    legalActions: [{ id: "move:moonblast", kind: "move", label: "Moonblast", moveName: "Moonblast" }],
+    recentLog: ["Turn 16 started."]
+  });
+  const afterCrit = makeSnapshot({
+    ...before,
+    capturedAt: new Date(Date.now() + 1_000).toISOString(),
+    opponentSide: {
+      ...before.opponentSide,
+      active: makePokemon({ ...before.opponentSide.active, hpPercent: 35 }),
+      team: [makePokemon({ ...before.opponentSide.active, hpPercent: 35 })]
+    },
+    recentLog: [
+      "Turn 16 started.",
+      "Fezandipiti used Moonblast.",
+      "It was a critical hit."
+    ]
+  });
+
+  await updateLocalIntelFromSnapshot(before);
+  await updateLocalIntelFromSnapshot(afterCrit);
+
+  const future = makeSnapshot({
+    ...afterCrit,
+    roomId: "battle-observed-crit-future",
+    turn: 17,
+    recentLog: ["Turn 17 started."]
+  });
+
+  const intel = await buildLocalIntelSnapshot(future);
+  const moonblast = intel.playerDamagePreview?.find((entry) => entry.moveName === "Moonblast");
+  assert.ok(moonblast?.observedRange);
+  assert.equal(moonblast?.likelyBandSource, "context");
+  assert.equal(moonblast?.observedRange?.minPercent, 26);
+  assert.equal(moonblast?.observedRange?.maxPercent, 26);
+  const likelyBand = moonblast?.bands.find((band) => band.label === "likely");
+  assert.equal(likelyBand?.minPercent, 26);
+  assert.equal(likelyBand?.maxPercent, 26);
+});
+
 test("posterior collapses item hypotheses when the item is revealed", async () => {
   const prior = makeSnapshot({
     roomId: "battle-posterior-item-prior",

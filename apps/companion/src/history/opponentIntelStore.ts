@@ -918,6 +918,77 @@ function isCleanObservedDamageWindow(lines: string[]) {
   return true;
 }
 
+function combatStageMultiplier(stage: number) {
+  if (stage >= 0) return (2 + stage) / 2;
+  return 2 / (2 - stage);
+}
+
+function clampCombatStage(value: number | null | undefined) {
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(-6, Math.min(6, Number(value)));
+}
+
+function criticalHitActorsFromLines(lines: string[]) {
+  const criticalActors = new Set<string>();
+  let lastMoveActor: string | null = null;
+  for (const line of lines) {
+    const move = extractUsedMove(line);
+    if (move?.actor) {
+      lastMoveActor = move.actor;
+      continue;
+    }
+    if (/critical hit/i.test(line) && lastMoveActor) {
+      criticalActors.add(normalizeName(lastMoveActor));
+    }
+  }
+  return criticalActors;
+}
+
+function hasRelevantScreen(sideConditions: string[], category: "Physical" | "Special") {
+  const normalized = sideConditions.map((value) => normalizeName(value));
+  if (normalized.includes("auroraveil")) return true;
+  if (category === "Physical") return normalized.includes("reflect");
+  return normalized.includes("lightscreen");
+}
+
+function normalizeCriticalObservedDamage(params: {
+  format: string;
+  moveName: string;
+  attacker: PokemonSnapshot;
+  defender: PokemonSnapshot;
+  field: BattleSnapshot["field"];
+  attackerSide: "your" | "opponent";
+  delta: number;
+}) {
+  const gen = gens.get(generationFromFormat(params.format));
+  const move = lookupMove(gen, params.moveName);
+  if (!move || move.category === "Status") {
+    return Number(params.delta.toFixed(1));
+  }
+
+  let critRatio = 1.5;
+  if (move.category === "Physical") {
+    const attackerStage = clampCombatStage(params.attacker.boosts?.atk);
+    const defenderStage = clampCombatStage(params.defender.boosts?.def);
+    if (attackerStage < 0) critRatio *= combatStageMultiplier(0) / combatStageMultiplier(attackerStage);
+    if (defenderStage > 0) critRatio *= combatStageMultiplier(defenderStage) / combatStageMultiplier(0);
+  } else {
+    const attackerStage = clampCombatStage(params.attacker.boosts?.spa);
+    const defenderStage = clampCombatStage(params.defender.boosts?.spd);
+    if (attackerStage < 0) critRatio *= combatStageMultiplier(0) / combatStageMultiplier(attackerStage);
+    if (defenderStage > 0) critRatio *= combatStageMultiplier(defenderStage) / combatStageMultiplier(0);
+  }
+
+  const defenderSideConditions = params.attackerSide === "your"
+    ? params.field.opponentSideConditions
+    : params.field.yourSideConditions;
+  if (hasRelevantScreen(defenderSideConditions, move.category)) {
+    critRatio *= 2;
+  }
+
+  return Number((params.delta / Math.max(1, critRatio)).toFixed(1));
+}
+
 function hpDeltaWasKoCapped(
   previousHpPercent: number | null | undefined,
   currentDefender: PokemonSnapshot | null | undefined,
@@ -952,6 +1023,7 @@ function maybeRecordObservedDamage(store: IntelStore, battle: BattleLedger, snap
   const yourMoveLines = newLines
     .map((line) => extractUsedMove(line))
     .filter((entry) => entry?.actor && yourActorNames.some((name) => normalizeName(name) === normalizeName(entry.actor)) && entry.move);
+  const criticalHitActors = criticalHitActorsFromLines(newLines);
 
   const opponentSpecies = currentOpponentActive.species ?? currentOpponentActive.displayName;
   const yourSpecies = currentYourActive.species ?? currentYourActive.displayName;
@@ -981,21 +1053,32 @@ function maybeRecordObservedDamage(store: IntelStore, battle: BattleLedger, snap
       delta > 0.5 &&
       !hpDeltaWasKoCapped(previous.yourHpPercent, currentYourActive, delta)
     ) {
+      const normalizedDelta = criticalHitActors.has(normalizeName(opponentMoveLines[0]?.actor ?? ""))
+        ? normalizeCriticalObservedDamage({
+            format: snapshot.format,
+            moveName,
+            attacker: previousOpponentActive,
+            defender: previousYourActive,
+            field: fieldForDamage ?? snapshot.field,
+            attackerSide: "opponent",
+            delta
+          })
+        : Number(delta.toFixed(1));
       const damageKey = `incoming|${moveName}|${yourSpecies}|${snapshot.turn}`;
       if (!battleSpecies.damageKeys[damageKey]) {
         battleSpecies.damageKeys[damageKey] = true;
-        updateObservedDamageRecord(formatRecord.observedDamage, `${moveName}|${yourSpecies}`, Number(delta.toFixed(1)));
+        updateObservedDamageRecord(formatRecord.observedDamage, `${moveName}|${yourSpecies}`, normalizedDelta);
         updateObservedDamageRecord(
           formatRecord.observedDamageByContext,
           `${moveName}|${yourSpecies}|${combatContextKey(previousOpponentActive, previousYourActive, fieldContext)}`,
-          Number(delta.toFixed(1))
+          normalizedDelta
         );
         battleSpecies.incomingDamage.push({
           key: damageKey,
           direction: "incoming",
           turn: snapshot.turn,
           moveName,
-          percent: Number(delta.toFixed(1)),
+          percent: normalizedDelta,
           attacker: clonePokemonSnapshot(previousOpponentActive),
           defender: clonePokemonSnapshot(previousYourActive),
           field: fieldForDamage ? structuredClone(fieldForDamage) : structuredClone(snapshot.field)
@@ -1019,21 +1102,32 @@ function maybeRecordObservedDamage(store: IntelStore, battle: BattleLedger, snap
       outgoingDelta > 0.5 &&
       !hpDeltaWasKoCapped(previous.opponentHpPercent, currentOpponentActive, outgoingDelta)
     ) {
+      const normalizedDelta = criticalHitActors.has(normalizeName(yourMoveLines[0]?.actor ?? ""))
+        ? normalizeCriticalObservedDamage({
+            format: snapshot.format,
+            moveName,
+            attacker: previousYourActive,
+            defender: previousOpponentActive,
+            field: fieldForDamage ?? snapshot.field,
+            attackerSide: "your",
+            delta: outgoingDelta
+          })
+        : Number(outgoingDelta.toFixed(1));
       const takenKey = `outgoing|${moveName}|${yourSpecies}|${snapshot.turn}`;
       if (!battleSpecies.damageKeys[takenKey]) {
         battleSpecies.damageKeys[takenKey] = true;
-        updateObservedDamageRecord(formatRecord.observedTakenDamage, `${moveName}|${yourSpecies}`, Number(outgoingDelta.toFixed(1)));
+        updateObservedDamageRecord(formatRecord.observedTakenDamage, `${moveName}|${yourSpecies}`, normalizedDelta);
         updateObservedDamageRecord(
           formatRecord.observedTakenDamageByContext,
           `${moveName}|${yourSpecies}|${combatContextKey(previousYourActive, previousOpponentActive, fieldContext)}`,
-          Number(outgoingDelta.toFixed(1))
+          normalizedDelta
         );
         battleSpecies.outgoingDamage.push({
           key: takenKey,
           direction: "outgoing",
           turn: snapshot.turn,
           moveName,
-          percent: Number(outgoingDelta.toFixed(1)),
+          percent: normalizedDelta,
           attacker: clonePokemonSnapshot(previousYourActive),
           defender: clonePokemonSnapshot(previousOpponentActive),
           field: fieldForDamage ? structuredClone(fieldForDamage) : structuredClone(snapshot.field)

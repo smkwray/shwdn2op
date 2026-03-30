@@ -255,6 +255,27 @@ test("parser logs sourced HP changes so noisy damage windows can be filtered", (
   assert.ok(snapshot?.recentLog.some((line) => /hp change from rough skin/i.test(line)));
 });
 
+test("parser logs critical hits so observed damage learning can ignore them", () => {
+  const raw = `
+>battle-gen9uu-crit-log
+|init|battle
+|player|p1|You
+|player|p2|Opponent
+|tier|[Gen 9] UU
+|switch|p1a: Fezandipiti|Fezandipiti, L100|100/100
+|switch|p2a: Pincurchin|Pincurchin, L100|100/100
+|move|p1a: Fezandipiti|Moonblast|p2a: Pincurchin
+|-crit|p2a: Pincurchin
+|-damage|p2a: Pincurchin|35/100
+|turn|16
+|request|{"side":{"id":"p1","name":"You","pokemon":[{"ident":"p1: Fezandipiti","details":"Fezandipiti, L100","condition":"100/100","active":true,"stats":{"hp":380,"atk":176,"def":262,"spa":176,"spd":262,"spe":260},"moves":["Moonblast"]}]},"active":[{"moves":[{"move":"Moonblast","id":"moonblast","pp":15}]}]}
+`;
+  const rooms = new Map();
+  applyRawFrameToRoomMap(rooms, raw);
+  const snapshot = roomToSnapshot(rooms.get("battle-gen9uu-crit-log"));
+  assert.ok(snapshot?.recentLog.some((line) => /critical hit/i.test(line)));
+});
+
 test("team preview requests stay in preview phase and count as actionable before turn 1", () => {
   const raw = `
 >battle-gen9uu-preview-ready

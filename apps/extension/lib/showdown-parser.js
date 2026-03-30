@@ -648,6 +648,9 @@ function handleLine(room, line) {
       applyEffectSources(room, ensurePokemon(room, args[0]), args, 1);
       pushRecent(room.recentLog, "The target was immune.");
       return;
+    case "-crit":
+      pushRecent(room.recentLog, "It was a critical hit.");
+      return;
     case "-fail":
       pushRecent(room.recentLog, "A move or effect failed.");
       return;
