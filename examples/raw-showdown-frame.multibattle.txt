@@ -1,0 +1,16 @@
+>battle-gen9ou-alpha
+|init|battle
+|title|Alpha vs. Beta
+|tier|[Gen 9] OU
+|player|p1|Alpha|169
+|player|p2|Beta|169
+|turn|7
+|request|{"active":[{"moves":[{"move":"Earthquake","id":"earthquake","pp":16,"maxpp":16,"target":"normal","disabled":false}]}],"side":{"name":"Alpha","id":"p1","pokemon":[{"ident":"p1: Ting-Lu","details":"Ting-Lu, L100","condition":"100/100","active":true,"moves":["earthquake"],"baseAbility":"vesselofruin"},{"ident":"p1: Gholdengo","details":"Gholdengo, L100","condition":"72/100","active":false,"moves":["makeitrain"],"baseAbility":"goodasgold"}]}}
+>battle-gen9ou-omega
+|init|battle
+|title|Gamma vs. Delta
+|tier|[Gen 9] OU
+|player|p1|Gamma|169
+|player|p2|Delta|169
+|turn|11
+|request|{"active":[{"moves":[{"move":"Moonblast","id":"moonblast","pp":16,"maxpp":16,"target":"normal","disabled":false}]}],"side":{"name":"Gamma","id":"p1","pokemon":[{"ident":"p1: Iron Valiant","details":"Iron Valiant, L100","condition":"84/100","active":true,"moves":["moonblast"],"baseAbility":"quarkdrive"},{"ident":"p1: Great Tusk","details":"Great Tusk, L100","condition":"61/100","active":false,"moves":["rapidspin"],"baseAbility":"protosynthesis"}]}}

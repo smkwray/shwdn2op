@@ -1,0 +1,337 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "BattleSnapshot",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "capturedAt",
+    "roomId",
+    "format",
+    "turn",
+    "phase",
+    "yourSide",
+    "opponentSide",
+    "field",
+    "legalActions",
+    "recentLog",
+    "notes"
+  ],
+  "properties": {
+    "version": {
+      "type": "string"
+    },
+    "capturedAt": {
+      "type": "string"
+    },
+    "roomId": {
+      "type": "string"
+    },
+    "title": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "format": {
+      "type": "string"
+    },
+    "turn": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "phase": {
+      "type": "string",
+      "enum": [
+        "preview",
+        "turn",
+        "finished",
+        "unknown"
+      ]
+    },
+    "yourSide": {
+      "$ref": "#/$defs/sideSnapshot"
+    },
+    "opponentSide": {
+      "$ref": "#/$defs/sideSnapshot"
+    },
+    "field": {
+      "$ref": "#/$defs/fieldSnapshot"
+    },
+    "legalActions": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/legalAction"
+      },
+      "maxItems": 30
+    },
+    "recentLog": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 25
+    },
+    "rawRequestSummary": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": true
+    },
+    "notes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 20
+    }
+  },
+  "$defs": {
+    "sideSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "slot",
+        "name",
+        "active",
+        "team"
+      ],
+      "properties": {
+        "slot": {
+          "type": "string"
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "active": {
+          "$ref": "#/$defs/pokemonSnapshot"
+        },
+        "team": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/pokemonSnapshot"
+          },
+          "maxItems": 12
+        }
+      }
+    },
+    "pokemonSnapshot": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "required": [
+        "ident",
+        "species",
+        "displayName",
+        "conditionText",
+        "hpPercent",
+        "status",
+        "fainted",
+        "active",
+        "revealed",
+        "boosts",
+        "knownMoves",
+        "item",
+        "ability",
+        "types",
+        "teraType",
+        "terastallized"
+      ],
+      "properties": {
+        "ident": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "species": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "displayName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "conditionText": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "hpPercent": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "fainted": {
+          "type": "boolean"
+        },
+        "active": {
+          "type": "boolean"
+        },
+        "revealed": {
+          "type": "boolean"
+        },
+        "boosts": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer"
+          }
+        },
+        "knownMoves": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 12
+        },
+        "item": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ability": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "types": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 3
+        },
+        "teraType": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "terastallized": {
+          "type": "boolean"
+        }
+      }
+    },
+    "fieldSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "weather",
+        "terrain",
+        "pseudoWeather",
+        "yourSideConditions",
+        "opponentSideConditions"
+      ],
+      "properties": {
+        "weather": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "terrain": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pseudoWeather": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 12
+        },
+        "yourSideConditions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 12
+        },
+        "opponentSideConditions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 12
+        }
+      }
+    },
+    "legalAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "label"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "move",
+            "switch",
+            "special"
+          ]
+        },
+        "label": {
+          "type": "string"
+        },
+        "moveName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "target": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pp": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "disabled": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "details": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    }
+  }
+}

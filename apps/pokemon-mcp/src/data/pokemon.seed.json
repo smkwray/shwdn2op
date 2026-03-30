@@ -1,0 +1,187 @@
+{
+  "Great Tusk": {
+    "types": [
+      "Ground",
+      "Fighting"
+    ],
+    "roles": [
+      "bulky utility",
+      "rapid spinner",
+      "physical attacker"
+    ],
+    "commonItems": [
+      "Heavy-Duty Boots",
+      "Booster Energy",
+      "Leftovers"
+    ],
+    "commonMoves": [
+      "Headlong Rush",
+      "Knock Off",
+      "Rapid Spin",
+      "Ice Spinner",
+      "Stealth Rock"
+    ],
+    "commonTeraTypes": [
+      "Water",
+      "Steel",
+      "Fire"
+    ]
+  },
+  "Gholdengo": {
+    "types": [
+      "Steel",
+      "Ghost"
+    ],
+    "roles": [
+      "special attacker",
+      "hazard control blocker"
+    ],
+    "commonItems": [
+      "Leftovers",
+      "Choice Scarf",
+      "Air Balloon"
+    ],
+    "commonMoves": [
+      "Make It Rain",
+      "Shadow Ball",
+      "Recover",
+      "Nasty Plot"
+    ],
+    "commonTeraTypes": [
+      "Flying",
+      "Fairy",
+      "Steel"
+    ]
+  },
+  "Kingambit": {
+    "types": [
+      "Dark",
+      "Steel"
+    ],
+    "roles": [
+      "late-game cleaner",
+      "priority attacker"
+    ],
+    "commonItems": [
+      "Black Glasses",
+      "Leftovers",
+      "Air Balloon"
+    ],
+    "commonMoves": [
+      "Kowtow Cleave",
+      "Sucker Punch",
+      "Iron Head",
+      "Swords Dance"
+    ],
+    "commonTeraTypes": [
+      "Flying",
+      "Dark",
+      "Fairy"
+    ]
+  },
+  "Dragapult": {
+    "types": [
+      "Dragon",
+      "Ghost"
+    ],
+    "roles": [
+      "fast special attacker",
+      "mixed attacker",
+      "pivot"
+    ],
+    "commonItems": [
+      "Choice Specs",
+      "Heavy-Duty Boots",
+      "Choice Band"
+    ],
+    "commonMoves": [
+      "Draco Meteor",
+      "Shadow Ball",
+      "U-turn",
+      "Flamethrower"
+    ],
+    "commonTeraTypes": [
+      "Ghost",
+      "Dragon",
+      "Steel"
+    ]
+  },
+  "Samurott-Hisui": {
+    "types": [
+      "Water",
+      "Dark"
+    ],
+    "roles": [
+      "hazard lead",
+      "spiker"
+    ],
+    "commonItems": [
+      "Focus Sash",
+      "Heavy-Duty Boots",
+      "Ceaseless Edge utility"
+    ],
+    "commonMoves": [
+      "Ceaseless Edge",
+      "Razor Shell",
+      "Knock Off",
+      "Aqua Jet"
+    ],
+    "commonTeraTypes": [
+      "Ghost",
+      "Dark",
+      "Water"
+    ]
+  },
+  "Ting-Lu": {
+    "types": [
+      "Dark",
+      "Ground"
+    ],
+    "roles": [
+      "special wall",
+      "hazard setter"
+    ],
+    "commonItems": [
+      "Leftovers",
+      "Rocky Helmet"
+    ],
+    "commonMoves": [
+      "Spikes",
+      "Stealth Rock",
+      "Earthquake",
+      "Whirlwind",
+      "Ruination"
+    ],
+    "commonTeraTypes": [
+      "Water",
+      "Poison",
+      "Fairy"
+    ]
+  },
+  "Iron Valiant": {
+    "types": [
+      "Fairy",
+      "Fighting"
+    ],
+    "roles": [
+      "mixed attacker",
+      "setup sweeper"
+    ],
+    "commonItems": [
+      "Booster Energy",
+      "Choice Specs",
+      "Life Orb"
+    ],
+    "commonMoves": [
+      "Moonblast",
+      "Close Combat",
+      "Thunderbolt",
+      "Encore"
+    ],
+    "commonTeraTypes": [
+      "Ghost",
+      "Fairy",
+      "Electric"
+    ]
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "name": "@showdnass/companion",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "test": "node --import tsx --test src/test/*.test.ts",
+    "start": "node dist/index.js",
+    "smoke:mock": "tsx src/tools/smoke.ts mock ../../examples/battle-snapshot.gen9ou.turn14.json",
+    "smoke:codex": "tsx src/tools/smoke.ts codex ../../examples/battle-snapshot.gen9ou.turn14.json",
+    "smoke:claude": "tsx src/tools/smoke.ts claude ../../examples/battle-snapshot.gen9ou.turn14.json",
+    "smoke:gemini": "tsx src/tools/smoke.ts gemini ../../examples/battle-snapshot.gen9ou.turn14.json"
+  },
+  "dependencies": {
+    "@fastify/cors": "^9.0.1",
+    "@pkmn/data": "^0.10.7",
+    "@pkmn/dex": "^0.10.7",
+    "@smogon/calc": "^0.11.0",
+    "fastify": "^4.28.1",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.1"
+  }
+}

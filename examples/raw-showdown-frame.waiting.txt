@@ -1,0 +1,8 @@
+>battle-gen9ou-waiting
+|init|battle
+|title|Alice vs. Bob
+|tier|[Gen 9] OU
+|player|p1|Alice|169
+|player|p2|Bob|169
+|turn|5
+|request|{"wait":true,"side":{"name":"Alice","id":"p1","pokemon":[{"ident":"p1: Great Tusk","details":"Great Tusk, L100","condition":"100/100","active":true,"moves":["earthquake"],"baseAbility":"protosynthesis"}]}}

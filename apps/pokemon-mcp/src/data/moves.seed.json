@@ -1,0 +1,82 @@
+{
+  "Headlong Rush": {
+    "type": "Ground",
+    "category": "Physical",
+    "power": 120
+  },
+  "Knock Off": {
+    "type": "Dark",
+    "category": "Physical",
+    "power": 65
+  },
+  "Rapid Spin": {
+    "type": "Normal",
+    "category": "Physical",
+    "power": 50
+  },
+  "Ice Spinner": {
+    "type": "Ice",
+    "category": "Physical",
+    "power": 80
+  },
+  "Draco Meteor": {
+    "type": "Dragon",
+    "category": "Special",
+    "power": 130
+  },
+  "Shadow Ball": {
+    "type": "Ghost",
+    "category": "Special",
+    "power": 80
+  },
+  "Make It Rain": {
+    "type": "Steel",
+    "category": "Special",
+    "power": 120
+  },
+  "Recover": {
+    "type": "Normal",
+    "category": "Status",
+    "power": null
+  },
+  "Sucker Punch": {
+    "type": "Dark",
+    "category": "Physical",
+    "power": 70
+  },
+  "Kowtow Cleave": {
+    "type": "Dark",
+    "category": "Physical",
+    "power": 85
+  },
+  "Ceaseless Edge": {
+    "type": "Dark",
+    "category": "Physical",
+    "power": 65
+  },
+  "Moonblast": {
+    "type": "Fairy",
+    "category": "Special",
+    "power": 95
+  },
+  "Close Combat": {
+    "type": "Fighting",
+    "category": "Physical",
+    "power": 120
+  },
+  "Earthquake": {
+    "type": "Ground",
+    "category": "Physical",
+    "power": 100
+  },
+  "Spikes": {
+    "type": "Ground",
+    "category": "Status",
+    "power": null
+  },
+  "Stealth Rock": {
+    "type": "Rock",
+    "category": "Status",
+    "power": null
+  }
+}

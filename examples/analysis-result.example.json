@@ -1,0 +1,58 @@
+{
+  "summary": "Rapid Spin is the safest broad-value line because it removes Stealth Rock, improves speed, and still pressures a weakened Dragapult that is already burned.",
+  "topChoiceActionId": "move:rapidspin",
+  "rankedActions": [
+    {
+      "actionId": "move:rapidspin",
+      "label": "Rapid Spin",
+      "score": 0.82,
+      "rationale": "It improves board state immediately, keeps Great Tusk healthy for later, and is less punishable than a raw Ground move into possible immunities or pivots.",
+      "assumptions": [
+        "Dragapult is unlikely to stay in repeatedly at low health.",
+        "Hazard removal has ongoing value for the rest of the game."
+      ],
+      "risks": [
+        "If Dragapult stays and attacks, Great Tusk still takes chip.",
+        "This may miss a direct KO if a stronger attack was safe."
+      ]
+    },
+    {
+      "actionId": "move:knockoff",
+      "label": "Knock Off",
+      "score": 0.74,
+      "rationale": "Knock Off is flexible and punishes a switch while still threatening Dragapult.",
+      "assumptions": [
+        "Opponent may pivot out of Dragapult."
+      ],
+      "risks": [
+        "Does not remove hazards.",
+        "May be weaker than the immediate best damage line."
+      ]
+    },
+    {
+      "actionId": "move:icespinner",
+      "label": "Ice Spinner",
+      "score": 0.67,
+      "rationale": "Direct pressure into Dragapult can be attractive if you mainly want to threaten the current active slot.",
+      "assumptions": [
+        "You value immediate tempo over hazard control."
+      ],
+      "risks": [
+        "Loses value if the opponent switches to a sturdier resist or check."
+      ]
+    }
+  ],
+  "assumptions": [
+    "No unrevealed immunity pivot makes Headlong Rush clearly best.",
+    "You prefer a stable second-opinion line over an all-in punish."
+  ],
+  "dangerFlags": [
+    "Do not blindly click Headlong Rush if a Ghost or Levitate pivot is still plausible.",
+    "If Great Tusk is a key win condition, avoid unnecessary chip."
+  ],
+  "toolsUsed": [
+    "type_effectiveness",
+    "common_sets"
+  ],
+  "confidence": "medium"
+}

@@ -1,0 +1,125 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>shwdn2op</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main class="wrap">
+      <div class="hero">
+        <h1>shwdn2op</h1>
+        <p>Showdown second-opinion settings, panel toggles, and manual analysis.</p>
+      </div>
+
+      <section class="toggle-group">
+        <h2>Panels</h2>
+
+        <label class="checkbox">
+          <input id="showLocalIntelPanel" type="checkbox" />
+          <span>Show Local Intel panel</span>
+        </label>
+
+        <label class="checkbox">
+          <input id="showOpponentActionPanel" type="checkbox" />
+          <span>Show Line To Respect panel</span>
+        </label>
+
+        <label class="checkbox">
+          <input id="showSelfActionPanel" type="checkbox" />
+          <span>Show Best Line panel</span>
+        </label>
+
+        <label class="checkbox">
+          <input id="showDamagePanel" type="checkbox" />
+          <span>Show Damage Matrix panel</span>
+        </label>
+
+        <label class="checkbox">
+          <input id="showMechanicsPanel" type="checkbox" />
+          <span>Show Mechanics panel</span>
+        </label>
+
+        <label class="checkbox">
+          <input id="showDebugPanel" type="checkbox" />
+          <span>Show Debug panel</span>
+        </label>
+      </section>
+
+      <label class="field">
+        <span>Companion URL</span>
+        <input id="companionUrl" type="url" placeholder="http://127.0.0.1:6127" />
+      </label>
+
+      <label class="field">
+        <span>Provider</span>
+        <select id="provider">
+          <option value="mock">mock</option>
+          <option value="codex">codex</option>
+          <option value="claude">claude</option>
+          <option value="gemini">gemini</option>
+        </select>
+      </label>
+
+      <label class="field" id="codexModelRow">
+        <span>Codex model</span>
+        <select id="codexModel"></select>
+      </label>
+
+      <label class="field" id="claudeModelRow">
+        <span>Claude model</span>
+        <select id="claudeModel"></select>
+      </label>
+
+      <label class="field" id="geminiModelRow">
+        <span>Gemini model</span>
+        <select id="geminiModel"></select>
+      </label>
+
+      <label class="checkbox">
+        <input id="autoDownloadReplay" type="checkbox" />
+        <span>Auto-save replay after game</span>
+      </label>
+
+      <section class="toggle-group">
+        <h2>Analysis Window</h2>
+
+        <label class="checkbox">
+          <input id="showOverlay" type="checkbox" />
+          <span>Show Ask a Friend panel</span>
+        </label>
+      </section>
+
+      <div class="actions">
+        <button id="save">Save</button>
+        <button id="analyze" class="primary">Ask a Friend</button>
+      </div>
+
+      <section class="status">
+        <div class="status-row">
+          <strong>Companion</strong>
+          <span id="health">checking...</span>
+        </div>
+        <div class="status-row">
+          <strong>Room status</strong>
+          <span id="roomStatus">unknown</span>
+        </div>
+        <div class="status-row">
+          <strong>Snapshot</strong>
+          <span id="snapshotInfo">unknown</span>
+        </div>
+      </section>
+
+      <section class="result">
+        <h2>Latest Analysis</h2>
+        <div id="summary">No analysis yet.</div>
+      </section>
+
+      <footer class="foot">
+        <code>Alt+Shift+S</code> shows or hides your shwdn2op windows.
+      </footer>
+    </main>
+
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

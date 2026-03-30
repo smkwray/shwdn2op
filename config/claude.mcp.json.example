@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "pokemon-local": {
+      "command": "npm",
+      "args": ["exec", "--", "tsx", "apps/pokemon-mcp/src/index.ts"],
+      "env": {}
+    }
+  }
+}

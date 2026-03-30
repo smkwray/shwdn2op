@@ -1,0 +1,221 @@
+{
+  "version": "0.1.0",
+  "capturedAt": "2026-03-28T14:32:10.000Z",
+  "roomId": "battle-gen9ou-123456789",
+  "title": "Alice vs. Bob",
+  "format": "[Gen 9] OU",
+  "turn": 14,
+  "phase": "turn",
+  "yourSide": {
+    "slot": "p1",
+    "name": "Alice",
+    "active": {
+      "ident": "p1: Great Tusk",
+      "species": "Great Tusk",
+      "displayName": "Great Tusk",
+      "level": 100,
+      "conditionText": "68/100",
+      "hpPercent": 68,
+      "status": null,
+      "fainted": false,
+      "active": true,
+      "revealed": true,
+      "boosts": {},
+      "stats": {
+        "atk": 315
+      },
+      "knownMoves": [
+        "headlongrush",
+        "knockoff",
+        "rapidspin",
+        "icespinner"
+      ],
+      "item": null,
+      "ability": "protosynthesis",
+      "types": [],
+      "teraType": "Water",
+      "terastallized": false
+    },
+    "team": [
+      {
+        "ident": "p1: Great Tusk",
+        "species": "Great Tusk",
+        "displayName": "Great Tusk",
+        "level": 100,
+        "conditionText": "68/100",
+        "hpPercent": 68,
+        "status": null,
+        "fainted": false,
+        "active": true,
+        "revealed": true,
+        "boosts": {},
+        "stats": {
+          "atk": 315
+        },
+        "knownMoves": [
+          "headlongrush",
+          "knockoff",
+          "rapidspin",
+          "icespinner"
+        ],
+        "item": null,
+        "ability": "protosynthesis",
+        "types": [],
+        "teraType": "Water",
+        "terastallized": false
+      },
+      {
+        "ident": "p1: Gholdengo",
+        "species": "Gholdengo",
+        "displayName": "Gholdengo",
+        "level": 100,
+        "conditionText": "72/100",
+        "hpPercent": 72,
+        "status": null,
+        "fainted": false,
+        "active": false,
+        "revealed": true,
+        "boosts": {},
+        "stats": {
+          "spa": 319
+        },
+        "knownMoves": [
+          "makeitrain",
+          "shadowball",
+          "recover",
+          "nastyplot"
+        ],
+        "item": null,
+        "ability": "goodasgold",
+        "types": [],
+        "teraType": "Flying",
+        "terastallized": false
+      }
+    ]
+  },
+  "opponentSide": {
+    "slot": "p2",
+    "name": "Bob",
+    "active": {
+      "ident": "p2: Dragapult",
+      "species": "Dragapult",
+      "displayName": "Dragapult",
+      "level": 100,
+      "conditionText": "54/100 brn",
+      "hpPercent": 54,
+      "status": "brn",
+      "fainted": false,
+      "active": true,
+      "revealed": true,
+      "boosts": {},
+      "stats": {},
+      "knownMoves": [
+        "Draco Meteor"
+      ],
+      "item": null,
+      "ability": null,
+      "types": [],
+      "teraType": null,
+      "terastallized": false
+    },
+    "team": [
+      {
+        "ident": "p2: Dragapult",
+        "species": "Dragapult",
+        "displayName": "Dragapult",
+        "level": 100,
+        "conditionText": "54/100 brn",
+        "hpPercent": 54,
+        "status": "brn",
+        "fainted": false,
+        "active": true,
+        "revealed": true,
+        "boosts": {},
+        "stats": {},
+        "knownMoves": [
+          "Draco Meteor"
+        ],
+        "item": null,
+        "ability": null,
+        "types": [],
+        "teraType": null,
+        "terastallized": false
+      }
+    ]
+  },
+  "field": {
+    "weather": null,
+    "terrain": null,
+    "pseudoWeather": [],
+    "yourSideConditions": [],
+    "opponentSideConditions": []
+  },
+  "legalActions": [
+    {
+      "id": "move:headlongrush",
+      "kind": "move",
+      "label": "Headlong Rush",
+      "moveName": "Headlong Rush",
+      "target": "normal",
+      "pp": 8,
+      "disabled": false,
+      "details": "Tera available"
+    },
+    {
+      "id": "move:knockoff",
+      "kind": "move",
+      "label": "Knock Off",
+      "moveName": "Knock Off",
+      "target": "normal",
+      "pp": 16,
+      "disabled": false,
+      "details": "Tera available"
+    },
+    {
+      "id": "move:rapidspin",
+      "kind": "move",
+      "label": "Rapid Spin",
+      "moveName": "Rapid Spin",
+      "target": "normal",
+      "pp": 32,
+      "disabled": false,
+      "details": "Tera available"
+    },
+    {
+      "id": "move:icespinner",
+      "kind": "move",
+      "label": "Ice Spinner",
+      "moveName": "Ice Spinner",
+      "target": "normal",
+      "pp": 24,
+      "disabled": false,
+      "details": "Tera available"
+    },
+    {
+      "id": "switch:p1: Gholdengo",
+      "kind": "switch",
+      "label": "Switch to Gholdengo",
+      "moveName": null,
+      "target": "p1: Gholdengo",
+      "pp": null,
+      "disabled": null,
+      "details": "72%"
+    }
+  ],
+  "recentLog": [
+    "Dragapult entered the field.",
+    "Turn 13 started.",
+    "Dragapult used Draco Meteor.",
+    "Turn 14 started."
+  ],
+  "rawRequestSummary": {
+    "forceSwitch": false,
+    "wait": false,
+    "teamPreview": false,
+    "sideId": "p1",
+    "canTerastallize": "Water"
+  },
+  "notes": [
+    "Terastallization is available."
+  ]
+}

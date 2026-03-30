@@ -1,0 +1,14 @@
+>battle-gen9ou-123456789
+|init|battle
+|title|Alice vs. Bob
+|tier|[Gen 9] OU
+|player|p1|Alice|169
+|player|p2|Bob|169
+|poke|p1|Great Tusk, L100, M
+|poke|p2|Dragapult, L100
+|switch|p2a: Dragapult|Dragapult, L100|100/100
+|turn|13
+|move|p2a: Dragapult|Draco Meteor|p1a: Great Tusk
+|-damage|p2a: Dragapult|54/100 brn
+|turn|14
+|request|{"active":[{"moves":[{"move":"Headlong Rush","id":"headlongrush","pp":8,"maxpp":8,"target":"normal","disabled":false},{"move":"Knock Off","id":"knockoff","pp":16,"maxpp":16,"target":"normal","disabled":false},{"move":"Rapid Spin","id":"rapidspin","pp":32,"maxpp":32,"target":"normal","disabled":false},{"move":"Ice Spinner","id":"icespinner","pp":24,"maxpp":24,"target":"normal","disabled":false}],"canTerastallize":"Water"}],"side":{"name":"Alice","id":"p1","pokemon":[{"ident":"p1: Great Tusk","details":"Great Tusk, L100, M","condition":"68/100","active":true,"stats":{"atk":315},"moves":["headlongrush","knockoff","rapidspin","icespinner"],"baseAbility":"protosynthesis","item":"","teraType":"Water"},{"ident":"p1: Gholdengo","details":"Gholdengo, L100","condition":"72/100","active":false,"stats":{"spa":319},"moves":["makeitrain","shadowball","recover","nastyplot"],"baseAbility":"goodasgold","item":"","teraType":"Flying"}]}}

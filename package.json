@@ -1,0 +1,35 @@
+{
+  "name": "showdnass",
+  "private": true,
+  "version": "0.1.0",
+  "license": "MIT",
+  "description": "Local Pokemon Showdown assistant using Codex or Claude CLI subscriptions",
+  "workspaces": [
+    "apps/companion",
+    "apps/pokemon-mcp"
+  ],
+  "engines": {
+    "node": ">=20.10.0"
+  },
+  "scripts": {
+    "companion:dev": "npm run dev --workspace @showdnass/companion",
+    "companion:build": "npm run build --workspace @showdnass/companion",
+    "companion:start": "npm run start --workspace @showdnass/companion",
+    "mcp:serve": "npm run mcp:serve --workspace @showdnass/pokemon-mcp",
+    "mcp:build": "npm run build --workspace @showdnass/pokemon-mcp",
+    "test": "node --test apps/extension/lib/*.test.js && node --import tsx --test apps/companion/src/test/*.test.ts",
+    "test:parser": "node --test apps/extension/lib/*.test.js",
+    "test:companion": "node --import tsx --test apps/companion/src/test/*.test.ts",
+    "replay:extract": "node --import tsx scripts/replay-extract.ts",
+    "replay:eval": "node --import tsx scripts/replay-eval.ts",
+    "smoke:codex": "npm run smoke:codex --workspace @showdnass/companion",
+    "smoke:claude": "npm run smoke:claude --workspace @showdnass/companion",
+    "smoke:gemini": "npm run smoke:gemini --workspace @showdnass/companion",
+    "smoke:mock": "npm run smoke:mock --workspace @showdnass/companion"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
+  },
+  "type": "module"
+}

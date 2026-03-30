@@ -1,0 +1,124 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://showdnass.local/schemas/replay-policy-example.schema.json",
+  "title": "ReplayPolicyExample",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "extractedAt",
+    "source",
+    "snapshot",
+    "label",
+    "candidateFeatures",
+    "observation",
+    "notes"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "replay-policy-example@0.1"
+    },
+    "extractedAt": {
+      "type": "string"
+    },
+    "source": {
+      "type": "object",
+      "required": [
+        "replayFile",
+        "replayKind",
+        "format",
+        "roomId",
+        "turn",
+        "actingSide"
+      ],
+      "properties": {
+        "replayFile": { "type": "string" },
+        "replayKind": { "enum": ["log", "html"] },
+        "format": { "type": "string" },
+        "roomId": { "type": "string" },
+        "turn": { "type": "integer", "minimum": 1 },
+        "actingSide": { "enum": ["p1", "p2"] },
+        "actingPlayerName": { "type": ["string", "null"] },
+        "opponentPlayerName": { "type": ["string", "null"] },
+        "winnerSide": { "enum": ["p1", "p2", null] },
+        "didActingSideWin": { "type": ["boolean", "null"] }
+      },
+      "additionalProperties": false
+    },
+    "snapshot": {
+      "$ref": "./battle-snapshot.schema.json"
+    },
+    "label": {
+      "type": "object",
+      "required": ["actionId", "kind", "label"],
+      "properties": {
+        "actionId": { "type": "string" },
+        "kind": { "enum": ["move", "switch"] },
+        "label": { "type": "string" },
+        "moveName": { "type": "string" },
+        "switchTargetSpecies": { "type": "string" },
+        "revealedThisTurn": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "candidateFeatures": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["actionId", "kind", "label", "reasons", "riskFlags"],
+        "properties": {
+          "actionId": { "type": "string" },
+          "kind": { "enum": ["move", "switch", "special"] },
+          "label": { "type": "string" },
+          "moveName": { "type": "string" },
+          "switchTargetSpecies": { "type": "string" },
+          "deterministicScore": { "type": "number" },
+          "scoreBreakdown": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["key", "label", "value"],
+              "properties": {
+                "key": { "type": "string" },
+                "label": { "type": "string" },
+                "value": { "type": "number" }
+              },
+              "additionalProperties": false
+            }
+          },
+          "reasons": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "riskFlags": {
+            "type": "array",
+            "items": { "type": "string" }
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "observation": {
+      "type": "object",
+      "required": [
+        "knownMoveCount",
+        "hiddenMoveSlots",
+        "reserveCount",
+        "opponentRevealedCount",
+        "opponentReserveCount"
+      ],
+      "properties": {
+        "knownMoveCount": { "type": "integer", "minimum": 0 },
+        "hiddenMoveSlots": { "type": "integer", "minimum": 0, "maximum": 4 },
+        "reserveCount": { "type": "integer", "minimum": 0 },
+        "opponentRevealedCount": { "type": "integer", "minimum": 0 },
+        "opponentReserveCount": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "notes": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  },
+  "additionalProperties": false
+}

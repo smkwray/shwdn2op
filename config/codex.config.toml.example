@@ -1,0 +1,10 @@
+model = "gpt-5.4-mini"
+
+[mcp_servers.pokemon_local]
+command = "npm"
+args = ["exec", "--", "tsx", "apps/pokemon-mcp/src/index.ts"]
+cwd = "."
+enabled = true
+required = false
+startup_timeout_sec = 20
+tool_timeout_sec = 30
