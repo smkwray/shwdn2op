@@ -18,6 +18,8 @@ import type {
 } from "../types.js";
 
 const gens = new Generations(Dex as any);
+const SEARCH_PLAYER_TOP_K = 4;
+const SEARCH_OPPONENT_TOP_K = 3;
 
 function normalizeName(value: string | null | undefined) {
   return String(value ?? "")
@@ -215,6 +217,18 @@ function summarizeBestThreat(threats: ThreatPreview[]) {
   return best;
 }
 
+function summarizeThreatForMove(threats: ThreatPreview[], moveName: string | null | undefined) {
+  const normalizedMove = normalizeName(moveName);
+  if (!normalizedMove) return null;
+  const entry = threats.find((candidate) => normalizeName(candidate.moveName) === normalizedMove);
+  if (!entry) return null;
+  return {
+    entry,
+    target: entry.currentTarget,
+    band: likelyBand(entry.currentTarget?.bands)
+  };
+}
+
 function summarizeBestDamage(previews: DamagePreview[]) {
   let best: { entry: DamagePreview; band: DamageAssumptionBand | null } | null = null;
   let bestScore = Number.NEGATIVE_INFINITY;
@@ -243,13 +257,19 @@ function moveTargetsSpecificFoe(move: ReturnType<typeof lookupMove>) {
   return !["self", "allySide", "allyTeam", "foeSide", "all", "allAdjacent", "scripted", "adjacentAlly", "allyAlly"].includes(target);
 }
 
+function hasPositiveBoosts(boosts: Record<string, number> | null | undefined) {
+  if (!boosts) return false;
+  return Object.values(boosts).some((value) => Number(value) > 0);
+}
+
 function moveRole(move: ReturnType<typeof lookupMove>) {
   const id = normalizeName(move?.name);
   const hazardMove = ["stealthrock", "spikes", "toxicspikes", "stickyweb"].includes(normalizeName(String(move?.sideCondition ?? "")));
   const hazardRemovalMove = ["defog", "rapidspin", "mortalspin", "tidyup", "courtchange"].includes(id);
   const pivotMove = Boolean(move?.selfSwitch) || ["uturn", "voltswitch", "flipturn", "partingshot", "chillyreception", "batonpass", "teleport"].includes(id);
   const recoveryMove = Boolean(move?.heal) || /recover|roost|slackoff|softboiled|moonlight|morningsun|wish|rest/i.test(String(move?.name ?? ""));
-  const setupMove = Boolean(move?.boosts) || Boolean(move?.self?.boosts);
+  const setupMove = hasPositiveBoosts(move?.self?.boosts as Record<string, number> | undefined)
+    || (moveTargetsSpecificFoe(move) ? false : hasPositiveBoosts(move?.boosts as Record<string, number> | undefined));
   const targetedStatusMove = moveTargetsSpecificFoe(move) && (Boolean(move?.status) || Boolean(move?.volatileStatus));
   return {
     hazardMove,
@@ -324,6 +344,17 @@ function scoreComponentsForOutput(components: ActionScoreComponent[]) {
     .sort((a, b) => Math.abs(b.value) - Math.abs(a.value));
 }
 
+function weightedOpponentReplies(prediction: OpponentActionPrediction | undefined) {
+  const topActions = (prediction?.topActions ?? []).slice(0, SEARCH_OPPONENT_TOP_K);
+  if (topActions.length === 0) return [] as Array<{ candidate: OpponentActionPrediction["topActions"][number]; weight: number }>;
+  const total = topActions.reduce((sum, candidate, index) => sum + Math.max(0.1, Number(candidate.score ?? 0)) * (index === 0 ? 1.15 : 1), 0);
+  if (!Number.isFinite(total) || total <= 0) return [] as Array<{ candidate: OpponentActionPrediction["topActions"][number]; weight: number }>;
+  return topActions.map((candidate, index) => ({
+    candidate,
+    weight: (Math.max(0.1, Number(candidate.score ?? 0)) * (index === 0 ? 1.15 : 1)) / total
+  }));
+}
+
 function hazardPressureOnYourSide(snapshot: BattleSnapshot) {
   const normalized = (snapshot.field.yourSideConditions ?? []).map((value) => normalizeName(value));
   let pressure = 0;
@@ -396,6 +427,14 @@ function activeSackTolerance(params: {
   return Math.max(0, tolerance);
 }
 
+function activePreservePressure(params: {
+  snapshot: BattleSnapshot;
+  playerDamagePreview: DamagePreview[];
+  speedPreview?: SpeedPreview | undefined;
+}) {
+  return Math.max(0, activePreservationValue(params) - activeSackTolerance(params));
+}
+
 function switchFeelsSafe(band: DamageAssumptionBand | null | undefined) {
   return Boolean(
     isImmuneOrBlockedBand(band)
@@ -439,6 +478,12 @@ function damagePreviewForAction(action: LegalAction, previews: DamagePreview[]) 
     ?? null;
 }
 
+function hasSideCondition(conditions: string[], sideCondition: string | null | undefined) {
+  const expected = normalizeName(sideCondition);
+  if (!expected) return false;
+  return (conditions ?? []).some((value) => normalizeName(value) === expected);
+}
+
 function switchThreatSummaryForSpecies(threats: ThreatPreview[], species: string | null | undefined) {
   const normalizedSpecies = normalizeName(species);
   if (!normalizedSpecies) return [] as Array<{ entry: ThreatPreview; target: ThreatTargetPreview; band: DamageAssumptionBand | null }>;
@@ -467,6 +512,613 @@ function bestSwitchThreat(threats: ThreatPreview[], species: string | null | und
     }
   }
   return best;
+}
+
+function switchThreatForMove(threats: ThreatPreview[], moveName: string | null | undefined, species: string | null | undefined) {
+  const normalizedMove = normalizeName(moveName);
+  const normalizedSpecies = normalizeName(species);
+  if (!normalizedMove || !normalizedSpecies) return null;
+  const threat = threats.find((entry) => normalizeName(entry.moveName) === normalizedMove);
+  const target = threat?.switchTargets?.find((candidate) => normalizeName(candidate.species) === normalizedSpecies);
+  if (!threat || !target) return null;
+  return {
+    entry: threat,
+    target,
+    band: likelyBand(target.bands)
+  };
+}
+
+function findOpponentPokemon(snapshot: BattleSnapshot, species: string | null | undefined) {
+  const normalized = normalizeName(species);
+  if (!normalized) return null;
+  return snapshot.opponentSide.team.find((pokemon) => {
+    const names = uniqueStrings([pokemon.species, pokemon.displayName, pokemon.ident]);
+    return names.some((name) => normalizeName(name) === normalized);
+  }) ?? null;
+}
+
+function moveEffectivenessAgainstTarget(
+  gen: ReturnType<typeof dataGen>,
+  move: ReturnType<typeof lookupMove>,
+  target: PokemonSnapshot | null | undefined
+) {
+  if (!move || !target || String(move.category ?? "") === "Status") return null;
+  const types = currentBattleTypes(gen, target);
+  if (types.length === 0) return null;
+  return Number(gen.types.totalEffectiveness(move.type as any, types as any));
+}
+
+function safeIntoThreatBand(band: DamageAssumptionBand | null | undefined) {
+  return !band || isImmuneOrBlockedBand(band) || (band.coverage === "misses_current_hp" && bandMaxPercent(band) <= 45);
+}
+
+type ProjectedBranchState = {
+  hpSwingPercent: number;
+  tempoGain: number;
+  cleanKo: boolean;
+  safeSetup: boolean;
+  preserveActive: boolean;
+  activeStillPressured: boolean;
+  establishHazard: boolean;
+  removeHazards: boolean;
+};
+
+function projectedBoardValueDelta(params: {
+  snapshot: BattleSnapshot;
+  yourReserveCount: number;
+  opponentReserveCount: number;
+  state: ProjectedBranchState;
+}) {
+  let value = 0;
+
+  if (Number.isFinite(params.state.hpSwingPercent)) {
+    value += Math.max(-12, Math.min(12, Number(params.state.hpSwingPercent) * 0.1));
+  }
+
+  if (Number.isFinite(params.state.tempoGain)) {
+    value += Math.max(-8, Math.min(8, Number(params.state.tempoGain)));
+  }
+
+  if (params.state.cleanKo) {
+    if (params.opponentReserveCount <= 0) value += veryLateTurn(params.snapshot) ? 18 : lateTurn(params.snapshot) ? 14 : 0;
+    else if (params.opponentReserveCount === 1) value += veryLateTurn(params.snapshot) ? 12 : lateTurn(params.snapshot) ? 8 : 0;
+    else if (params.opponentReserveCount === 2 && veryLateTurn(params.snapshot)) value += 6;
+  }
+
+  if (params.state.safeSetup) {
+    if (veryLateTurn(params.snapshot)) value += 12 + Math.max(0, 2 - params.opponentReserveCount) * 3;
+    else if (lateTurn(params.snapshot)) value += 8 + Math.max(0, 2 - params.opponentReserveCount) * 2;
+  }
+
+  if (params.state.preserveActive) {
+    value += 4 + (lateTurn(params.snapshot) ? 2 : 0) + Math.max(0, 2 - params.yourReserveCount);
+  }
+
+  if (params.state.activeStillPressured) {
+    value -= 5 + (lateTurn(params.snapshot) ? 2 : 0);
+  }
+
+  if (params.state.establishHazard) {
+    if (lateTurn(params.snapshot) && params.opponentReserveCount <= 1) value -= 14;
+    else if (veryLateTurn(params.snapshot) && params.opponentReserveCount <= 2) value -= 10;
+    else if (params.opponentReserveCount >= 3 && !lateTurn(params.snapshot)) value += 4;
+    else value += 1;
+  }
+
+  if (params.state.removeHazards) {
+    value += hazardPressureOnYourSide(params.snapshot) * 1.6;
+    if (veryLateTurn(params.snapshot)) value += 2;
+  }
+
+  return Number(value.toFixed(1));
+}
+
+function makeProjectedBranchState(state: Partial<ProjectedBranchState>): ProjectedBranchState {
+  return {
+    hpSwingPercent: Number(state.hpSwingPercent ?? 0),
+    tempoGain: Number(state.tempoGain ?? 0),
+    cleanKo: Boolean(state.cleanKo),
+    safeSetup: Boolean(state.safeSetup),
+    preserveActive: Boolean(state.preserveActive),
+    activeStillPressured: Boolean(state.activeStillPressured),
+    establishHazard: Boolean(state.establishHazard),
+    removeHazards: Boolean(state.removeHazards)
+  };
+}
+
+function searchContributionForMove(params: {
+  snapshot: BattleSnapshot;
+  action: LegalAction;
+  playerDamagePreview: DamagePreview[];
+  opponentThreatPreview: ThreatPreview[];
+  speedPreview?: SpeedPreview | undefined;
+  opponentActionPrediction?: OpponentActionPrediction | undefined;
+}) {
+  const replies = weightedOpponentReplies(params.opponentActionPrediction);
+  if (replies.length === 0) return { score: 0, reasons: [] as string[], riskFlags: [] as string[] };
+
+  const gen = dataGen(params.snapshot.format);
+  const move = lookupMove(gen, params.action.moveName ?? params.action.label);
+  const preview = damagePreviewForAction(params.action, params.playerDamagePreview);
+  const likely = likelyBand(preview?.bands);
+  const bestThreat = summarizeBestThreat(params.opponentThreatPreview);
+  const bestThreatBand = bestThreat?.band ?? null;
+  const priority = Number(move?.priority ?? 0);
+  const orderRelation = moveOrderRelation(params.snapshot, params.speedPreview, priority);
+  const { hazardMove, hazardRemovalMove, pivotMove, recoveryMove, setupMove, targetedStatusMove } = moveRole(move);
+  const existingHazard = hasSideCondition(params.snapshot.field.opponentSideConditions, String(move?.sideCondition ?? ""));
+  const immediatePressure = bandAveragePercent(likely);
+  const preservePressure = activePreservePressure({
+    snapshot: params.snapshot,
+    playerDamagePreview: params.playerDamagePreview,
+    speedPreview: params.speedPreview
+  });
+  const activeHp = Number(params.snapshot.yourSide.active?.hpPercent ?? 100);
+  const reserveCount = livingReserveCount(params.snapshot.yourSide.team);
+  const opponentReserveCount = livingReserveCount(params.snapshot.opponentSide.team);
+  const endgameSetupWindow = setupMove && activeHp >= 55 && reserveCount <= 2;
+  const cleanKo = likelyKoLine(likely, orderRelation);
+  const searchReasons: string[] = [];
+  const searchRisks: string[] = [];
+  let punishedLikelySwitchTarget = false;
+  let punishedSpecificStayAttack = false;
+  let rewardedLikelySwitchPunish = false;
+  let preserveRisk = false;
+  let preserveReward = false;
+  let setupConversionReward = false;
+  let lateHazardDrag = false;
+  let endgameCollapseReward = false;
+  let expectedScore = 0;
+
+  for (const reply of replies) {
+    let branchScore = 0;
+    if (reply.candidate.actionClass === "stay_attack") {
+      const specificThreat = summarizeThreatForMove(params.opponentThreatPreview, reply.candidate.moveName);
+      const replyThreatBand = specificThreat?.band ?? bestThreatBand;
+      const projectedEnemyDamage = cleanKo && (orderRelation === "faster" || orderRelation === "priority")
+        ? 0
+        : bandAveragePercent(replyThreatBand);
+      const projectedHpSwing = (cleanKo ? 100 : immediatePressure) - projectedEnemyDamage;
+      const projectedTempoGain = (
+        (orderRelation === "faster" || orderRelation === "priority" ? 4 : orderRelation === "overlap" ? 1 : -3)
+        + (pivotMove ? 2 : 0)
+        - (replyThreatBand?.coverage === "covers_current_hp" ? 2 : 0)
+      );
+      if (cleanKo) {
+        branchScore += 18;
+      } else if (immediatePressure >= 55) {
+        branchScore += 6;
+      }
+
+      if (pivotMove && orderRelation !== "slower" && orderRelation !== "last") {
+        branchScore += 6;
+      }
+
+      if ((hazardMove || hazardRemovalMove || setupMove || recoveryMove) && replyThreatBand) {
+        if (replyThreatBand.coverage === "covers_current_hp" && orderRelation !== "faster" && orderRelation !== "priority") {
+          branchScore -= 18;
+          punishedSpecificStayAttack = true;
+        } else if (replyThreatBand.coverage === "can_cover_current_hp" && orderRelation !== "faster" && orderRelation !== "priority") {
+          branchScore -= 10;
+          punishedSpecificStayAttack = true;
+        }
+      }
+
+      if (preservePressure > 0 && reserveCount > 0 && !likelyKoLine(likely, orderRelation) && !pivotMove) {
+        if (replyThreatBand?.coverage === "covers_current_hp") {
+          const penalty = recoveryMove && orderRelation === "faster"
+            ? Math.max(0, 4 + preservePressure * 0.4)
+            : 6 + preservePressure * 1.2;
+          branchScore -= penalty;
+          preserveRisk = true;
+        } else if (replyThreatBand?.coverage === "can_cover_current_hp" && activeHp <= 45 && !recoveryMove) {
+          branchScore -= 3 + preservePressure * 0.8;
+          preserveRisk = true;
+        } else if (recoveryMove && activeHp <= 45) {
+          branchScore += 4 + preservePressure * 0.8;
+          preserveReward = true;
+        }
+      }
+
+      if (targetedStatusMove && isStatusBand(likely)) {
+        branchScore += 4;
+      }
+
+      const branchState = makeProjectedBranchState({
+        hpSwingPercent: projectedHpSwing,
+        tempoGain: projectedTempoGain,
+        cleanKo: cleanKo && safeIntoThreatBand(replyThreatBand),
+        safeSetup: endgameSetupWindow && safeIntoThreatBand(replyThreatBand),
+        preserveActive: recoveryMove && activeHp <= 45 && replyThreatBand?.coverage !== "covers_current_hp",
+        activeStillPressured: preservePressure > 0 && !cleanKo && !pivotMove && (
+          replyThreatBand?.coverage === "covers_current_hp"
+          || (replyThreatBand?.coverage === "can_cover_current_hp" && activeHp <= 45 && !recoveryMove)
+        ),
+        establishHazard: hazardMove && !existingHazard,
+        removeHazards: hazardRemovalMove && hazardPressureOnYourSide(params.snapshot) > 0 && safeIntoThreatBand(replyThreatBand)
+      });
+      const boardValueDelta = projectedBoardValueDelta({
+        snapshot: params.snapshot,
+        yourReserveCount: reserveCount,
+        opponentReserveCount,
+        state: branchState
+      });
+      branchScore += boardValueDelta;
+      if (boardValueDelta > 0 && branchState.cleanKo) {
+        endgameCollapseReward = true;
+      }
+      if (boardValueDelta > 0 && branchState.safeSetup) {
+        setupConversionReward = true;
+      }
+    } else if (reply.candidate.actionClass === "switch") {
+      const switchTarget = findOpponentPokemon(params.snapshot, reply.candidate.switchTargetSpecies);
+      const effectiveness = moveEffectivenessAgainstTarget(gen, move, switchTarget);
+      const switchPunishDamage = effectiveness === null
+        ? 0
+        : effectiveness <= 0
+          ? 0
+          : effectiveness < 1
+            ? immediatePressure * 0.45
+            : effectiveness >= 2
+              ? Math.max(immediatePressure, 65)
+              : Math.max(immediatePressure, 35);
+      const projectedTempoGain = (pivotMove ? 4 : 0) + (hazardMove && !existingHazard ? 1 : 0) + (setupMove ? 2 : 0);
+      if (effectiveness !== null) {
+        if (effectiveness <= 0) {
+          branchScore -= 18;
+          punishedLikelySwitchTarget = true;
+        } else if (effectiveness < 1) {
+          branchScore -= 10;
+          punishedLikelySwitchTarget = true;
+        } else if (effectiveness >= 2) {
+          branchScore += 12;
+          rewardedLikelySwitchPunish = true;
+        } else if (effectiveness > 1) {
+          branchScore += 6;
+          rewardedLikelySwitchPunish = true;
+        }
+      }
+
+      if (hazardMove && !existingHazard) {
+        branchScore += 16;
+      }
+      if (setupMove) {
+        branchScore += 12;
+      }
+      if (pivotMove) {
+        branchScore += 10;
+      }
+      if (recoveryMove) {
+        branchScore += 4;
+      }
+      if (targetedStatusMove) {
+        branchScore -= 6;
+      }
+      if (!hazardMove && !setupMove && !pivotMove && immediatePressure < 45) {
+        branchScore -= 5;
+      }
+
+      if (pivotMove && preservePressure > 0 && activeHp <= 45) {
+        branchScore += 3 + preservePressure * 0.5;
+        preserveReward = true;
+      }
+
+      const branchState = makeProjectedBranchState({
+        hpSwingPercent: switchPunishDamage,
+        tempoGain: projectedTempoGain,
+        safeSetup: endgameSetupWindow && opponentReserveCount <= 2,
+        preserveActive: pivotMove && preservePressure > 0 && activeHp <= 45,
+        establishHazard: hazardMove && !existingHazard,
+        removeHazards: hazardRemovalMove && hazardPressureOnYourSide(params.snapshot) > 0
+      });
+      const boardValueDelta = projectedBoardValueDelta({
+        snapshot: params.snapshot,
+        yourReserveCount: reserveCount,
+        opponentReserveCount,
+        state: branchState
+      });
+      branchScore += boardValueDelta;
+      if (boardValueDelta > 0 && branchState.safeSetup) {
+        setupConversionReward = true;
+      }
+    } else if (reply.candidate.actionClass === "status_or_setup") {
+      const projectedTempoGain = (
+        (bandCoverageScore(likely) >= 1 || immediatePressure >= 50 ? 2 : 0)
+        + (setupMove ? 2 : 0)
+        + (hazardMove && !existingHazard ? 1 : 0)
+      );
+      if (bandCoverageScore(likely) >= 1 || immediatePressure >= 50) {
+        branchScore += 10;
+      }
+      if (setupMove) {
+        branchScore -= 10;
+      }
+      if (hazardMove && !existingHazard) {
+        branchScore += 4;
+      }
+
+      const branchState = makeProjectedBranchState({
+        hpSwingPercent: immediatePressure * 0.4,
+        tempoGain: projectedTempoGain,
+        safeSetup: endgameSetupWindow && safeIntoThreatBand(bestThreatBand),
+        establishHazard: hazardMove && !existingHazard
+      });
+      const boardValueDelta = projectedBoardValueDelta({
+        snapshot: params.snapshot,
+        yourReserveCount: reserveCount,
+        opponentReserveCount,
+        state: branchState
+      });
+      branchScore += boardValueDelta;
+      if (boardValueDelta > 0 && branchState.safeSetup) {
+        setupConversionReward = true;
+      }
+    }
+
+    if (hazardMove && !existingHazard) {
+      if ((lateTurn(params.snapshot) && opponentReserveCount <= 1) || (veryLateTurn(params.snapshot) && opponentReserveCount <= 2)) {
+        lateHazardDrag = true;
+      }
+    }
+
+    if (reply.candidate.source === "likely") {
+      branchScore *= 0.9;
+    }
+    expectedScore += branchScore * reply.weight;
+  }
+
+  const rounded = Number(expectedScore.toFixed(1));
+  if (rewardedLikelySwitchPunish) {
+    searchReasons.push("punishes the likely switch target");
+  }
+  if (punishedLikelySwitchTarget) {
+    searchRisks.push("likely switch target blunts this line");
+  }
+  if (punishedSpecificStayAttack) {
+    searchRisks.push("top opposing punish line still contests this");
+  }
+  if (preserveRisk) {
+    searchRisks.push("staying risks a still-valuable active");
+  }
+  if (preserveReward) {
+    searchReasons.push("preserves a pressured active across likely replies");
+  }
+  if (setupConversionReward) {
+    searchReasons.push("setup converts well if this turn sticks");
+  }
+  if (lateHazardDrag) {
+    searchRisks.push("hazards may be too slow for this game state");
+  }
+  if (endgameCollapseReward) {
+    searchReasons.push("clean hit sharply improves the endgame");
+  }
+
+  if (rounded >= 6) {
+    searchReasons.push("holds up across likely replies");
+  } else if (rounded >= 3) {
+    searchReasons.push("still acceptable into the main reply tree");
+  } else if (rounded <= -6) {
+    searchRisks.push("fragile if the opponent's top replies are right");
+  } else if (rounded <= -3) {
+    searchRisks.push("reply tree is shakier than the base score suggests");
+  }
+
+  return { score: rounded, reasons: searchReasons, riskFlags: searchRisks };
+}
+
+function searchContributionForSwitch(params: {
+  snapshot: BattleSnapshot;
+  action: LegalAction;
+  opponentThreatPreview: ThreatPreview[];
+  playerDamagePreview: DamagePreview[];
+  speedPreview?: SpeedPreview | undefined;
+  opponentActionPrediction?: OpponentActionPrediction | undefined;
+}) {
+  const replies = weightedOpponentReplies(params.opponentActionPrediction);
+  const target = switchTargetForAction(params.snapshot, params.action);
+  if (replies.length === 0 || !target) return { score: 0, reasons: [] as string[], riskFlags: [] as string[] };
+
+  const bestIntoSwitch = bestSwitchThreat(params.opponentThreatPreview, target.species ?? target.displayName);
+  const switchBand = bestIntoSwitch?.band ?? null;
+  const hazardInfo = estimateSwitchEntryHazards(params.snapshot, target);
+  const switchRelation = bestIntoSwitch?.target?.relation ?? "unknown";
+  const preservePressure = activePreservePressure({
+    snapshot: params.snapshot,
+    playerDamagePreview: params.playerDamagePreview,
+    speedPreview: params.speedPreview
+  });
+  const activeHp = Number(params.snapshot.yourSide.active?.hpPercent ?? 100);
+  const reserveCount = livingReserveCount(params.snapshot.yourSide.team);
+  const opponentReserveCount = livingReserveCount(params.snapshot.opponentSide.team);
+  const searchReasons: string[] = [];
+  const searchRisks: string[] = [];
+  let matchedSpecificMove = false;
+  let specificMovePunish = false;
+  let preserveReward = false;
+  let expectedScore = 0;
+
+  for (const reply of replies) {
+    let branchScore = 0;
+    if (reply.candidate.actionClass === "stay_attack") {
+      const specificThreat = switchThreatForMove(
+        params.opponentThreatPreview,
+        reply.candidate.moveName,
+        target.species ?? target.displayName
+      );
+      const replyBand = specificThreat?.band ?? switchBand;
+      const projectedEnemyDamage = bandAveragePercent(replyBand) + hazardInfo.damagePercent;
+      const projectedTempoGain = (switchFeelsSafe(replyBand) ? 3 : -2) + (switchRelation === "faster" ? 2 : switchRelation === "slower" ? -1 : 0);
+      if (specificThreat) matchedSpecificMove = true;
+
+      if (switchFeelsGreat(replyBand)) {
+        branchScore += 18;
+      } else if (switchFeelsSafe(replyBand)) {
+        branchScore += 10;
+      } else if (replyBand?.coverage === "can_cover_current_hp") {
+        branchScore -= 10;
+        if (specificThreat) specificMovePunish = true;
+      } else if (replyBand?.coverage === "covers_current_hp") {
+        branchScore -= 18;
+        if (specificThreat) specificMovePunish = true;
+      }
+
+      if (preservePressure > 0 && reserveCount > 0 && switchFeelsSafe(replyBand)) {
+        branchScore += 4 + preservePressure * 1.1;
+        preserveReward = true;
+      }
+
+      const branchState = makeProjectedBranchState({
+        hpSwingPercent: -projectedEnemyDamage,
+        tempoGain: projectedTempoGain,
+        preserveActive: preservePressure > 0 && reserveCount > 0 && switchFeelsSafe(replyBand),
+        activeStillPressured: !switchFeelsSafe(replyBand) && (replyBand?.coverage === "covers_current_hp" || replyBand?.coverage === "can_cover_current_hp")
+      });
+      const boardValueDelta = projectedBoardValueDelta({
+        snapshot: params.snapshot,
+        yourReserveCount: reserveCount,
+        opponentReserveCount,
+        state: branchState
+      });
+      branchScore += boardValueDelta;
+    } else if (reply.candidate.actionClass === "switch") {
+      branchScore -= 10;
+      if (hazardsPunishOpponentSwitches(params.snapshot)) {
+        branchScore += 3;
+      }
+      if (preservePressure > 0 && activeHp <= 35) {
+        branchScore += 2 + preservePressure * 0.4;
+        preserveReward = true;
+      }
+
+      const branchState = makeProjectedBranchState({
+        hpSwingPercent: -hazardInfo.damagePercent,
+        tempoGain: -2,
+        preserveActive: preservePressure > 0 && activeHp <= 35
+      });
+      const boardValueDelta = projectedBoardValueDelta({
+        snapshot: params.snapshot,
+        yourReserveCount: reserveCount,
+        opponentReserveCount,
+        state: branchState
+      });
+      branchScore += boardValueDelta;
+    } else if (reply.candidate.actionClass === "status_or_setup") {
+      branchScore += switchFeelsSafe(switchBand) ? 4 : -2;
+      if (switchRelation === "faster") {
+        branchScore += 3;
+      }
+      if (preservePressure > 0 && switchFeelsSafe(switchBand)) {
+        branchScore += 2 + preservePressure * 0.5;
+        preserveReward = true;
+      }
+
+      const branchState = makeProjectedBranchState({
+        hpSwingPercent: -hazardInfo.damagePercent * 0.6,
+        tempoGain: switchFeelsSafe(switchBand) ? 2 : -1,
+        preserveActive: preservePressure > 0 && switchFeelsSafe(switchBand)
+      });
+      const boardValueDelta = projectedBoardValueDelta({
+        snapshot: params.snapshot,
+        yourReserveCount: reserveCount,
+        opponentReserveCount,
+        state: branchState
+      });
+      branchScore += boardValueDelta;
+    }
+
+    if (hazardInfo.damagePercent >= 25) branchScore -= 8;
+    else if (hazardInfo.damagePercent >= 12.5) branchScore -= 4;
+    if (hazardInfo.stickyWeb) branchScore -= 3;
+
+    if (reply.candidate.source === "likely") {
+      branchScore *= 0.9;
+    }
+    expectedScore += branchScore * reply.weight;
+  }
+
+  const rounded = Number(expectedScore.toFixed(1));
+  if (matchedSpecificMove && !specificMovePunish) {
+    searchReasons.push("lines up well into their top attacking move");
+  }
+  if (specificMovePunish) {
+    searchRisks.push("their top attacking move still pressures this switch");
+  }
+  if (preserveReward) {
+    searchReasons.push("preserves a pressured active across likely replies");
+  }
+
+  if (rounded >= 6) {
+    searchReasons.push("best against the opponent's likely reply tree");
+  } else if (rounded >= 3) {
+    searchReasons.push("still gains value across common replies");
+  } else if (rounded <= -6) {
+    searchRisks.push("reply-aware check dislikes this switch");
+  } else if (rounded <= -3) {
+    searchRisks.push("opponent replies reduce the value of this switch");
+  }
+
+  return { score: rounded, reasons: searchReasons, riskFlags: searchRisks };
+}
+
+function applyReplyAwareSearch(params: {
+  snapshot: BattleSnapshot;
+  candidates: SelfActionCandidate[];
+  legalActions: LegalAction[];
+  playerDamagePreview: DamagePreview[];
+  opponentThreatPreview: ThreatPreview[];
+  speedPreview?: SpeedPreview | undefined;
+  opponentActionPrediction?: OpponentActionPrediction | undefined;
+}) {
+  const topActionIds = new Set(
+    params.candidates
+      .slice()
+      .sort((a, b) => b.score - a.score || a.label.localeCompare(b.label))
+      .slice(0, SEARCH_PLAYER_TOP_K)
+      .map((candidate) => candidate.actionId)
+  );
+  const actionById = new Map(params.legalActions.map((action) => [action.id, action]));
+
+  return params.candidates.map((candidate) => {
+    if (!topActionIds.has(candidate.actionId)) {
+      return candidate;
+    }
+
+    const action = actionById.get(candidate.actionId);
+    if (!action) return candidate;
+
+    const searchContribution = candidate.kind === "switch"
+      ? searchContributionForSwitch({
+          snapshot: params.snapshot,
+          action,
+          opponentThreatPreview: params.opponentThreatPreview,
+          playerDamagePreview: params.playerDamagePreview,
+          speedPreview: params.speedPreview,
+          opponentActionPrediction: params.opponentActionPrediction
+        })
+      : searchContributionForMove({
+          snapshot: params.snapshot,
+          action,
+          playerDamagePreview: params.playerDamagePreview,
+          opponentThreatPreview: params.opponentThreatPreview,
+          speedPreview: params.speedPreview,
+          opponentActionPrediction: params.opponentActionPrediction
+        });
+
+    if (!searchContribution.score) {
+      return candidate;
+    }
+
+    const nextBreakdown = [...(candidate.scoreBreakdown ?? []).filter((entry) => entry.key !== "search")];
+    pushScoreComponent(nextBreakdown, "search", "Reply-aware search", searchContribution.score);
+
+    return {
+      ...candidate,
+      score: clampScore(candidate.score + searchContribution.score),
+      reasons: uniqueStrings([...candidate.reasons, ...searchContribution.reasons]).slice(0, 4),
+      riskFlags: uniqueStrings([...candidate.riskFlags, ...searchContribution.riskFlags]).slice(0, 4),
+      scoreBreakdown: scoreComponentsForOutput(nextBreakdown)
+    };
+  });
 }
 
 function scoreConfidenceTier(topScore: number, runnerUpScore: number, topAction: SelfActionCandidate | undefined) {
@@ -981,7 +1633,17 @@ export function buildSelfActionRecommendation(params: {
 
   if (candidates.length === 0) return undefined;
 
-  const rankedActions = candidates
+  const searchedCandidates = applyReplyAwareSearch({
+    snapshot: params.snapshot,
+    candidates,
+    legalActions,
+    playerDamagePreview,
+    opponentThreatPreview,
+    speedPreview: params.speedPreview,
+    opponentActionPrediction: params.opponentActionPrediction
+  });
+
+  const rankedActions = searchedCandidates
     .sort((a, b) => b.score - a.score || a.label.localeCompare(b.label));
   const top = rankedActions[0];
   const confidenceTier = scoreConfidenceTier(top?.score ?? 0, rankedActions[1]?.score ?? 0, top);

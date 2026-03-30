@@ -3296,6 +3296,12 @@ test("self recommender prefers a priority KO over slower setup", async () => {
   assert.ok(
     recommendation?.rankedActions[0]?.reasons.some((reason) => /priority|KO/i.test(reason))
   );
+  assert.ok(
+    (recommendation?.rankedActions[0]?.scoreBreakdown ?? []).some((entry) => entry.key === "search" && entry.value > 0)
+  );
+  assert.ok(
+    (recommendation?.rankedActions[0]?.reasons ?? []).some((reason) => /endgame/i.test(reason))
+  );
   const prompt = buildAnalysisPrompt(snapshot, { localIntel: intel, includeToolHint: false });
   assert.match(prompt, /Deterministic self-recommendation:/);
   assert.match(prompt, /move:bulletpunch/i);
@@ -3435,11 +3441,233 @@ test("self recommender prefers an immunity switch when staying gets punished", a
 
   const intel = await buildLocalIntelSnapshot(snapshot);
   const recommendation = intel.selfActionRecommendation;
+  const surf = recommendation?.rankedActions.find((candidate) => candidate.actionId === "move:surf");
   assert.ok(recommendation);
   assert.equal(recommendation?.topActionId, "switch:clodsire");
   assert.equal(recommendation?.rankedActions[0]?.switchTargetSpecies, "Clodsire");
   assert.ok(
     recommendation?.rankedActions[0]?.reasons.some((reason) => /safer than the obvious stay line|immunity/i.test(reason))
+  );
+  assert.ok(
+    (recommendation?.rankedActions[0]?.scoreBreakdown ?? []).some((entry) => entry.key === "search" && entry.value > 0)
+  );
+  assert.ok(
+    (surf?.scoreBreakdown ?? []).some((entry) => entry.key === "search" && entry.value < 0)
+  );
+  assert.ok(
+    (surf?.riskFlags ?? []).some((flag) => /still-valuable active/i.test(flag))
+  );
+});
+
+test("reply-aware search penalizes obvious immunity switch targets for moves", async () => {
+  const yourGreatTusk = makePokemon({
+    ident: "p1a: Great Tusk-search-move",
+    species: "Great Tusk",
+    displayName: "Great Tusk",
+    active: true,
+    hpPercent: 100,
+    knownMoves: ["Headlong Rush", "Stealth Rock"],
+    stats: { hp: 401, atk: 371, def: 298, spa: 126, spd: 219, spe: 339 },
+    types: ["Ground", "Fighting"]
+  });
+  const opponentGholdengo = makePokemon({
+    ident: "p2a: Gholdengo-search-move",
+    species: "Gholdengo",
+    displayName: "Gholdengo",
+    active: true,
+    hpPercent: 64,
+    knownMoves: ["Make It Rain", "Shadow Ball"],
+    stats: { hp: 304, atk: 176, def: 226, spa: 389, spd: 236, spe: 276 },
+    types: ["Steel", "Ghost"]
+  });
+  const opponentDragonite = makePokemon({
+    ident: "p2b: Dragonite-search-move",
+    species: "Dragonite",
+    displayName: "Dragonite",
+    hpPercent: 100,
+    knownMoves: ["Extreme Speed"],
+    stats: { hp: 386, atk: 403, def: 226, spa: 236, spd: 236, spe: 259 },
+    types: ["Dragon", "Flying"]
+  });
+
+  const snapshot = makeSnapshot({
+    roomId: "battle-self-recommend-search-move",
+    turn: 3,
+    yourSide: {
+      slot: "p1",
+      name: "You",
+      active: yourGreatTusk,
+      team: [yourGreatTusk]
+    },
+    opponentSide: {
+      slot: "p2",
+      name: "Opponent",
+      active: opponentGholdengo,
+      team: [opponentGholdengo, opponentDragonite]
+    },
+    legalActions: [
+      { id: "move:headlongrush", kind: "move", label: "Headlong Rush", moveName: "Headlong Rush" },
+      { id: "move:stealthrock", kind: "move", label: "Stealth Rock", moveName: "Stealth Rock" }
+    ]
+  });
+
+  const intel = await buildLocalIntelSnapshot(snapshot);
+  const recommendation = intel.selfActionRecommendation;
+  const headlongRush = recommendation?.rankedActions.find((candidate) => candidate.actionId === "move:headlongrush");
+  const stealthRock = recommendation?.rankedActions.find((candidate) => candidate.actionId === "move:stealthrock");
+
+  assert.ok(recommendation);
+  assert.ok(headlongRush);
+  assert.ok(stealthRock);
+  assert.ok(
+    (headlongRush?.scoreBreakdown ?? []).some((entry) => entry.key === "search" && entry.value < 0)
+  );
+  assert.ok(
+    (stealthRock?.scoreBreakdown ?? []).some((entry) => entry.key === "search" && entry.value > 0)
+  );
+  assert.ok(
+    !(headlongRush?.reasons ?? []).some((reason) => /setup window/i.test(reason))
+  );
+});
+
+test("reply-aware search discounts late hazards when few opposing pivots remain", async () => {
+  const yourGreatTusk = makePokemon({
+    ident: "p1a: Great Tusk-late-hazard",
+    species: "Great Tusk",
+    displayName: "Great Tusk",
+    active: true,
+    hpPercent: 82,
+    knownMoves: ["Headlong Rush", "Stealth Rock"],
+    stats: { hp: 401, atk: 371, def: 298, spa: 126, spd: 219, spe: 339 },
+    types: ["Ground", "Fighting"]
+  });
+  const opponentGholdengo = makePokemon({
+    ident: "p2a: Gholdengo-late-hazard",
+    species: "Gholdengo",
+    displayName: "Gholdengo",
+    active: true,
+    hpPercent: 66,
+    knownMoves: ["Make It Rain", "Shadow Ball"],
+    stats: { hp: 304, atk: 176, def: 226, spa: 389, spd: 236, spe: 276 },
+    types: ["Steel", "Ghost"]
+  });
+  const opponentDragonite = makePokemon({
+    ident: "p2b: Dragonite-late-hazard",
+    species: "Dragonite",
+    displayName: "Dragonite",
+    hpPercent: 100,
+    knownMoves: ["Extreme Speed"],
+    stats: { hp: 386, atk: 403, def: 226, spa: 236, spd: 236, spe: 259 },
+    types: ["Dragon", "Flying"]
+  });
+
+  const snapshot = makeSnapshot({
+    roomId: "battle-self-recommend-late-hazard",
+    turn: 13,
+    yourSide: {
+      slot: "p1",
+      name: "You",
+      active: yourGreatTusk,
+      team: [yourGreatTusk]
+    },
+    opponentSide: {
+      slot: "p2",
+      name: "Opponent",
+      active: opponentGholdengo,
+      team: [opponentGholdengo, opponentDragonite]
+    },
+    legalActions: [
+      { id: "move:headlongrush", kind: "move", label: "Headlong Rush", moveName: "Headlong Rush" },
+      { id: "move:stealthrock", kind: "move", label: "Stealth Rock", moveName: "Stealth Rock" }
+    ]
+  });
+
+  const intel = await buildLocalIntelSnapshot(snapshot);
+  const recommendation = intel.selfActionRecommendation;
+  const stealthRock = recommendation?.rankedActions.find((candidate) => candidate.actionId === "move:stealthrock");
+
+  assert.ok(recommendation);
+  assert.ok(stealthRock);
+  assert.ok(
+    (stealthRock?.scoreBreakdown ?? []).some((entry) => entry.key === "search" && entry.value < 0)
+  );
+  assert.ok(
+    (stealthRock?.riskFlags ?? []).some((flag) => /too slow/i.test(flag))
+  );
+});
+
+test("reply-aware search rewards safe setup conversion in a thin late game", async () => {
+  const yourScizor = makePokemon({
+    ident: "p1a: Scizor-setup-convert",
+    species: "Scizor",
+    displayName: "Scizor",
+    active: true,
+    hpPercent: 88,
+    knownMoves: ["Swords Dance", "Bullet Punch", "Roost"],
+    item: "Leftovers",
+    ability: "Technician",
+    stats: { hp: 344, atk: 394, def: 236, spa: 146, spd: 196, spe: 166 },
+    types: ["Bug", "Steel"]
+  });
+  const yourHydreigon = makePokemon({
+    ident: "p1b: Hydreigon-setup-convert",
+    species: "Hydreigon",
+    displayName: "Hydreigon",
+    stats: { hp: 324, atk: 309, def: 216, spa: 349, spd: 216, spe: 324 },
+    types: ["Dark", "Dragon"]
+  });
+  const opponentBlissey = makePokemon({
+    ident: "p2a: Blissey-setup-convert",
+    species: "Blissey",
+    displayName: "Blissey",
+    active: true,
+    hpPercent: 74,
+    knownMoves: ["Soft-Boiled", "Seismic Toss"],
+    stats: { hp: 714, atk: 56, def: 130, spa: 186, spd: 405, spe: 146 },
+    types: ["Normal"]
+  });
+  const opponentLatias = makePokemon({
+    ident: "p2b: Latias-setup-convert",
+    species: "Latias",
+    displayName: "Latias",
+    hpPercent: 62,
+    knownMoves: ["Draco Meteor"],
+    stats: { hp: 301, atk: 176, def: 216, spa: 319, spd: 296, spe: 350 },
+    types: ["Dragon", "Psychic"]
+  });
+
+  const snapshot = makeSnapshot({
+    roomId: "battle-self-recommend-setup-convert",
+    turn: 12,
+    yourSide: {
+      slot: "p1",
+      name: "You",
+      active: yourScizor,
+      team: [yourScizor, yourHydreigon]
+    },
+    opponentSide: {
+      slot: "p2",
+      name: "Opponent",
+      active: opponentBlissey,
+      team: [opponentBlissey, opponentLatias]
+    },
+    legalActions: [
+      { id: "move:swordsdance", kind: "move", label: "Swords Dance", moveName: "Swords Dance" },
+      { id: "move:bulletpunch", kind: "move", label: "Bullet Punch", moveName: "Bullet Punch" }
+    ]
+  });
+
+  const intel = await buildLocalIntelSnapshot(snapshot);
+  const recommendation = intel.selfActionRecommendation;
+  const swordsDance = recommendation?.rankedActions.find((candidate) => candidate.actionId === "move:swordsdance");
+
+  assert.ok(recommendation);
+  assert.ok(swordsDance);
+  assert.ok(
+    (swordsDance?.scoreBreakdown ?? []).some((entry) => entry.key === "search" && entry.value > 0)
+  );
+  assert.ok(
+    (swordsDance?.reasons ?? []).some((reason) => /setup converts well/i.test(reason))
   );
 });
 
@@ -3714,4 +3942,38 @@ test("last-mon boards do not frame opponent switching as part of the recommendat
   assert.ok(topAction);
   assert.ok(!(topAction?.reasons ?? []).some((reason) => /switch/i.test(reason)));
   assert.ok(!/switch/i.test(intel.selfActionRecommendation?.summary ?? ""));
+});
+
+test("strategic analysis prompt allows synthetic plan ids and emphasizes broader guidance", () => {
+  const snapshot = makeSnapshot({
+    roomId: "battle-strategic-prompt",
+    phase: "turn",
+    legalActions: []
+  });
+
+  const prompt = buildAnalysisPrompt(snapshot, {
+    analysisMode: "strategic",
+    includeToolHint: false
+  });
+
+  assert.match(prompt, /Analysis mode: strategic\./);
+  assert.match(prompt, /special:plan-primary, special:plan-secondary, special:plan-avoid/);
+  assert.match(prompt, /broader strategic guidance/i);
+  assert.match(prompt, /preserve vs sack decisions, scouting, tera timing, win conditions, hazard posture/i);
+});
+
+test("mock provider strategic mode emits strategic plan actions when no legal actions are present", async () => {
+  const { MockProvider } = await import("../providers/mockProvider.js");
+  const provider = new MockProvider();
+  const snapshot = makeSnapshot({
+    roomId: "battle-mock-strategic",
+    phase: "turn",
+    legalActions: []
+  });
+
+  const result = await provider.analyze(snapshot, { analysisMode: "strategic" });
+
+  assert.equal(result.topChoiceActionId, "special:plan-primary");
+  assert.equal(result.rankedActions[0]?.actionId, "special:plan-primary");
+  assert.match(result.summary, /preserve your highest-value piece/i);
 });

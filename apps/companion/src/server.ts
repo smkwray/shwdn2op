@@ -51,6 +51,7 @@ export function buildServer() {
     const body = parsed.data;
     const provider = getProvider(body.provider);
     const model = provider.resolveModel(body.model);
+    const analysisMode = body.analysisMode === "strategic" ? "strategic" : "tactical";
     const requestId = body.requestId ?? crypto.randomUUID();
     await updateLocalIntelFromSnapshot(body.snapshot);
     const localIntel = await buildLocalIntelSnapshot(body.snapshot);
@@ -59,11 +60,13 @@ export function buildServer() {
       const runResult = provider.analyzeDetailed
         ? await provider.analyzeDetailed(body.snapshot, {
             requestedModel: body.model,
+            analysisMode,
             localIntel
           })
         : {
             analysis: await provider.analyze(body.snapshot, {
               requestedModel: body.model,
+              analysisMode,
               localIntel
             }),
             providerDebug: undefined
@@ -73,6 +76,7 @@ export function buildServer() {
         analysis: runResult.analysis,
         provider: body.provider,
         model,
+        analysisMode,
         createdAt: new Date().toISOString(),
         requestId,
         providerDebug: runResult.providerDebug,

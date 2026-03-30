@@ -339,6 +339,7 @@ export interface LocalIntelSnapshot {
 export interface AnalyzeRequest {
   provider: ProviderName;
   model?: string;
+  analysisMode?: "tactical" | "strategic";
   requestId?: string;
   snapshot: BattleSnapshot;
 }
@@ -358,6 +359,7 @@ export interface AnalyzeResponse {
   analysis: AnalysisResult;
   provider: ProviderName;
   model: string;
+  analysisMode?: "tactical" | "strategic" | undefined;
   createdAt: string;
   requestId?: string | undefined;
   providerDebug?: ProviderDebug | undefined;

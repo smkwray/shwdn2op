@@ -85,6 +85,7 @@ export const analysisResultSchema = z.object({
 export const analyzeRequestSchema = z.object({
   provider: z.enum(["mock", "codex", "claude", "gemini"]),
   model: z.string().optional(),
+  analysisMode: z.enum(["tactical", "strategic"]).optional(),
   requestId: z.string().optional(),
   snapshot: battleSnapshotSchema
 });

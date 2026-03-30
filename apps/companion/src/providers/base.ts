@@ -2,6 +2,7 @@ import type { AnalysisResult, BattleSnapshot, LocalIntelSnapshot, ProviderDebug,
 
 export interface ProviderContext {
   requestedModel?: string | undefined;
+  analysisMode?: "tactical" | "strategic" | undefined;
   localIntel?: LocalIntelSnapshot | undefined;
 }
 

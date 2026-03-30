@@ -181,7 +181,7 @@ async function fetchCompanionHealth(settings) {
   }
 }
 
-async function runSingleAnalysisRequest(settings, snapshot, provider, model, signal) {
+async function runSingleAnalysisRequest(settings, snapshot, provider, model, analysisMode, signal) {
   const url = `${settings.companionUrl.replace(/\/$/, "")}/api/analyze`;
   const requestId = makeRequestId();
   const response = await fetch(url, {
@@ -191,6 +191,7 @@ async function runSingleAnalysisRequest(settings, snapshot, provider, model, sig
     body: JSON.stringify({
       provider,
       model,
+      analysisMode,
       requestId,
       snapshot
     })
@@ -326,8 +327,11 @@ async function analyzeTab(tabId, options = {}) {
   const state = getOrCreateTabState(tabId);
   const selection = buildTabSelection(state);
   const snapshot = selection.snapshot;
+  const analysisMode = options.analysisMode === "strategic" ? "strategic" : settings.analysisMode === "strategic" ? "strategic" : "tactical";
+  const allowStrategicSnapshot = analysisMode === "strategic" && Boolean(snapshot);
+  const canAnalyze = selection.status === TAB_STATUS.READY || allowStrategicSnapshot;
 
-  if (selection.status !== TAB_STATUS.READY || !snapshot) {
+  if (!canAnalyze || !snapshot) {
     const state = setTabStatus(tabId, selection);
     state.lastError = selection.message;
     if (settings.showOverlay || forceOverlay) {
@@ -335,6 +339,7 @@ async function analyzeTab(tabId, options = {}) {
         providerLabel: "local",
         turn: selection.room?.turn ?? "?",
         status: selection.status,
+        analysisMode,
         localIntel: state.lastLocalIntel ?? null,
         result: {
           summary: selection.message,
@@ -346,6 +351,7 @@ async function analyzeTab(tabId, options = {}) {
     return {
       ok: false,
       status: selection.status,
+      analysisMode,
       summary: selection.message,
       snapshot
     };
@@ -366,20 +372,21 @@ async function analyzeTab(tabId, options = {}) {
   state.lastProviderHealth = await fetchCompanionHealth(settings);
 
   if (settings.showOverlay || forceOverlay) {
-    await showOverlay(tabId, {
-      providerLabel: compareMode ? `compare:${provider}+${compareProvider}` : providerLabel(provider, model),
-      turn: snapshot.turn,
-      status: "analyzing",
-      localIntel: state.lastLocalIntel ?? null,
-      snapshot,
-      health: state.lastProviderHealth,
-      result: {
-        summary: compareMode
-          ? `Analyzing turn ${snapshot.turn} with ${providerLabel(provider, model)} and ${providerLabel(compareProvider, compareModel)}...`
-          : `Analyzing turn ${snapshot.turn} with ${providerLabel(provider, model)}...`,
-        rankedActions: [],
-        confidence: "low"
-      }
+      await showOverlay(tabId, {
+        providerLabel: compareMode ? `compare:${provider}+${compareProvider}` : providerLabel(provider, model),
+        turn: snapshot.turn,
+        status: "analyzing",
+        analysisMode,
+        localIntel: state.lastLocalIntel ?? null,
+        snapshot,
+        health: state.lastProviderHealth,
+        result: {
+          summary: compareMode
+          ? `Running ${analysisMode} analysis for turn ${snapshot.turn} with ${providerLabel(provider, model)} and ${providerLabel(compareProvider, compareModel)}...`
+          : `Running ${analysisMode} analysis for turn ${snapshot.turn} with ${providerLabel(provider, model)}...`,
+          rankedActions: [],
+          confidence: "low"
+        }
     });
   }
 
@@ -389,7 +396,7 @@ async function analyzeTab(tabId, options = {}) {
       ...(compareMode ? [{ provider: compareProvider, model: compareModel, kind: "compare" }] : [])
     ];
     const settled = await Promise.allSettled(
-      requests.map((entry) => runSingleAnalysisRequest(settings, snapshot, entry.provider, entry.model, abortController.signal))
+      requests.map((entry) => runSingleAnalysisRequest(settings, snapshot, entry.provider, entry.model, analysisMode, abortController.signal))
     );
     if (state.analysisRunSeq !== analysisRunId) {
       return { ok: false, status: "superseded", summary: "Superseded by a newer analysis request." };
@@ -402,6 +409,7 @@ async function analyzeTab(tabId, options = {}) {
         return {
           provider: request.provider,
           model: request.model,
+          analysisMode: result.analysisMode ?? analysisMode,
           providerLabel: providerLabel(request.provider, request.model),
           requestId: result.requestId ?? entry.value.requestId,
           result: result.analysis,
@@ -413,6 +421,7 @@ async function analyzeTab(tabId, options = {}) {
       return {
         provider: request.provider,
         model: request.model,
+        analysisMode,
         providerLabel: providerLabel(request.provider, request.model),
         requestId: error?.requestId ?? null,
         result: {
@@ -442,6 +451,7 @@ async function analyzeTab(tabId, options = {}) {
         providerLabel: compareMode ? `compare:${provider}+${compareProvider}` : providerLabel(provider, model),
         turn: snapshot.turn,
         status: TAB_STATUS.READY,
+        analysisMode,
         requestId: result.requestId ?? null,
         snapshot,
         localIntel: result.localIntel ?? null,
@@ -461,6 +471,7 @@ async function analyzeTab(tabId, options = {}) {
     return {
       ok: !result.error,
       status: result.error ? TAB_STATUS.PROVIDER_ERROR : TAB_STATUS.READY,
+      analysisMode,
       snapshot,
       analysis: result.result
     };
@@ -479,6 +490,7 @@ async function analyzeTab(tabId, options = {}) {
       providerLabel: compareMode ? `compare:${provider}+${compareProvider}` : providerLabel(provider, model),
       turn: snapshot.turn,
       status: TAB_STATUS.PROVIDER_ERROR,
+      analysisMode,
       localIntel: state.lastLocalIntel ?? null,
       snapshot,
       requestId: error?.requestId ?? null,
@@ -634,7 +646,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       sendResponse({ ok: false, error: "No tab id available." });
       return true;
     }
-    void analyzeTab(tabId, { forceOverlay: Boolean(message.forceOverlay) }).then((result) => sendResponse(result));
+    void analyzeTab(tabId, {
+      forceOverlay: Boolean(message.forceOverlay),
+      analysisMode: message.analysisMode
+    }).then((result) => sendResponse(result));
     return true;
   }
 

@@ -10,6 +10,7 @@ export const PROVIDER_MODEL_OPTIONS = {
     "opus"
   ],
   gemini: [
+    "gemini-3.1-pro",
     "gemini-3-flash-preview",
     "gemini-2.5-flash",
     "gemini-2.5-flash-lite"
@@ -22,6 +23,7 @@ export const DEFAULT_SETTINGS = {
   codexModel: "gpt-5.4-mini",
   claudeModel: "sonnet",
   geminiModel: "gemini-3-flash-preview",
+  analysisMode: "tactical",
   compareMode: false,
   compareProvider: "claude",
   compareCodexModel: "gpt-5.4-mini",

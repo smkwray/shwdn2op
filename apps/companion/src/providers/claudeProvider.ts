@@ -41,6 +41,7 @@ export class ClaudeProvider implements Provider {
 
   async analyzeDetailed(snapshot: BattleSnapshot, context: ProviderContext): Promise<ProviderRunResult> {
     const prompt = buildAnalysisPrompt(snapshot, {
+      analysisMode: context.analysisMode,
       includeToolHint: config.claudeEnableMcp,
       maxDeterministicNotes: 6,
       maxRecentLogEntries: 12,

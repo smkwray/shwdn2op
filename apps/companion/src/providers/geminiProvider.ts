@@ -39,6 +39,7 @@ export class GeminiProvider implements Provider {
 
   async analyzeDetailed(snapshot: BattleSnapshot, context: ProviderContext): Promise<ProviderRunResult> {
     const basePrompt = buildAnalysisPrompt(snapshot, {
+      analysisMode: context.analysisMode,
       includeToolHint: false,
       maxDeterministicNotes: 6,
       maxRecentLogEntries: 12,

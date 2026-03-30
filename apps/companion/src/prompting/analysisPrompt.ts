@@ -2,12 +2,17 @@ import type { BattleSnapshot, DamageAssumptionBand, LocalIntelSnapshot } from ".
 import { buildDeterministicNotes } from "./deterministicNotes.js";
 
 export interface AnalysisPromptOptions {
+  analysisMode?: "tactical" | "strategic" | undefined;
   includeToolHint?: boolean;
   maxDeterministicNotes?: number;
   maxRecentLogEntries?: number;
   maxSnapshotNotes?: number;
   prettySnapshot?: boolean;
   localIntel?: LocalIntelSnapshot | undefined;
+}
+
+function analysisModeForOptions(options: AnalysisPromptOptions): "tactical" | "strategic" {
+  return options.analysisMode === "strategic" ? "strategic" : "tactical";
 }
 
 function buildPromptSnapshot(snapshot: BattleSnapshot, options: AnalysisPromptOptions): BattleSnapshot {
@@ -95,6 +100,7 @@ function describeSelfRecommendationAction(
 }
 
 export function buildAnalysisPrompt(snapshot: BattleSnapshot, options: AnalysisPromptOptions = {}): string {
+  const analysisMode = analysisModeForOptions(options);
   const promptSnapshot = buildPromptSnapshot(snapshot, options);
   const compactSnapshot = JSON.stringify(promptSnapshot, null, options.prettySnapshot === false ? 0 : 2);
   const deterministicNotes = buildDeterministicNotes(promptSnapshot).slice(0, options.maxDeterministicNotes ?? 12);
@@ -237,22 +243,46 @@ export function buildAnalysisPrompt(snapshot: BattleSnapshot, options: AnalysisP
   const toolHint = options.includeToolHint === false
     ? []
     : ["- If MCP tools are available, you may use them for type matchups, move lookups, or seed common sets."];
+  const modeLines = analysisMode === "strategic"
+    ? [
+        "Task:",
+        "- Give broader strategic guidance from the current board state, hidden-info predictions, and deterministic previews.",
+        "- If snapshot.legalActions is non-empty, rank the best current legal actions by long-term strategic value.",
+        "- If snapshot.legalActions is empty or the move window has passed, use synthetic action IDs from this set only: special:plan-primary, special:plan-secondary, special:plan-avoid.",
+        "- Return structured JSON only.",
+        "",
+        "Rules:",
+        "- Use the deterministic predictions, posterior hints, speed clues, and damage ranges below as evidence, not as blind truth.",
+        "- Focus on preserve vs sack decisions, scouting, tera timing, win conditions, hazard posture, and what information matters next.",
+        "- Keep the output actionable for the next few turns, not just the immediate click.",
+        "- If you use a synthetic strategic action ID, make the label and rationale read like a concrete game-plan recommendation.",
+        ...toolHint,
+        "- Be concise and practical.",
+        "- This is a second opinion, not an autopilot."
+      ]
+    : [
+        "Task:",
+        "- Rank the legal actions in the provided snapshot.",
+        "- Return structured JSON only.",
+        "- Use only the legal action IDs that appear in snapshot.legalActions.",
+        "",
+        "Rules:",
+        "- Never invent illegal moves or switches.",
+        "- Use the deterministic predictions, posterior hints, speed clues, and damage ranges below as evidence, not as blind truth.",
+        "- Prefer the best practical current-turn recommendation from this board state.",
+        "- Prefer revealed information over guesses.",
+        "- If you make metagame assumptions, put them in assumptions fields.",
+        ...toolHint,
+        "- Be concise and practical.",
+        "- This is a second opinion, not an autopilot."
+      ];
 
   return [
     "You are a Pokemon Showdown second-opinion assistant.",
     "",
-    "Task:",
-    "- Rank the legal actions in the provided snapshot.",
-    "- Return structured JSON only.",
-    "- Use only the legal action IDs that appear in snapshot.legalActions.",
+    `Analysis mode: ${analysisMode}.`,
     "",
-    "Rules:",
-    "- Never invent illegal moves or switches.",
-    "- Prefer revealed information over guesses.",
-    "- If you make metagame assumptions, put them in assumptions fields.",
-    ...toolHint,
-    "- Be concise and practical.",
-    "- This is a second opinion, not an autopilot.",
+    ...modeLines,
     ...noteLines,
     ...structuredMechanicsLines,
     ...localIntelLines,

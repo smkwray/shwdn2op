@@ -42,6 +42,7 @@ export class CodexProvider implements Provider {
 
   async analyzeDetailed(snapshot: BattleSnapshot, context: ProviderContext): Promise<ProviderRunResult> {
     const prompt = buildAnalysisPrompt(snapshot, {
+      analysisMode: context.analysisMode,
       localIntel: context.localIntel
     });
     const model = this.resolveModel(context.requestedModel);

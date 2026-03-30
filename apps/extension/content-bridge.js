@@ -22,7 +22,7 @@ const PANEL_DEFS = [
 const OVERLAY_DEFAULT_OPTIONS = {
   codex: ["gpt-5.4-mini", "gpt-5.4", "gpt-5.3-codex-spark"],
   claude: ["sonnet", "haiku", "opus"],
-  gemini: ["gemini-3-flash-preview", "gemini-2.5-flash", "gemini-2.5-flash-lite"]
+  gemini: ["gemini-3.1-pro", "gemini-3-flash-preview", "gemini-2.5-flash", "gemini-2.5-flash-lite"]
 };
 
 const PANEL_SETTING_KEYS = {
@@ -48,6 +48,7 @@ if (!window.__showdownSecondOpinionContentBridgeInstalled) {
     codexModel: "gpt-5.4-mini",
     claudeModel: "sonnet",
     geminiModel: "gemini-3-flash-preview",
+    analysisMode: "tactical",
     compareMode: false,
     compareProvider: "claude",
     compareCodexModel: "gpt-5.4-mini",

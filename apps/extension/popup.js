@@ -8,6 +8,7 @@ const companionUrlEl = document.getElementById("companionUrl");
 const codexModelEl = document.getElementById("codexModel");
 const claudeModelEl = document.getElementById("claudeModel");
 const geminiModelEl = document.getElementById("geminiModel");
+const analysisModeEl = document.getElementById("analysisMode");
 const showOverlayEl = document.getElementById("showOverlay");
 const autoDownloadReplayEl = document.getElementById("autoDownloadReplay");
 const showLocalIntelPanelEl = document.getElementById("showLocalIntelPanel");
@@ -21,6 +22,7 @@ const snapshotInfoEl = document.getElementById("snapshotInfo");
 const roomStatusEl = document.getElementById("roomStatus");
 const healthEl = document.getElementById("health");
 const saveEl = document.getElementById("save");
+const analyzeEl = document.getElementById("analyze");
 
 function humanizeStatus(status) {
   switch (status) {
@@ -88,6 +90,7 @@ function buildSettingsPayload() {
     codexModel: codexModelEl.value,
     claudeModel: claudeModelEl.value,
     geminiModel: geminiModelEl.value,
+    analysisMode: analysisModeEl.value,
     showOverlay: showOverlayEl.checked,
     autoDownloadReplay: autoDownloadReplayEl.checked,
     showLocalIntelPanel: showLocalIntelPanelEl.checked,
@@ -101,12 +104,19 @@ function buildSettingsPayload() {
   };
 }
 
+function refreshAnalyzeButtonLabel() {
+  analyzeEl.textContent = analysisModeEl.value === "strategic"
+    ? "Ask a Friend: Strategic"
+    : "Ask a Friend: Tactical";
+}
+
 async function loadSettings() {
   const response = await chrome.runtime.sendMessage({ type: "get-settings" });
   const settings = response.settings;
   companionUrlEl.value = settings.companionUrl;
   providerEl.value = settings.provider;
   populateModelLists(settings);
+  analysisModeEl.value = settings.analysisMode || DEFAULT_SETTINGS.analysisMode;
   showOverlayEl.checked = Boolean(settings.showOverlay);
   autoDownloadReplayEl.checked = Boolean(settings.autoDownloadReplay);
   showLocalIntelPanelEl.checked = Boolean(settings.showLocalIntelPanel);
@@ -116,6 +126,7 @@ async function loadSettings() {
   showMechanicsPanelEl.checked = Boolean(settings.showMechanicsPanel);
   showDebugPanelEl.checked = Boolean(settings.showDebugPanel);
   refreshModelRows();
+  refreshAnalyzeButtonLabel();
 }
 
 async function saveSettings() {
@@ -207,11 +218,13 @@ async function analyzeCurrentTurn() {
     summaryEl.textContent = "No active tab.";
     return;
   }
-  summaryEl.textContent = "Running...";
+  const analysisMode = analysisModeEl.value || DEFAULT_SETTINGS.analysisMode;
+  summaryEl.textContent = analysisMode === "strategic" ? "Running strategic analysis..." : "Running tactical analysis...";
   const response = await chrome.runtime.sendMessage({
     type: "analyze-current-state",
     tabId: tab.id,
-    forceOverlay: true
+    forceOverlay: true,
+    analysisMode
   });
   if (!response?.ok) {
     roomStatusEl.textContent = humanizeStatus(response?.status);
@@ -228,6 +241,8 @@ providerEl.addEventListener("change", autoSaveSettings);
 codexModelEl.addEventListener("change", autoSaveSettings);
 claudeModelEl.addEventListener("change", autoSaveSettings);
 geminiModelEl.addEventListener("change", autoSaveSettings);
+analysisModeEl.addEventListener("change", refreshAnalyzeButtonLabel);
+analysisModeEl.addEventListener("change", autoSaveSettings);
 showOverlayEl.addEventListener("change", autoSaveSettings);
 showLocalIntelPanelEl.addEventListener("change", autoSaveSettings);
 showOpponentActionPanelEl.addEventListener("change", autoSaveSettings);
@@ -242,7 +257,7 @@ saveEl.addEventListener("click", async () => {
   await refreshActiveTabOverlayConfig(response?.settings ?? buildSettingsPayload());
   await refreshHealth();
 });
-document.getElementById("analyze").addEventListener("click", analyzeCurrentTurn);
+analyzeEl.addEventListener("click", analyzeCurrentTurn);
 
 await loadSettings();
 await refreshHealth();
