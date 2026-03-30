@@ -7,6 +7,29 @@ import { parseJsonFromMixedText } from "../util/json.js";
 import { runCommand } from "../util/process.js";
 import type { Provider, ProviderContext, ProviderRunResult } from "./base.js";
 
+export function buildGeminiPrompt(snapshot: BattleSnapshot, context: ProviderContext): string {
+  const strategicActionRule = context.analysisMode === "strategic"
+    ? "Use legal action IDs from snapshot.legalActions only when requestContext.actionableNow is true. Otherwise use only these synthetic strategic IDs: special:plan-primary, special:plan-secondary, special:plan-avoid."
+    : "Use only action IDs from snapshot.legalActions.";
+  const basePrompt = buildAnalysisPrompt(snapshot, {
+    analysisMode: context.analysisMode,
+    includeToolHint: false,
+    maxDeterministicNotes: 6,
+    maxRecentLogEntries: 12,
+    maxSnapshotNotes: 6,
+    prettySnapshot: false,
+    localIntel: context.localIntel,
+    requestContext: context.requestContext
+  });
+  return [
+    "Return one JSON object only. No markdown fences.",
+    "Top-level keys required: summary, topChoiceActionId, rankedActions, assumptions, dangerFlags, confidence.",
+    "Each rankedActions entry must contain: actionId, label, score, rationale, assumptions, risks.",
+    strategicActionRule,
+    basePrompt
+  ].join("\n\n");
+}
+
 export class GeminiProvider implements Provider {
   readonly name = "gemini" as const;
 
@@ -38,22 +61,7 @@ export class GeminiProvider implements Provider {
   }
 
   async analyzeDetailed(snapshot: BattleSnapshot, context: ProviderContext): Promise<ProviderRunResult> {
-    const basePrompt = buildAnalysisPrompt(snapshot, {
-      analysisMode: context.analysisMode,
-      includeToolHint: false,
-      maxDeterministicNotes: 6,
-      maxRecentLogEntries: 12,
-      maxSnapshotNotes: 6,
-      prettySnapshot: false,
-      localIntel: context.localIntel
-    });
-    const prompt = [
-      "Return one JSON object only. No markdown fences.",
-      "Top-level keys required: summary, topChoiceActionId, rankedActions, assumptions, dangerFlags, confidence.",
-      "Each rankedActions entry must contain: actionId, label, score, rationale, assumptions, risks.",
-      "Use only action IDs from snapshot.legalActions.",
-      basePrompt
-    ].join("\n\n");
+    const prompt = buildGeminiPrompt(snapshot, context);
 
     const result = await runCommand(
       config.geminiBin,

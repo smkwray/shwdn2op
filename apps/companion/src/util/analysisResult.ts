@@ -5,6 +5,14 @@ function normalizeConfidence(value: unknown): AnalysisResult["confidence"] {
   return value === "low" || value === "medium" || value === "high" ? value : "medium";
 }
 
+function normalizeScore(rawScore: number): number {
+  if (!Number.isFinite(rawScore)) return 0;
+  if (rawScore <= 1) return Math.max(0, rawScore);
+  if (rawScore <= 10) return Math.max(0, Math.min(1, rawScore / 10));
+  if (rawScore <= 100) return Math.max(0, Math.min(1, rawScore / 100));
+  return Math.max(0, Math.min(1, rawScore));
+}
+
 function extractRecommendationActionId(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const match = value.match(/\b((?:move|switch|special):[^\s,;`"]+)/i);
@@ -87,6 +95,8 @@ export function normalizeLooseAnalysisResult(candidate: unknown, snapshot?: Batt
 
   const rankedSource: unknown[] | null = Array.isArray(candidateRecord.rankedActions)
     ? candidateRecord.rankedActions
+    : Array.isArray(candidateRecord.ranking)
+      ? candidateRecord.ranking
     : null;
 
   if (!rankedSource || rankedSource.length === 0) return null;
@@ -120,7 +130,7 @@ export function normalizeLooseAnalysisResult(candidate: unknown, snapshot?: Batt
       return {
         actionId,
         label,
-        score: rawScore,
+        score: normalizeScore(rawScore),
         rationale,
         assumptions: Array.isArray(record.assumptions)
           ? record.assumptions.filter((value): value is string => typeof value === "string")

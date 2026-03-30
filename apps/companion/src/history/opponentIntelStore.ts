@@ -10,6 +10,15 @@ import {
   type PosteriorBattleSpeciesEvidence,
   type PosteriorBattleSpeedObservation
 } from "../inference/posterior.js";
+import {
+  createExternalCuratedFormatRecord,
+  createExternalCuratedStore,
+  normalizeExternalCuratedFormatRecord,
+  normalizeExternalCuratedStore,
+  type ExternalCuratedFormatRecord,
+  type ExternalCuratedStore,
+  type SampleTeamPriorImportParams
+} from "./externalCuratedStore.js";
 import type {
   BattleSnapshot,
   LikelihoodEntry,
@@ -103,18 +112,75 @@ interface IntelStore {
   updatedAt: string;
   species: Record<string, IntelSpeciesRecord>;
   battles: Record<string, BattleLedger>;
+  externalCurated: ExternalCuratedStore;
 }
+
+type PersistedIntelStore = Omit<IntelStore, "externalCurated"> & {
+  externalCurated?: ExternalCuratedStore | undefined;
+  sampleTeams?: ExternalCuratedStore | undefined;
+};
 
 const EMPTY_STORE: IntelStore = {
   version: "0.1.0",
   updatedAt: new Date(0).toISOString(),
   species: {},
-  battles: {}
+  battles: {},
+  externalCurated: createExternalCuratedStore()
 };
 
 let writeChain = Promise.resolve();
 const gens = new Generations(Dex as any);
 const MIN_HISTORY_SPEED_BOUND_SAMPLES = 2;
+const CURATED_PRIOR_CONFIDENCE_WEIGHT = 0.35;
+const LEARNSET_FALLBACK_CACHE = new Map<string, Promise<string[]>>();
+type FieldSpeedAbilityRule = {
+  abilityId: string;
+  label: string;
+  multiplier: number;
+  weather?: RegExp | undefined;
+  terrain?: RegExp | undefined;
+};
+
+const FIELD_SPEED_ABILITY_RULES: readonly FieldSpeedAbilityRule[] = [
+  { abilityId: "chlorophyll", label: "Chlorophyll", multiplier: 2, weather: /sun/i },
+  { abilityId: "sandrush", label: "Sand Rush", multiplier: 2, weather: /sand/i },
+  { abilityId: "slushrush", label: "Slush Rush", multiplier: 2, weather: /snow|hail/i },
+  { abilityId: "swiftswim", label: "Swift Swim", multiplier: 2, weather: /rain/i },
+  { abilityId: "surgesurfer", label: "Surge Surfer", multiplier: 2, terrain: /electric/i }
+] as const;
+const LOW_SIGNAL_FALLBACK_MOVE_IDS = new Set([
+  "attract",
+  "celebrate",
+  "confide",
+  "covet",
+  "cut",
+  "doubleteam",
+  "echoedvoice",
+  "flash",
+  "frustration",
+  "gigaimpact",
+  "growl",
+  "helpinghand",
+  "hiddenpower",
+  "leer",
+  "metronome",
+  "mimic",
+  "mudslap",
+  "naturalgift",
+  "protect",
+  "psychup",
+  "raindance",
+  "rest",
+  "return",
+  "round",
+  "secretpower",
+  "sleeptalk",
+  "snore",
+  "substitute",
+  "sunnyday",
+  "swagger",
+  "workup"
+]);
 
 function normalizeName(value: string | null | undefined): string {
   return String(value ?? "")
@@ -168,6 +234,11 @@ function lookupMove(gen: ReturnType<Generations["get"]>, moveName: string | null
   return undefined;
 }
 
+function displayNameForMoveId(gen: ReturnType<Generations["get"]>, moveId: string) {
+  const move = gen.moves.get(moveId);
+  return move?.name ?? moveId;
+}
+
 function lookupSpecies(gen: ReturnType<Generations["get"]>, speciesName: string | null | undefined) {
   if (!speciesName) return undefined;
   const direct = gen.species.get(speciesName);
@@ -177,6 +248,49 @@ function lookupSpecies(gen: ReturnType<Generations["get"]>, speciesName: string 
     if (normalizeName(species.name) === normalized) return species;
   }
   return undefined;
+}
+
+function matchingFieldSpeedAbilityRule(
+  abilityId: string | null | undefined,
+  field: BattleSnapshot["field"]
+) {
+  const normalized = normalizedAbilityId(abilityId);
+  if (!normalized) return null;
+  const weather = String(field.weather ?? "");
+  const terrain = String(field.terrain ?? "");
+  return FIELD_SPEED_ABILITY_RULES.find((rule) =>
+    rule.abilityId === normalized
+    && (!rule.weather || rule.weather.test(weather))
+    && (!rule.terrain || rule.terrain.test(terrain))
+  ) ?? null;
+}
+
+function possibleFieldSpeedAbilityRules(
+  format: string,
+  pokemon: PokemonSnapshot | null | undefined,
+  field: BattleSnapshot["field"]
+) {
+  if (!pokemon || normalizedAbilityId(pokemon.ability)) return [];
+  const speciesName = speciesNameFromSnapshot(pokemon);
+  if (!speciesName) return [];
+  const gen = gens.get(generationFromFormat(format));
+  const species = lookupSpecies(gen, speciesName);
+  if (!species?.abilities) return [];
+  const possibleAbilities = Object.values(species.abilities)
+    .map((value) => matchingFieldSpeedAbilityRule(value, field))
+    .filter((value): value is NonNullable<typeof value> => Boolean(value));
+  const seen = new Set<string>();
+  return possibleAbilities.filter((rule) => {
+    if (seen.has(rule.abilityId)) return false;
+    seen.add(rule.abilityId);
+    return true;
+  });
+}
+
+function formatPossibleFieldSpeedAbilityConfounder(sideLabel: "your" | "opponent", rules: ReturnType<typeof possibleFieldSpeedAbilityRules>) {
+  if (rules.length === 0) return null;
+  const names = rules.map((rule) => rule.label).join(" / ");
+  return `possible ${sideLabel} ${names}`;
 }
 
 function createFormatRecord(): IntelFormatRecord {
@@ -227,29 +341,52 @@ function normalizeBattleSpeciesLedger(ledger: Partial<BattleSpeciesLedger> | und
   };
 }
 
-async function ensureStoreDir() {
+async function ensureStoreDirs() {
   await fs.mkdir(path.dirname(config.localIntelStorePath), { recursive: true });
+  await fs.mkdir(path.dirname(config.externalCuratedStorePath), { recursive: true });
+}
+
+async function readExternalCuratedStore(fallback?: PersistedIntelStore): Promise<ExternalCuratedStore> {
+  try {
+    const text = await fs.readFile(config.externalCuratedStorePath, "utf8");
+    const parsed = JSON.parse(text) as Partial<ExternalCuratedStore>;
+    return normalizeExternalCuratedStore(parsed);
+  } catch {
+    return normalizeExternalCuratedStore(fallback?.externalCurated ?? fallback?.sampleTeams);
+  }
 }
 
 async function readStore(): Promise<IntelStore> {
   try {
     const text = await fs.readFile(config.localIntelStorePath, "utf8");
-    const parsed = JSON.parse(text) as Partial<IntelStore>;
+    const parsed = JSON.parse(text) as PersistedIntelStore;
+    const externalCurated = await readExternalCuratedStore(parsed);
     return {
       version: parsed.version ?? EMPTY_STORE.version,
       updatedAt: parsed.updatedAt ?? EMPTY_STORE.updatedAt,
       species: parsed.species ?? {},
-      battles: parsed.battles ?? {}
+      battles: parsed.battles ?? {},
+      externalCurated
     };
   } catch {
-    return structuredClone(EMPTY_STORE);
+    return {
+      ...structuredClone(EMPTY_STORE),
+      externalCurated: await readExternalCuratedStore()
+    };
   }
 }
 
 async function writeStore(store: IntelStore) {
-  await ensureStoreDir();
+  await ensureStoreDirs();
   store.updatedAt = new Date().toISOString();
-  await fs.writeFile(config.localIntelStorePath, JSON.stringify(store, null, 2));
+  const persisted: PersistedIntelStore = {
+    version: store.version,
+    updatedAt: store.updatedAt,
+    species: store.species,
+    battles: store.battles
+  };
+  await fs.writeFile(config.localIntelStorePath, JSON.stringify(persisted, null, 2));
+  await fs.writeFile(config.externalCuratedStorePath, JSON.stringify(store.externalCurated, null, 2));
 }
 
 function withStoreWrite<T>(operation: (store: IntelStore) => Promise<T> | T): Promise<T> {
@@ -282,6 +419,56 @@ function ensureSpeciesFormat(store: IntelStore, speciesName: string, format: str
     speciesRecord,
     formatRecord: speciesRecord.formats[format]
   };
+}
+
+function ensureExternalCuratedSpeciesFormat(store: IntelStore, speciesName: string, format: string) {
+  const speciesKey = normalizeName(speciesName);
+  if (!store.externalCurated.species[speciesKey]) {
+    store.externalCurated.species[speciesKey] = {
+      species: speciesName,
+      formats: {}
+    };
+  }
+  const speciesRecord = store.externalCurated.species[speciesKey];
+  if (!speciesRecord.formats[format]) {
+    speciesRecord.formats[format] = createExternalCuratedFormatRecord();
+  } else {
+    speciesRecord.formats[format] = normalizeExternalCuratedFormatRecord(speciesRecord.formats[format]);
+  }
+  return {
+    speciesKey,
+    speciesRecord,
+    formatRecord: speciesRecord.formats[format]
+  };
+}
+
+function externalCuratedFormatRecord(store: IntelStore, speciesKey: string, format: string) {
+  return normalizeExternalCuratedFormatRecord(store.externalCurated.species[speciesKey]?.formats?.[format]);
+}
+
+function effectivePriorConfidenceSamples(observedSamples: number, curatedSamples: number) {
+  return observedSamples + curatedSamples * CURATED_PRIOR_CONFIDENCE_WEIGHT;
+}
+
+function totalRecordedCounts(record: Record<string, number>) {
+  return Object.values(record ?? {}).reduce((sum, count) => sum + count, 0);
+}
+
+function effectivePriorShare(params: {
+  observedCount: number;
+  observedSamples: number;
+  observedRecordTotal: number;
+  curatedCount: number;
+  curatedSamples: number;
+  curatedRecordTotal: number;
+}) {
+  const observedWeight = params.observedSamples > 0 && params.observedRecordTotal > 0 ? 1 : 0;
+  const curatedWeight = params.curatedSamples > 0 && params.curatedRecordTotal > 0 ? CURATED_PRIOR_CONFIDENCE_WEIGHT : 0;
+  const totalWeight = observedWeight + curatedWeight;
+  if (totalWeight <= 0) return 0;
+  const observedShare = params.observedSamples > 0 ? params.observedCount / params.observedSamples : 0;
+  const curatedShare = params.curatedSamples > 0 ? params.curatedCount / params.curatedSamples : 0;
+  return Number((((observedShare * observedWeight) + (curatedShare * curatedWeight)) / totalWeight).toFixed(3));
 }
 
 function ensureBattleLedger(store: IntelStore, snapshot: BattleSnapshot) {
@@ -447,6 +634,66 @@ function maybeRecordCount(record: Record<string, number>, ledgerRecord: Record<s
   incrementCount(record, value);
   return true;
 }
+
+function maybeRecordSampleTeamValue(record: Record<string, number>, seen: Set<string>, value: string | null | undefined) {
+  if (!value) return false;
+  if (seen.has(value)) return false;
+  seen.add(value);
+  incrementCount(record, value);
+  return true;
+}
+
+export async function importExternalCuratedTeamPriors(params: SampleTeamPriorImportParams) {
+  return withStoreWrite(async (store) => {
+    for (const [speciesKey, speciesRecord] of Object.entries(store.externalCurated.species)) {
+      if (speciesRecord.formats?.[params.format]) {
+        delete speciesRecord.formats[params.format];
+      }
+      if (Object.keys(speciesRecord.formats ?? {}).length === 0) {
+        delete store.externalCurated.species[speciesKey];
+      }
+    }
+
+    for (const team of params.teams) {
+      if (!Array.isArray(team?.data) || team.data.length === 0) continue;
+
+      team.data.forEach((set, index) => {
+        const speciesName = set?.species?.trim();
+        if (!speciesName) return;
+
+        const { formatRecord } = ensureExternalCuratedSpeciesFormat(store, speciesName, params.format);
+        formatRecord.teamCount += 1;
+        if (index === 0) {
+          formatRecord.leadSlotCount += 1;
+        }
+
+        const seenMoves = new Set<string>();
+        for (const moveName of set.moves ?? []) {
+          maybeRecordSampleTeamValue(formatRecord.moves, seenMoves, moveName);
+        }
+        maybeRecordSampleTeamValue(formatRecord.items, new Set<string>(), set.item ?? null);
+        maybeRecordSampleTeamValue(formatRecord.abilities, new Set<string>(), set.ability ?? null);
+        maybeRecordSampleTeamValue(formatRecord.teraTypes, new Set<string>(), set.teraType ?? null);
+      });
+    }
+
+    store.externalCurated.imports[params.format] = {
+      formatId: params.formatId,
+      sourceUrl: params.sourceUrl,
+      importedAt: new Date().toISOString(),
+      teamsImported: params.teams.length
+    };
+
+    return {
+      format: params.format,
+      formatId: params.formatId,
+      teamsImported: params.teams.length,
+      sourceUrl: params.sourceUrl
+    };
+  });
+}
+
+export const importSampleTeamPriors = importExternalCuratedTeamPriors;
 
 function maybeRecordOpponentLead(store: IntelStore, battle: BattleLedger, snapshot: BattleSnapshot) {
   if (battle.leadRecorded) return;
@@ -840,6 +1087,16 @@ function getSpeedConfounders(snapshot: BattleSnapshot) {
   if (opponentItem === "ironball") notes.push("opponent Iron Ball");
   if (yourAbility === "quickfeet" && snapshot.yourSide.active?.status) notes.push("your Quick Feet");
   if (opponentAbility === "quickfeet" && snapshot.opponentSide.active?.status) notes.push("opponent Quick Feet");
+  const yourPossibleFieldSpeedAbility = formatPossibleFieldSpeedAbilityConfounder(
+    "your",
+    possibleFieldSpeedAbilityRules(snapshot.format, snapshot.yourSide.active, snapshot.field)
+  );
+  const opponentPossibleFieldSpeedAbility = formatPossibleFieldSpeedAbilityConfounder(
+    "opponent",
+    possibleFieldSpeedAbilityRules(snapshot.format, snapshot.opponentSide.active, snapshot.field)
+  );
+  if (yourPossibleFieldSpeedAbility) notes.push(yourPossibleFieldSpeedAbility);
+  if (opponentPossibleFieldSpeedAbility) notes.push(opponentPossibleFieldSpeedAbility);
   return notes;
 }
 
@@ -892,18 +1149,138 @@ function extractLastTurnMoveOrder(snapshot: BattleSnapshot) {
   } as const;
 }
 
-function summarizeEntries(record: Record<string, number>, denominator: number, exclude: string[] = [], limit = 4): LikelihoodEntry[] {
-  return Object.entries(record)
-    .filter(([name]) => !exclude.includes(name))
-    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-    .slice(0, limit)
-    .map(([name, count]) => ({
+function summarizeEntries(params: {
+  observedRecord: Record<string, number>;
+  observedSamples: number;
+  curatedRecord: Record<string, number>;
+  curatedSamples: number;
+  exclude?: string[];
+  limit?: number;
+}): LikelihoodEntry[] {
+  const exclude = params.exclude ?? [];
+  const limit = params.limit ?? 4;
+  const confidenceDenominator = effectivePriorConfidenceSamples(params.observedSamples, params.curatedSamples);
+  const totalSampleCount = params.observedSamples + params.curatedSamples;
+  const observedRecordTotal = totalRecordedCounts(params.observedRecord);
+  const curatedRecordTotal = totalRecordedCounts(params.curatedRecord);
+  const names = new Set([
+    ...Object.keys(params.observedRecord ?? {}),
+    ...Object.keys(params.curatedRecord ?? {})
+  ]);
+
+  return [...names]
+    .filter((name) => !exclude.includes(name))
+    .map((name) => ({
       name,
-      count,
-      share: denominator > 0 ? Number((count / denominator).toFixed(3)) : 0,
-      sampleCount: denominator,
-      confidenceTier: denominator >= 8 ? "strong" : denominator >= 3 ? "usable" : "thin"
+      count: (params.observedRecord?.[name] ?? 0) + (params.curatedRecord?.[name] ?? 0),
+      share: effectivePriorShare({
+        observedCount: params.observedRecord?.[name] ?? 0,
+        observedSamples: params.observedSamples,
+        observedRecordTotal,
+        curatedCount: params.curatedRecord?.[name] ?? 0,
+        curatedSamples: params.curatedSamples,
+        curatedRecordTotal
+      }),
+      sampleCount: totalSampleCount
+    }))
+    .sort((a, b) => b.share - a.share || b.count - a.count || a.name.localeCompare(b.name))
+    .slice(0, limit)
+    .map((entry) => ({
+      ...entry,
+      confidenceTier: confidenceDenominator >= 8 ? "strong" : confidenceDenominator >= 3 ? "usable" : "thin"
     }));
+}
+
+function fallbackMoveScore(
+  gen: ReturnType<Generations["get"]>,
+  species: ReturnType<typeof lookupSpecies>,
+  moveId: string
+) {
+  const move = gen.moves.get(moveId);
+  if (!move || move.isNonstandard) return Number.NEGATIVE_INFINITY;
+  if (LOW_SIGNAL_FALLBACK_MOVE_IDS.has(moveId)) return -1000;
+
+  let score = 0;
+  const types = species?.types ? [...species.types] : [];
+  const isStab = types.includes(move.type);
+  const normalizedTarget = String(move.target ?? "");
+  const normalizedName = normalizeName(move.name);
+  const isPivot = Boolean(move.selfSwitch) || ["uturn", "voltswitch", "flipturn", "partingshot", "chillyreception"].includes(normalizedName);
+  const isRecovery = Boolean(move.heal) || /recover|roost|slackoff|softboiled|moonlight|morningsun|shoreup|synthesis|wish/i.test(normalizedName);
+  const isHazard = ["stealthrock", "spikes", "toxicspikes", "stickyweb"].includes(normalizedName);
+  const isRemoval = ["rapidspin", "defog", "mortalspin"].includes(normalizedName);
+  const isSetup = Boolean(move.boosts) || Boolean(move.self?.boosts) || ["agility", "bulkup", "calmmind", "curse", "dragondance", "irondefense", "nastyplot", "quiverdance", "shellsmash", "shiftgear", "swordsdance", "trailblaze"].includes(normalizedName);
+  const statusMove = move.category === "Status";
+
+  if (!statusMove) {
+    score += Math.max(0, Number(move.basePower ?? 0)) * (isStab ? 1.2 : 0.7);
+    if (isStab) score += 28;
+    if (Number(move.priority ?? 0) > 0) score += 18;
+    if (Number(move.basePower ?? 0) >= 90) score += 18;
+    if (Number(move.accuracy ?? 100) < 75) score -= 8;
+  } else {
+    score += 8;
+  }
+
+  if (isPivot) score += 26;
+  if (isRecovery) score += 24;
+  if (isHazard) score += 22;
+  if (isRemoval) score += 20;
+  if (isSetup) score += 24;
+  if (move.status) score += 14;
+  if (move.volatileStatus) score += 10;
+  if (normalizedTarget === "self") score += 6;
+  if (move.breaksProtect) score += 8;
+  if (["fakeout", "firstimpression", "encore", "taunt", "knockoff", "u-turn", "uturn", "voltswitch", "rapidspin", "stealthrock", "spikes", "toxicspikes", "stickyweb", "thunderwave", "willowisp", "scald", "earthquake", "roost", "recover", "slackoff", "chillyreception"].includes(normalizedName)) {
+    score += 16;
+  }
+
+  return score;
+}
+
+async function fallbackLikelyMoveEntries(
+  format: string,
+  speciesName: string,
+  exclude: string[] = [],
+  limit = 4
+): Promise<LikelihoodEntry[]> {
+  const cacheKey = `${generationFromFormat(format)}|${normalizeName(speciesName)}`;
+  let promise = LEARNSET_FALLBACK_CACHE.get(cacheKey);
+  if (!promise) {
+    promise = (async () => {
+      const gen = gens.get(generationFromFormat(format));
+      const species = lookupSpecies(gen, speciesName);
+      const learnset = await Dex.learnsets.get(normalizeName(speciesName));
+      if (!learnset?.exists || !learnset.learnset || !species) return [];
+      return Object.keys(learnset.learnset)
+        .filter((moveId) => {
+          const sources = learnset.learnset?.[moveId] ?? [];
+          return sources.some((source) => source.startsWith(String(generationFromFormat(format))));
+        })
+        .map((moveId) => ({
+          moveId,
+          name: displayNameForMoveId(gen, moveId),
+          score: fallbackMoveScore(gen, species, moveId)
+        }))
+        .filter((entry) => Number.isFinite(entry.score))
+        .sort((a, b) => b.score - a.score || a.name.localeCompare(b.name))
+        .map((entry) => entry.name);
+    })();
+    LEARNSET_FALLBACK_CACHE.set(cacheKey, promise);
+  }
+
+  const excluded = new Set(exclude.map((value) => normalizeName(value)));
+  const moves = (await promise)
+    .filter((name) => !excluded.has(normalizeName(name)))
+    .slice(0, limit);
+
+  return moves.map((name) => ({
+    name,
+    count: 0,
+    share: 0,
+    sampleCount: 0,
+    confidenceTier: "thin" as const
+  }));
 }
 
 function buildSpeedNotes(
@@ -1058,7 +1435,8 @@ function effectiveSpeedRangeForPokemon(
   format: string,
   range: { min: number; max: number } | null,
   pokemon: PokemonSnapshot | null | undefined,
-  sideConditions: string[]
+  sideConditions: string[],
+  field: BattleSnapshot["field"]
 ) {
   if (!range || !pokemon) return null;
   let multiplier = speedStageMultiplier(Number(pokemon.boosts?.spe ?? 0));
@@ -1079,9 +1457,15 @@ function effectiveSpeedRangeForPokemon(
   if (sideConditions.some((value) => /tailwind/i.test(value))) {
     multiplier *= 2;
   }
+  const revealedFieldSpeedAbility = matchingFieldSpeedAbilityRule(abilityId, field);
+  if (revealedFieldSpeedAbility) {
+    multiplier *= revealedFieldSpeedAbility.multiplier;
+  }
+  const possibleFieldSpeedMultiplier = possibleFieldSpeedAbilityRules(format, pokemon, field)
+    .reduce((maxMultiplier, rule) => Math.max(maxMultiplier, rule.multiplier), 1);
   return {
     min: Math.floor(range.min * multiplier),
-    max: Math.floor(range.max * multiplier)
+    max: Math.floor(range.max * multiplier * possibleFieldSpeedMultiplier)
   };
 }
 
@@ -1092,7 +1476,14 @@ function effectiveShownSpeed(format: string, pokemon: PokemonSnapshot | null | u
     format,
     { min: Number(shown), max: Number(shown) },
     pokemon,
-    sideConditions
+    sideConditions,
+    {
+      weather: null,
+      terrain: null,
+      pseudoWeather: [],
+      yourSideConditions: [],
+      opponentSideConditions: []
+    }
   );
 }
 
@@ -1162,7 +1553,8 @@ function buildCurrentSpeedIntel(snapshot: BattleSnapshot, speciesName: string, f
     snapshot.format,
     neutralRange,
     opponentActive,
-    snapshot.field.opponentSideConditions
+    snapshot.field.opponentSideConditions,
+    snapshot.field
   );
   const activeSpeed = effectiveShownSpeed(snapshot.format, snapshot.yourSide.active, snapshot.field.yourSideConditions);
   const relation = speedRelation(activeSpeed, opponentRange);
@@ -1201,11 +1593,21 @@ function buildCurrentSpeedIntel(snapshot: BattleSnapshot, speciesName: string, f
   }
   const opponentItemId = normalizedItemId(opponentActive.item);
   const opponentAbilityId = normalizedAbilityId(opponentActive.ability);
-  if (opponentItemId === "choicescarf" || opponentItemId === "ironball" || (opponentAbilityId === "quickfeet" && opponentActive.status)) {
+  const revealedFieldSpeedAbility = matchingFieldSpeedAbilityRule(opponentAbilityId, snapshot.field);
+  if (
+    opponentItemId === "choicescarf"
+    || opponentItemId === "ironball"
+    || (opponentAbilityId === "quickfeet" && opponentActive.status)
+    || revealedFieldSpeedAbility
+  ) {
     speedEvidence.push({
       kind: "item_ability_assumption",
       label: "Opponent revealed a Speed-modifying item or ability",
-      detail: [opponentActive.item, opponentAbilityId === "quickfeet" && opponentActive.status ? "Quick Feet" : null].filter(Boolean).join(", ")
+      detail: [
+        opponentActive.item,
+        opponentAbilityId === "quickfeet" && opponentActive.status ? "Quick Feet" : null,
+        revealedFieldSpeedAbility?.label ?? null
+      ].filter(Boolean).join(", ")
     });
   }
   if (!hasYourShownSpeed) {
@@ -1274,6 +1676,7 @@ function pickThreatMoves(entry: OpponentIntelEntry | undefined) {
   const knownMoves = entry.revealedMoves.map((name) => ({ name, source: "known" as const }));
   if (knownMoves.length >= 4) return knownMoves.slice(0, 4);
   const likelyMoves = entry.likelyMoves
+    .filter((move) => move.sampleCount > 0 || move.confidenceTier !== "thin" || move.share >= 0.45)
     .filter((move) => !entry.revealedMoves.includes(move.name))
     .slice(0, Math.max(0, 4 - knownMoves.length))
     .map((move) => ({ name: move.name, source: "likely" as const }));
@@ -1456,21 +1859,29 @@ export async function buildLocalIntelSnapshot(snapshot: BattleSnapshot): Promise
     mergedOpponents.set(speciesKey, merged);
   }
 
-  const opponents: OpponentIntelEntry[] = [...mergedOpponents.entries()].map(([speciesKey, merged]) => {
+  const opponents: OpponentIntelEntry[] = await Promise.all([...mergedOpponents.entries()].map(async ([speciesKey, merged]) => {
     const speciesRecord = store.species[speciesKey];
     const formatRecord = normalizeFormatRecord(speciesRecord?.formats?.[snapshot.format]);
+    const curatedFormatRecord = externalCuratedFormatRecord(store, speciesKey, snapshot.format);
+    const confidenceSamples = effectivePriorConfidenceSamples(formatRecord.battlesSeen, curatedFormatRecord.teamCount);
     const revealedMoves = [...merged.revealedMoves];
     const currentSpeedIntel = buildCurrentSpeedIntel(snapshot, merged.species, formatRecord);
     const battleSpecies = normalizeBattleSpeciesLedger(activeBattle?.species?.[speciesKey]);
+    const importInfo = store.externalCurated.imports[snapshot.format] ?? null;
     const posterior = buildOpponentPosterior({
       format: snapshot.format,
       opponent: merged.pokemon,
       formatStats: {
-        battlesSeen: formatRecord.battlesSeen,
-        moves: formatRecord.moves,
-        items: formatRecord.items,
-        abilities: formatRecord.abilities,
-        teraTypes: formatRecord.teraTypes
+        observedBattlesSeen: formatRecord.battlesSeen,
+        curatedTeamCount: curatedFormatRecord.teamCount,
+        observedMoves: formatRecord.moves,
+        observedItems: formatRecord.items,
+        observedAbilities: formatRecord.abilities,
+        observedTeraTypes: formatRecord.teraTypes,
+        curatedMoves: curatedFormatRecord.moves,
+        curatedItems: curatedFormatRecord.items,
+        curatedAbilities: curatedFormatRecord.abilities,
+        curatedTeraTypes: curatedFormatRecord.teraTypes
       },
       battleEvidence: {
         incomingDamage: battleSpecies.incomingDamage,
@@ -1478,10 +1889,36 @@ export async function buildLocalIntelSnapshot(snapshot: BattleSnapshot): Promise
         speedObservations: battleSpecies.speedObservations
       }
     });
+    const likelyMovesFromHistory = revealedMoves.length >= 4
+      ? []
+      : summarizeEntries({
+          observedRecord: formatRecord.moves,
+          observedSamples: formatRecord.battlesSeen,
+          curatedRecord: curatedFormatRecord.moves,
+          curatedSamples: curatedFormatRecord.teamCount,
+          exclude: revealedMoves
+        });
+    const likelyMoves = revealedMoves.length >= 4
+      ? []
+      : likelyMovesFromHistory.length > 0
+      ? likelyMovesFromHistory
+      : await fallbackLikelyMoveEntries(snapshot.format, merged.species, revealedMoves, 4);
+
     return {
       species: merged.species,
       displayName: merged.displayName,
       battlesSeen: formatRecord.battlesSeen,
+      curatedTeamCount: curatedFormatRecord.teamCount,
+      blendedPriorCount: Math.round(confidenceSamples * 1000) / 1000,
+      externalCurated: curatedFormatRecord.teamCount > 0
+        ? {
+            channel: "external_curated",
+            sourceKind: "sample_teams",
+            teamCount: curatedFormatRecord.teamCount,
+            effectiveConfidenceSamples: Math.round(confidenceSamples * 1000) / 1000,
+            import: importInfo
+          }
+        : undefined,
       historicalLeadCount: formatRecord.leadCount,
       historicalLeadShare: formatRecord.battlesSeen > 0 ? Number((formatRecord.leadCount / formatRecord.battlesSeen).toFixed(3)) : 0,
       currentTerastallized: Boolean(merged.pokemon?.terastallized),
@@ -1489,17 +1926,31 @@ export async function buildLocalIntelSnapshot(snapshot: BattleSnapshot): Promise
       revealedItem: merged.revealedItem,
       revealedAbility: merged.revealedAbility,
       revealedTeraType: merged.revealedTeraType,
-      likelyMoves: revealedMoves.length >= 4 ? [] : summarizeEntries(formatRecord.moves, formatRecord.battlesSeen, revealedMoves),
-      likelyItems: summarizeEntries(formatRecord.items, formatRecord.battlesSeen, merged.revealedItem ? [merged.revealedItem] : []),
+      likelyMoves,
+      likelyItems: summarizeEntries({
+        observedRecord: formatRecord.items,
+        observedSamples: formatRecord.battlesSeen,
+        curatedRecord: curatedFormatRecord.items,
+        curatedSamples: curatedFormatRecord.teamCount,
+        exclude: merged.revealedItem ? [merged.revealedItem] : []
+      }),
       likelyAbilities: summarizeEntries(
-        formatRecord.abilities,
-        formatRecord.battlesSeen,
-        merged.revealedAbility ? [merged.revealedAbility] : []
+        {
+          observedRecord: formatRecord.abilities,
+          observedSamples: formatRecord.battlesSeen,
+          curatedRecord: curatedFormatRecord.abilities,
+          curatedSamples: curatedFormatRecord.teamCount,
+          exclude: merged.revealedAbility ? [merged.revealedAbility] : []
+        }
       ),
       likelyTeraTypes: summarizeEntries(
-        formatRecord.teraTypes,
-        formatRecord.battlesSeen,
-        merged.revealedTeraType ? [merged.revealedTeraType] : []
+        {
+          observedRecord: formatRecord.teraTypes,
+          observedSamples: formatRecord.battlesSeen,
+          curatedRecord: curatedFormatRecord.teraTypes,
+          curatedSamples: curatedFormatRecord.teamCount,
+          exclude: merged.revealedTeraType ? [merged.revealedTeraType] : []
+        }
       ),
       neutralSpeedRange: currentSpeedIntel.neutralRange,
       currentSpeedRange: currentSpeedIntel.currentSpeedRange,
@@ -1517,7 +1968,7 @@ export async function buildLocalIntelSnapshot(snapshot: BattleSnapshot): Promise
       ),
       posterior
     };
-  });
+  }));
 
   const activeOpponentSpecies = snapshot.opponentSide.active?.species ?? snapshot.opponentSide.active?.displayName ?? null;
   const activeOpponentEntry = opponents.find((entry) => normalizeName(entry.species) === normalizeName(activeOpponentSpecies));
@@ -1644,7 +2095,7 @@ export async function buildLocalIntelSnapshot(snapshot: BattleSnapshot): Promise
   return {
     generatedAt: new Date().toISOString(),
     note:
-      "Local opponent intel blends species-format priors with clean battle-local evidence. Posterior set guesses stay bounded and deterministic, and thin-confidence cases still fall back to generic calc ranges.",
+      "Local opponent intel keeps observed species-format history, imported external-curated priors, and clean battle-local evidence as separate channels. Posterior set guesses stay bounded and deterministic, and thin-confidence cases still fall back to generic calc ranges.",
     playerDamagePreview,
     opponentThreatPreview,
     opponentActionPrediction,
@@ -1681,6 +2132,12 @@ export async function buildLocalIntelSnapshot(snapshot: BattleSnapshot): Promise
         confidenceTier: activeOpponentEntry?.posterior?.confidenceTier ?? null,
         evidenceKinds: activeOpponentEntry?.posterior?.evidenceKinds ?? [],
         topHypotheses: activeOpponentEntry?.posterior?.topHypotheses.slice(0, 3) ?? []
+      },
+      priors: {
+        observedBattlesSeen: activeOpponentEntry?.battlesSeen ?? 0,
+        externalCuratedTeamCount: activeOpponentEntry?.externalCurated?.teamCount ?? 0,
+        effectiveConfidenceSamples: activeOpponentEntry?.externalCurated?.effectiveConfidenceSamples ?? 0,
+        import: store.externalCurated.imports[snapshot.format] ?? null
       },
       prediction: opponentActionPrediction
         ? {

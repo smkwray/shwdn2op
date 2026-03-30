@@ -82,11 +82,28 @@ export const analysisResultSchema = z.object({
   confidence: z.enum(["low", "medium", "high"])
 });
 
+export const analysisRequestContextSchema = z.object({
+  tabStatus: z.enum([
+    "no_snapshot",
+    "room_ambiguous",
+    "waiting_or_not_your_turn",
+    "stale_snapshot",
+    "ready",
+    "provider_error"
+  ]),
+  actionableNow: z.boolean(),
+  snapshotAgeMs: z.number().nonnegative().nullable().optional(),
+  wait: z.boolean().optional(),
+  forceSwitch: z.boolean().optional(),
+  teamPreview: z.boolean().optional()
+});
+
 export const analyzeRequestSchema = z.object({
   provider: z.enum(["mock", "codex", "claude", "gemini"]),
   model: z.string().optional(),
   analysisMode: z.enum(["tactical", "strategic"]).optional(),
   requestId: z.string().optional(),
+  requestContext: analysisRequestContextSchema.optional(),
   snapshot: battleSnapshotSchema
 });
 

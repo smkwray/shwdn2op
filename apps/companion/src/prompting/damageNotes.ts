@@ -453,6 +453,14 @@ function buildStatusOutcomeBand(params: {
   const statusTypeOutcome = statusTypeImmunityOutcome(params.genNum, move, params.attackerMon, defenderTypes);
   if (statusTypeOutcome) return makeStatusBand(statusTypeOutcome);
 
+  if (move?.status && params.defenderMon.status && params.defenderMon.status !== "fnt") {
+    return makeStatusBand({
+      label: "blocked",
+      outcome: "blocked",
+      detail: `${params.defenderMon.displayName ?? params.defenderMon.species ?? "Target"} already has a non-volatile status.`
+    });
+  }
+
   if (!attackerIgnoresDefenderAbility(params.attackerMon)) {
     const specialOutcome = specialStatusInteractionOutcome(
       params.genNum,

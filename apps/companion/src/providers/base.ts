@@ -1,9 +1,17 @@
-import type { AnalysisResult, BattleSnapshot, LocalIntelSnapshot, ProviderDebug, ProviderName } from "../types.js";
+import type {
+  AnalysisRequestContext,
+  AnalysisResult,
+  BattleSnapshot,
+  LocalIntelSnapshot,
+  ProviderDebug,
+  ProviderName
+} from "../types.js";
 
 export interface ProviderContext {
   requestedModel?: string | undefined;
   analysisMode?: "tactical" | "strategic" | undefined;
   localIntel?: LocalIntelSnapshot | undefined;
+  requestContext?: AnalysisRequestContext | undefined;
 }
 
 export interface ProviderRunResult {

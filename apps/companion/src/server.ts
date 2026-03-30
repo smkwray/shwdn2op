@@ -61,13 +61,15 @@ export function buildServer() {
         ? await provider.analyzeDetailed(body.snapshot, {
             requestedModel: body.model,
             analysisMode,
-            localIntel
+            localIntel,
+            requestContext: body.requestContext
           })
         : {
             analysis: await provider.analyze(body.snapshot, {
               requestedModel: body.model,
               analysisMode,
-              localIntel
+              localIntel,
+              requestContext: body.requestContext
             }),
             providerDebug: undefined
           };

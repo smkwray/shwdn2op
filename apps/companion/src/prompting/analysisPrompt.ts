@@ -1,4 +1,4 @@
-import type { BattleSnapshot, DamageAssumptionBand, LocalIntelSnapshot } from "../types.js";
+import type { AnalysisRequestContext, BattleSnapshot, DamageAssumptionBand, LocalIntelSnapshot } from "../types.js";
 import { buildDeterministicNotes } from "./deterministicNotes.js";
 
 export interface AnalysisPromptOptions {
@@ -8,20 +8,81 @@ export interface AnalysisPromptOptions {
   maxRecentLogEntries?: number;
   maxSnapshotNotes?: number;
   prettySnapshot?: boolean;
+  compactSnapshot?: boolean;
   localIntel?: LocalIntelSnapshot | undefined;
+  requestContext?: AnalysisRequestContext | undefined;
 }
 
 function analysisModeForOptions(options: AnalysisPromptOptions): "tactical" | "strategic" {
   return options.analysisMode === "strategic" ? "strategic" : "tactical";
 }
 
-function buildPromptSnapshot(snapshot: BattleSnapshot, options: AnalysisPromptOptions): BattleSnapshot {
+function compactPokemonForPrompt(pokemon: BattleSnapshot["yourSide"]["active"] | null | undefined) {
+  if (!pokemon) return null;
+  return {
+    ident: pokemon.ident,
+    species: pokemon.species,
+    displayName: pokemon.displayName,
+    hpPercent: pokemon.hpPercent,
+    status: pokemon.status,
+    fainted: pokemon.fainted,
+    active: pokemon.active,
+    revealed: pokemon.revealed,
+    boosts: pokemon.boosts,
+    stats: pokemon.stats,
+    knownMoves: pokemon.knownMoves,
+    item: pokemon.item,
+    removedItem: pokemon.removedItem,
+    ability: pokemon.ability,
+    types: pokemon.types,
+    teraType: pokemon.teraType,
+    terastallized: pokemon.terastallized
+  };
+}
+
+function compactSideForPrompt(side: BattleSnapshot["yourSide"]) {
+  return {
+    slot: side.slot,
+    name: side.name,
+    active: compactPokemonForPrompt(side.active),
+    reserves: side.team
+      .filter((pokemon) => !pokemon.active)
+      .map((pokemon) => compactPokemonForPrompt(pokemon))
+  };
+}
+
+function buildPromptSnapshot(snapshot: BattleSnapshot, options: AnalysisPromptOptions) {
   const maxRecentLogEntries = options.maxRecentLogEntries ?? snapshot.recentLog.length;
   const maxSnapshotNotes = options.maxSnapshotNotes ?? snapshot.notes.length;
-  return {
+  const trimmed = {
     ...snapshot,
     recentLog: snapshot.recentLog.slice(-maxRecentLogEntries),
     notes: snapshot.notes.slice(-maxSnapshotNotes)
+  };
+  if (!options.compactSnapshot) {
+    return trimmed;
+  }
+  return {
+    version: trimmed.version,
+    capturedAt: trimmed.capturedAt,
+    format: trimmed.format,
+    turn: trimmed.turn,
+    phase: trimmed.phase,
+    yourSide: compactSideForPrompt(trimmed.yourSide),
+    opponentSide: compactSideForPrompt(trimmed.opponentSide),
+    field: trimmed.field,
+    legalActions: trimmed.legalActions.map((action) => ({
+      id: action.id,
+      kind: action.kind,
+      label: action.label,
+      moveName: action.moveName,
+      target: action.target,
+      details: action.details,
+      disabled: action.disabled
+    })),
+    recentLog: trimmed.recentLog,
+    rawRequestSummary: trimmed.rawRequestSummary,
+    notes: trimmed.notes
   };
 }
 
@@ -103,7 +164,7 @@ export function buildAnalysisPrompt(snapshot: BattleSnapshot, options: AnalysisP
   const analysisMode = analysisModeForOptions(options);
   const promptSnapshot = buildPromptSnapshot(snapshot, options);
   const compactSnapshot = JSON.stringify(promptSnapshot, null, options.prettySnapshot === false ? 0 : 2);
-  const deterministicNotes = buildDeterministicNotes(promptSnapshot).slice(0, options.maxDeterministicNotes ?? 12);
+  const deterministicNotes = buildDeterministicNotes(snapshot).slice(0, options.maxDeterministicNotes ?? 12);
   const noteLines = deterministicNotes.length > 0
     ? ["", "Deterministic notes:", ...deterministicNotes.map((line) => `- ${line}`)]
     : [];
@@ -169,7 +230,20 @@ export function buildAnalysisPrompt(snapshot: BattleSnapshot, options: AnalysisP
         ...(options.localIntel.opponentLeadPrediction.riskFlags.slice(0, 2).map((risk) => `- Risk: ${risk}.`))
       ]
     : [];
-  const selfRecommendationLines = options.localIntel?.selfActionRecommendation
+  const requestContextLines = options.requestContext
+    ? [
+        "",
+        "Request context:",
+        `- Tab status ${options.requestContext.tabStatus}; actionable now ${options.requestContext.actionableNow ? "yes" : "no"}.`,
+        ...(Number.isFinite(options.requestContext.snapshotAgeMs)
+          ? [`- Snapshot age ${Math.round(Number(options.requestContext.snapshotAgeMs))} ms.`]
+          : []),
+        ...(options.requestContext.wait ? ["- The page reports the battle is waiting for the opponent or an animation."] : []),
+        ...(options.requestContext.forceSwitch ? ["- A forced switch is pending in the captured request state."] : []),
+        ...(options.requestContext.teamPreview ? ["- The current state is team preview rather than a live turn."] : [])
+      ]
+    : [];
+  const selfRecommendationLines = analysisMode === "strategic" && options.localIntel?.selfActionRecommendation
     ? [
         "",
         "Deterministic self-recommendation:",
@@ -247,14 +321,15 @@ export function buildAnalysisPrompt(snapshot: BattleSnapshot, options: AnalysisP
     ? [
         "Task:",
         "- Give broader strategic guidance from the current board state, hidden-info predictions, and deterministic previews.",
-        "- If snapshot.legalActions is non-empty, rank the best current legal actions by long-term strategic value.",
-        "- If snapshot.legalActions is empty or the move window has passed, use synthetic action IDs from this set only: special:plan-primary, special:plan-secondary, special:plan-avoid.",
+        "- Only rank current legal actions when requestContext.actionableNow is true.",
+        "- If requestContext.actionableNow is false, or snapshot.legalActions is empty, use synthetic action IDs from this set only: special:plan-primary, special:plan-secondary, special:plan-avoid.",
         "- Return structured JSON only.",
         "",
         "Rules:",
         "- Use the deterministic predictions, posterior hints, speed clues, and damage ranges below as evidence, not as blind truth.",
         "- Focus on preserve vs sack decisions, scouting, tera timing, win conditions, hazard posture, and what information matters next.",
         "- Keep the output actionable for the next few turns, not just the immediate click.",
+        "- Treat stale or waiting snapshots as planning context, not as permission to recommend an immediate click.",
         "- If you use a synthetic strategic action ID, make the label and rationale read like a concrete game-plan recommendation.",
         ...toolHint,
         "- Be concise and practical.",
@@ -269,6 +344,7 @@ export function buildAnalysisPrompt(snapshot: BattleSnapshot, options: AnalysisP
         "Rules:",
         "- Never invent illegal moves or switches.",
         "- Use the deterministic predictions, posterior hints, speed clues, and damage ranges below as evidence, not as blind truth.",
+        "- Form an independent ranking from the snapshot and opponent context; do not assume a hidden deterministic best line exists.",
         "- Prefer the best practical current-turn recommendation from this board state.",
         "- Prefer revealed information over guesses.",
         "- If you make metagame assumptions, put them in assumptions fields.",
@@ -284,6 +360,7 @@ export function buildAnalysisPrompt(snapshot: BattleSnapshot, options: AnalysisP
     "",
     ...modeLines,
     ...noteLines,
+    ...requestContextLines,
     ...structuredMechanicsLines,
     ...localIntelLines,
     "",

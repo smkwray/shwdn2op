@@ -234,7 +234,7 @@ export interface OpponentActionCandidate {
   actionClass: Exclude<OpponentActionClass, "unknown">;
   label: string;
   moveName?: string | undefined;
-  source?: "known" | "likely" | "revealed_switch" | undefined;
+  source?: "known" | "likely" | "revealed_switch" | "previewed_switch" | undefined;
   switchTargetSpecies?: string | undefined;
   score: number;
   reasons: string[];
@@ -256,6 +256,21 @@ export interface OpponentLeadCandidate {
   historicalLeadShare?: number | undefined;
   reasons: string[];
   riskFlags: string[];
+}
+
+export interface ExternalCuratedImportInfo {
+  formatId: string;
+  sourceUrl: string;
+  importedAt: string;
+  teamsImported: number;
+}
+
+export interface ExternalCuratedPriorSupport {
+  channel: "external_curated";
+  sourceKind: "sample_teams";
+  teamCount: number;
+  effectiveConfidenceSamples: number;
+  import?: ExternalCuratedImportInfo | null | undefined;
 }
 
 export interface OpponentLeadPrediction {
@@ -297,6 +312,9 @@ export interface OpponentIntelEntry {
   species: string;
   displayName: string | null;
   battlesSeen: number;
+  curatedTeamCount?: number | undefined;
+  blendedPriorCount?: number | undefined;
+  externalCurated?: ExternalCuratedPriorSupport | undefined;
   historicalLeadCount?: number | undefined;
   historicalLeadShare?: number | undefined;
   currentTerastallized?: boolean | undefined;
@@ -336,11 +354,27 @@ export interface LocalIntelSnapshot {
   opponents: OpponentIntelEntry[];
 }
 
+export interface AnalysisRequestContext {
+  tabStatus:
+    | "no_snapshot"
+    | "room_ambiguous"
+    | "waiting_or_not_your_turn"
+    | "stale_snapshot"
+    | "ready"
+    | "provider_error";
+  actionableNow: boolean;
+  snapshotAgeMs?: number | null | undefined;
+  wait?: boolean | undefined;
+  forceSwitch?: boolean | undefined;
+  teamPreview?: boolean | undefined;
+}
+
 export interface AnalyzeRequest {
   provider: ProviderName;
   model?: string;
   analysisMode?: "tactical" | "strategic";
   requestId?: string;
+  requestContext?: AnalysisRequestContext | undefined;
   snapshot: BattleSnapshot;
 }
 

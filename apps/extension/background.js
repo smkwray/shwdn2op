@@ -181,7 +181,7 @@ async function fetchCompanionHealth(settings) {
   }
 }
 
-async function runSingleAnalysisRequest(settings, snapshot, provider, model, analysisMode, signal) {
+async function runSingleAnalysisRequest(settings, snapshot, provider, model, analysisMode, signal, requestContext) {
   const url = `${settings.companionUrl.replace(/\/$/, "")}/api/analyze`;
   const requestId = makeRequestId();
   const response = await fetch(url, {
@@ -193,6 +193,7 @@ async function runSingleAnalysisRequest(settings, snapshot, provider, model, ana
       model,
       analysisMode,
       requestId,
+      requestContext,
       snapshot
     })
   });
@@ -330,6 +331,16 @@ async function analyzeTab(tabId, options = {}) {
   const analysisMode = options.analysisMode === "strategic" ? "strategic" : settings.analysisMode === "strategic" ? "strategic" : "tactical";
   const allowStrategicSnapshot = analysisMode === "strategic" && Boolean(snapshot);
   const canAnalyze = selection.status === TAB_STATUS.READY || allowStrategicSnapshot;
+  const requestContext = snapshot
+    ? {
+        tabStatus: selection.status,
+        actionableNow: selection.status === TAB_STATUS.READY,
+        snapshotAgeMs: Number.isFinite(selection.ageMs) ? selection.ageMs : undefined,
+        wait: Boolean(selection.room?.lastRequest?.wait),
+        forceSwitch: Boolean(selection.room?.lastRequest?.forceSwitch),
+        teamPreview: Boolean(selection.room?.lastRequest?.teamPreview || selection.room?.phase === "preview")
+      }
+    : null;
 
   if (!canAnalyze || !snapshot) {
     const state = setTabStatus(tabId, selection);
@@ -396,7 +407,15 @@ async function analyzeTab(tabId, options = {}) {
       ...(compareMode ? [{ provider: compareProvider, model: compareModel, kind: "compare" }] : [])
     ];
     const settled = await Promise.allSettled(
-      requests.map((entry) => runSingleAnalysisRequest(settings, snapshot, entry.provider, entry.model, analysisMode, abortController.signal))
+      requests.map((entry) => runSingleAnalysisRequest(
+        settings,
+        snapshot,
+        entry.provider,
+        entry.model,
+        analysisMode,
+        abortController.signal,
+        requestContext
+      ))
     );
     if (state.analysisRunSeq !== analysisRunId) {
       return { ok: false, status: "superseded", summary: "Superseded by a newer analysis request." };

@@ -7,13 +7,17 @@ import { fileURLToPath } from "node:url";
 import type { BattleSnapshot, DamageAssumptionBand, OpponentPosteriorPreview, PokemonSnapshot } from "../types.js";
 
 const storePath = path.join(os.tmpdir(), `shwdn2op-local-intel-${process.pid}-${Date.now()}.json`);
+const externalCuratedStorePath = path.join(os.tmpdir(), `shwdn2op-external-curated-${process.pid}-${Date.now()}.json`);
 process.env.LOCAL_INTEL_STORE_PATH = storePath;
+process.env.EXTERNAL_CURATED_STORE_PATH = externalCuratedStorePath;
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, "..", "..", "..", "..");
 
-const { buildLocalIntelSnapshot, updateLocalIntelFromSnapshot } = await import("../history/opponentIntelStore.js");
+const { buildLocalIntelSnapshot, updateLocalIntelFromSnapshot, importExternalCuratedTeamPriors } = await import("../history/opponentIntelStore.js");
 const { buildDamagePreview, buildThreatPreview } = await import("../prompting/damageNotes.js");
 const { buildAnalysisPrompt } = await import("../prompting/analysisPrompt.js");
+const { buildGeminiPrompt } = await import("../providers/geminiProvider.js");
+const { buildSelfActionRecommendation, selectReplyAwareSearchActionIds, weightedOpponentReplies } = await import("../prediction/selfActionRecommender.js");
 
 async function loadExampleJson(relativePath: string) {
   return JSON.parse(await fs.readFile(path.resolve(repoRoot, relativePath), "utf8"));
@@ -118,6 +122,7 @@ function makeSnapshot(overrides: Partial<BattleSnapshot> = {}): BattleSnapshot {
 
 test.after(async () => {
   await fs.rm(storePath, { force: true });
+  await fs.rm(externalCuratedStorePath, { force: true });
 });
 
 test("suppresses likely other moves when four moves are already known", async () => {
@@ -151,6 +156,50 @@ test("suppresses likely other moves when four moves are already known", async ()
   await updateLocalIntelFromSnapshot(snapshot);
   const intel = await buildLocalIntelSnapshot(snapshot);
   assert.equal(intel.opponents[0]?.likelyMoves.length, 0);
+});
+
+test("learnset fallback likely moves stay advisory and out of threat preview", async () => {
+  const opponentSkarmory = makePokemon({
+    ident: "p2a: Skarmory-fallback",
+    species: "Skarmory",
+    displayName: "Skarmory",
+    active: true,
+    hpPercent: 76,
+    knownMoves: ["Spikes", "Roost"],
+    stats: { hp: 334, atk: 176, def: 416, spa: 136, spd: 176, spe: 176 },
+    types: ["Steel", "Flying"]
+  });
+  const yourClodsire = makePokemon({
+    ident: "p1a: Clodsire-fallback",
+    species: "Clodsire",
+    displayName: "Clodsire",
+    active: true,
+    knownMoves: ["Earthquake"],
+    stats: { hp: 394, atk: 186, def: 236, spa: 126, spd: 236, spe: 96 },
+    types: ["Poison", "Ground"]
+  });
+  const snapshot = makeSnapshot({
+    roomId: "battle-fallback-likely-moves",
+    yourSide: {
+      slot: "p1",
+      name: "You",
+      active: yourClodsire,
+      team: [yourClodsire]
+    },
+    opponentSide: {
+      slot: "p2",
+      name: "Opponent",
+      active: opponentSkarmory,
+      team: [opponentSkarmory]
+    },
+    legalActions: [{ id: "move:earthquake", kind: "move", label: "Earthquake", moveName: "Earthquake" }]
+  });
+
+  const intel = await buildLocalIntelSnapshot(snapshot);
+  assert.ok((intel.opponents[0]?.likelyMoves.length ?? 0) > 0);
+  assert.ok((intel.opponents[0]?.likelyMoves ?? []).every((entry) => entry.sampleCount === 0 && entry.confidenceTier === "thin"));
+  assert.equal((intel.opponentThreatPreview ?? []).length, 0);
+  assert.equal(intel.opponentActionPrediction?.topActionClass, "status_or_setup");
 });
 
 test("suppresses likely item ability and tera once already revealed", async () => {
@@ -261,6 +310,168 @@ test("likelihood entries include sample count and confidence tier", async () => 
   const likelyItem = intel.opponents[0]?.likelyItems[0];
   assert.ok((likelyItem?.sampleCount ?? 0) >= 1);
   assert.equal(likelyItem?.confidenceTier, "thin");
+});
+
+test("imported external curated teams inform priors without pretending to be observed battles", async () => {
+  await importExternalCuratedTeamPriors({
+    format: "[Gen 9] UU",
+    formatId: "gen9uu",
+    sourceUrl: "https://data.pkmn.cc/teams/gen9uu.json",
+    teams: [
+      {
+        data: [
+          {
+            species: "Hydrapple",
+            item: "Heavy-Duty Boots",
+            ability: "Regenerator",
+            teraType: "Steel",
+            moves: ["Draco Meteor", "Earth Power", "Giga Drain", "Nasty Plot"]
+          }
+        ]
+      },
+      {
+        data: [
+          {
+            species: "Hydrapple",
+            item: "Choice Specs",
+            ability: "Regenerator",
+            teraType: "Fairy",
+            moves: ["Draco Meteor", "Earth Power", "Leaf Storm", "Giga Drain"]
+          }
+        ]
+      }
+    ]
+  });
+
+  const opponent = makePokemon({
+    ident: "p2a: Hydrapple",
+    species: "Hydrapple",
+    displayName: "Hydrapple",
+    active: true,
+    knownMoves: [],
+    item: null,
+    ability: null,
+    teraType: null,
+    stats: { hp: 384, atk: 186, def: 284, spa: 256, spd: 196, spe: 106 },
+    types: ["Grass", "Dragon"]
+  });
+  const snapshot = makeSnapshot({
+    roomId: "battle-sample-team-priors",
+    opponentSide: {
+      slot: "p2",
+      name: "Opponent",
+      active: opponent,
+      team: [opponent]
+    }
+  });
+
+  const intel = await buildLocalIntelSnapshot(snapshot);
+  const hydrapple = intel.opponents[0];
+
+  assert.equal(hydrapple?.battlesSeen, 0);
+  assert.equal(hydrapple?.curatedTeamCount, 2);
+  assert.equal(hydrapple?.externalCurated?.teamCount, 2);
+  assert.equal(hydrapple?.externalCurated?.effectiveConfidenceSamples, 0.7);
+  assert.equal(hydrapple?.blendedPriorCount, 0.7);
+  assert.equal(hydrapple?.likelyItems[0]?.sampleCount, 2);
+  assert.equal(hydrapple?.likelyItems[0]?.confidenceTier, "thin");
+  assert.equal(hydrapple?.posterior?.evidence[0]?.kind, "priors");
+  assert.match(hydrapple?.posterior?.evidence[0]?.label ?? "", /imported sample team/i);
+});
+
+test("imported sample teams raise prior coverage without promoting confidence as fast as observed battles", async () => {
+  await fs.writeFile(storePath, JSON.stringify({
+    version: "0.1.0",
+    updatedAt: new Date().toISOString(),
+    species: {
+      slowking: {
+        species: "Slowking",
+        formats: {
+          "[Gen 9] UU": {
+            battlesSeen: 5,
+            leadCount: 0,
+            moves: {
+              "Chilly Reception": 3,
+              "Future Sight": 3,
+              "Scald": 2,
+              "Slack Off": 2
+            },
+            items: {},
+            abilities: {},
+            teraTypes: {
+              Bug: 1
+            },
+            observedDamage: {},
+            observedTakenDamage: {},
+            observedDamageByContext: {},
+            observedTakenDamageByContext: {},
+            speedFirstVs: {},
+            speedSecondVs: {},
+            speedFasterThan: {},
+            speedSlowerThan: {}
+          }
+        }
+      }
+    },
+    battles: {},
+    externalCurated: {
+      species: {},
+      imports: {}
+    }
+  }, null, 2));
+
+  await importExternalCuratedTeamPriors({
+    format: "[Gen 9] UU",
+    formatId: "gen9uu",
+    sourceUrl: "https://data.pkmn.cc/teams/gen9uu.json",
+    teams: Array.from({ length: 8 }, () => ({
+      data: [
+        {
+          species: "Slowking",
+          item: "Heavy-Duty Boots",
+          ability: "Regenerator",
+          teraType: "Fairy",
+          moves: ["Scald", "Chilly Reception", "Slack Off", "Thunder Wave"]
+        }
+      ]
+    }))
+  });
+
+  const opponent = makePokemon({
+    ident: "p2a: Slowking",
+    species: "Slowking",
+    displayName: "Slowking",
+    active: true,
+    knownMoves: [],
+    item: null,
+    ability: null,
+    teraType: null,
+    stats: { hp: 394, atk: 166, def: 196, spa: 236, spd: 316, spe: 96 },
+    types: ["Water", "Psychic"]
+  });
+  const snapshot = makeSnapshot({
+    roomId: "battle-sample-team-confidence",
+    opponentSide: {
+      slot: "p2",
+      name: "Opponent",
+      active: opponent,
+      team: [opponent]
+    }
+  });
+
+  const intel = await buildLocalIntelSnapshot(snapshot);
+  const slowking = intel.opponents[0];
+
+  assert.equal(slowking?.battlesSeen, 5);
+  assert.equal(slowking?.curatedTeamCount, 8);
+  assert.equal(slowking?.externalCurated?.teamCount, 8);
+  assert.equal(slowking?.externalCurated?.effectiveConfidenceSamples, 7.8);
+  assert.equal(slowking?.blendedPriorCount, 7.8);
+  assert.equal(slowking?.likelyItems[0]?.sampleCount, 13);
+  assert.equal(slowking?.likelyItems[0]?.name, "Heavy-Duty Boots");
+  assert.equal(slowking?.likelyItems[0]?.confidenceTier, "usable");
+  assert.equal(slowking?.likelyAbilities[0]?.name, "Regenerator");
+  assert.equal(slowking?.likelyAbilities[0]?.confidenceTier, "usable");
 });
 
 test("damage preview keeps uncapped max damage and current hp coverage separate", () => {
@@ -1534,6 +1745,79 @@ test("speed preview respects trick room tailwind paralysis boosts and scarf", as
   assert.ok((intel.speedPreview?.confounders ?? []).includes("your Choice Scarf"));
 });
 
+test("speed preview widens for unrevealed field speed abilities like Sand Rush", async () => {
+  const base = makeSnapshot({
+    roomId: "battle-speed-sand-rush",
+    yourSide: {
+      slot: "p1",
+      name: "You",
+      active: makePokemon({
+        ident: "p1a: Arcanine",
+        species: "Arcanine-Hisui",
+        displayName: "Arcanine-Hisui",
+        active: true,
+        item: "Choice Scarf",
+        ability: "Rock Head",
+        stats: { hp: 331, atk: 329, def: 196, spa: 203, spd: 197, spe: 306 },
+        types: ["Fire", "Rock"]
+      }),
+      team: [makePokemon({
+        ident: "p1a: Arcanine",
+        species: "Arcanine-Hisui",
+        displayName: "Arcanine-Hisui",
+        active: true,
+        item: "Choice Scarf",
+        ability: "Rock Head",
+        stats: { hp: 331, atk: 329, def: 196, spa: 203, spd: 197, spe: 306 },
+        types: ["Fire", "Rock"]
+      })]
+    },
+    opponentSide: {
+      slot: "p2",
+      name: "Opponent",
+      active: makePokemon({
+        ident: "p2a: Excadrill",
+        species: "Excadrill",
+        displayName: "Excadrill",
+        active: true,
+        stats: { hp: 341, atk: 369, def: 156, spa: 126, spd: 166, spe: 281 },
+        types: ["Ground", "Steel"]
+      }),
+      team: [makePokemon({
+        ident: "p2a: Excadrill",
+        species: "Excadrill",
+        displayName: "Excadrill",
+        active: true,
+        stats: { hp: 341, atk: 369, def: 156, spa: 126, spd: 166, spe: 281 },
+        types: ["Ground", "Steel"]
+      })]
+    },
+    field: {
+      weather: "Sandstorm",
+      terrain: null,
+      pseudoWeather: [],
+      yourSideConditions: [],
+      opponentSideConditions: []
+    }
+  });
+
+  const unrevealed = await buildLocalIntelSnapshot(base);
+  assert.equal(unrevealed.speedPreview?.activeRelation, "overlap");
+  assert.ok(Number(unrevealed.speedPreview?.effectiveRange?.max ?? 0) >= 604);
+  assert.ok((unrevealed.speedPreview?.confounders ?? []).includes("possible opponent Sand Rush"));
+
+  const moldBreaker = await buildLocalIntelSnapshot({
+    ...base,
+    opponentSide: {
+      ...base.opponentSide,
+      active: makePokemon({ ...base.opponentSide.active, ability: "Mold Breaker" }),
+      team: [makePokemon({ ...base.opponentSide.active, ability: "Mold Breaker" })]
+    }
+  });
+  assert.equal(moldBreaker.speedPreview?.activeRelation, "faster");
+  assert.ok(!(moldBreaker.speedPreview?.confounders ?? []).includes("possible opponent Sand Rush"));
+});
+
 test("knocked off items stay revealed for intel without being treated as currently held", async () => {
   const prior = makeSnapshot({
     roomId: "battle-knockoff-history-prior",
@@ -1935,6 +2219,56 @@ test("opponent threat preview preserves blocked status outcomes", () => {
   assert.equal(threats.length, 1);
   assert.equal(threats[0]?.currentTarget.bands[0]?.outcome, "blocked");
   assert.match(threats[0]?.currentTarget.summary ?? "", /blocked/i);
+});
+
+test("predictor treats blocked repeat status as a switch catch, not a live active-target line", async () => {
+  const yourHydreigon = makePokemon({
+    ident: "p1a: Hydreigon-paralyzed",
+    species: "Hydreigon",
+    displayName: "Hydreigon",
+    active: true,
+    status: "par",
+    knownMoves: ["Dark Pulse"],
+    hpPercent: 78,
+    stats: { hp: 323, atk: 246, def: 216, spa: 383, spd: 216, spe: 324 },
+    types: ["Dark", "Dragon"]
+  });
+  const opponentGrimmsnarl = makePokemon({
+    ident: "p2a: Grimmsnarl-repeat-status",
+    species: "Grimmsnarl",
+    displayName: "Grimmsnarl",
+    active: true,
+    ability: "Prankster",
+    knownMoves: ["Thunder Wave", "Spirit Break"],
+    stats: { hp: 394, atk: 339, def: 196, spa: 206, spd: 196, spe: 156 },
+    types: ["Dark", "Fairy"]
+  });
+  const snapshot = makeSnapshot({
+    roomId: "battle-predictor-repeat-status",
+    yourSide: {
+      slot: "p1",
+      name: "You",
+      active: yourHydreigon,
+      team: [yourHydreigon]
+    },
+    opponentSide: {
+      slot: "p2",
+      name: "Opponent",
+      active: opponentGrimmsnarl,
+      team: [opponentGrimmsnarl]
+    },
+    legalActions: [{ id: "move:darkpulse", kind: "move", label: "Dark Pulse", moveName: "Dark Pulse" }]
+  });
+
+  const intel = await buildLocalIntelSnapshot(snapshot);
+  const prediction = intel.opponentActionPrediction;
+  assert.ok(prediction);
+  assert.equal(prediction?.topActionClass, "stay_attack");
+  assert.equal(prediction?.topActions[0]?.moveName, "Spirit Break");
+  const thunderWave = prediction?.topActions.find((candidate) => candidate.moveName === "Thunder Wave");
+  assert.ok(thunderWave);
+  assert.ok(!(thunderWave?.reasons ?? []).includes("status line is live into your active"));
+  assert.ok((thunderWave?.riskFlags ?? []).includes("your active can ignore or block this status"));
 });
 
 test("damage preview respects direct immunities, Tera overrides, Purifying Salt, and Multiscale", () => {
@@ -2710,6 +3044,66 @@ test("predictor prefers a revealed switch immunity when the active mon is threat
   );
 });
 
+test("predictor can use a preview-known unrevealed reserve as a switch target", async () => {
+  const yourJolteon = makePokemon({
+    ident: "p1a: Jolteon-preview-switch",
+    species: "Jolteon",
+    displayName: "Jolteon",
+    active: true,
+    knownMoves: ["Thunderbolt"],
+    stats: { hp: 271, atk: 166, def: 156, spa: 350, spd: 226, spe: 394 },
+    types: ["Electric"]
+  });
+  const opponentGyarados = makePokemon({
+    ident: "p2a: Gyarados-preview-switch",
+    species: "Gyarados",
+    displayName: "Gyarados",
+    active: true,
+    knownMoves: ["Waterfall"],
+    hpPercent: 88,
+    stats: { hp: 331, atk: 349, def: 194, spa: 156, spd: 236, spe: 287 },
+    types: ["Water", "Flying"]
+  });
+  const gastrodon = makePokemon({
+    ident: "p2b: Gastrodon-preview-switch",
+    species: "Gastrodon",
+    displayName: "Gastrodon",
+    active: false,
+    revealed: false,
+    knownMoves: [],
+    ability: null,
+    stats: { hp: 426, atk: 185, def: 251, spa: 203, spd: 251, spe: 107 },
+    types: ["Water", "Ground"]
+  });
+  const snapshot = makeSnapshot({
+    roomId: "battle-predictor-preview-switch",
+    yourSide: {
+      slot: "p1",
+      name: "You",
+      active: yourJolteon,
+      team: [yourJolteon]
+    },
+    opponentSide: {
+      slot: "p2",
+      name: "Opponent",
+      active: opponentGyarados,
+      team: [opponentGyarados, gastrodon]
+    },
+    legalActions: [{ id: "move:thunderbolt", kind: "move", label: "Thunderbolt", moveName: "Thunderbolt" }]
+  });
+
+  const intel = await buildLocalIntelSnapshot(snapshot);
+  const prediction = intel.opponentActionPrediction;
+  const gastrodonSwitch = prediction?.topActions.find((candidate) => candidate.switchTargetSpecies === "Gastrodon");
+
+  assert.ok(prediction);
+  assert.equal(prediction?.topActionClass, "switch");
+  assert.equal(gastrodonSwitch?.source, "previewed_switch");
+  assert.ok(
+    (gastrodonSwitch?.reasons ?? []).some((reason) => /known reserve|absorbs your best attacks|obvious immunity/i.test(reason))
+  );
+});
+
 test("predictor surfaces a likely hidden coverage move when priors make it credible", async () => {
   for (let index = 0; index < 3; index += 1) {
     const priorAzelf = makePokemon({
@@ -3302,9 +3696,13 @@ test("self recommender prefers a priority KO over slower setup", async () => {
   assert.ok(
     (recommendation?.rankedActions[0]?.reasons ?? []).some((reason) => /endgame/i.test(reason))
   );
-  const prompt = buildAnalysisPrompt(snapshot, { localIntel: intel, includeToolHint: false });
-  assert.match(prompt, /Deterministic self-recommendation:/);
-  assert.match(prompt, /move:bulletpunch/i);
+  const prompt = buildAnalysisPrompt(snapshot, {
+    localIntel: intel,
+    includeToolHint: false,
+    analysisMode: "tactical"
+  });
+  assert.doesNotMatch(prompt, /Deterministic self-recommendation:/);
+  assert.match(prompt, /Form an independent ranking from the snapshot and opponent context/i);
 });
 
 test("self recommender values hazard removal when multiple reserves are taxed", async () => {
@@ -3457,6 +3855,78 @@ test("self recommender prefers an immunity switch when staying gets punished", a
   assert.ok(
     (surf?.riskFlags ?? []).some((flag) => /still-valuable active/i.test(flag))
   );
+});
+
+test("self recommender resolves switch labels to the matching species before nickname collisions", async () => {
+  const yourToxapex = makePokemon({
+    ident: "p1a: Toxapex-switch-collision",
+    species: "Toxapex",
+    displayName: "Toxapex",
+    active: true,
+    hpPercent: 44,
+    knownMoves: ["Surf"],
+    stats: { hp: 304, atk: 146, def: 443, spa: 166, spd: 343, spe: 106 },
+    types: ["Water", "Poison"]
+  });
+  const taurosCombatNicknamedBlaze = makePokemon({
+    ident: "p1b: Tauros-Paldea-Blaze",
+    species: "Tauros-Paldea-Combat",
+    displayName: "Tauros-Paldea-Blaze",
+    hpPercent: 100,
+    stats: { hp: 291, atk: 319, def: 216, spa: 156, spd: 176, spe: 350 },
+    types: ["Fighting"]
+  });
+  const taurosBlaze = makePokemon({
+    ident: "p1c: Tauros-Paldea-Blaze-actual",
+    species: "Tauros-Paldea-Blaze",
+    displayName: "Tauros-Paldea-Blaze",
+    hpPercent: 100,
+    stats: { hp: 291, atk: 319, def: 216, spa: 156, spd: 176, spe: 350 },
+    types: ["Fighting", "Fire"]
+  });
+  const opponentJolteon = makePokemon({
+    ident: "p2a: Jolteon-switch-collision",
+    species: "Jolteon",
+    displayName: "Jolteon",
+    active: true,
+    knownMoves: ["Thunderbolt"],
+    stats: { hp: 271, atk: 166, def: 156, spa: 350, spd: 226, spe: 394 },
+    types: ["Electric"]
+  });
+
+  const snapshot = makeSnapshot({
+    roomId: "battle-self-recommend-switch-collision",
+    turn: 8,
+    yourSide: {
+      slot: "p1",
+      name: "You",
+      active: yourToxapex,
+      team: [yourToxapex, taurosCombatNicknamedBlaze, taurosBlaze]
+    },
+    opponentSide: {
+      slot: "p2",
+      name: "Opponent",
+      active: opponentJolteon,
+      team: [opponentJolteon]
+    },
+    legalActions: [
+      { id: "move:surf", kind: "move", label: "Surf", moveName: "Surf" },
+      {
+        id: "switch:taurospaldeablaze",
+        kind: "switch",
+        label: "Switch to Tauros-Paldea-Blaze",
+        target: "Tauros-Paldea-Blaze"
+      }
+    ]
+  });
+
+  const intel = await buildLocalIntelSnapshot(snapshot);
+  const switchCandidate = intel.selfActionRecommendation?.rankedActions.find(
+    (candidate) => candidate.actionId === "switch:taurospaldeablaze"
+  );
+
+  assert.ok(switchCandidate);
+  assert.equal(switchCandidate?.switchTargetSpecies, "Tauros-Paldea-Blaze");
 });
 
 test("reply-aware search penalizes obvious immunity switch targets for moves", async () => {
@@ -3669,6 +4139,215 @@ test("reply-aware search rewards safe setup conversion in a thin late game", asy
   assert.ok(
     (swordsDance?.reasons ?? []).some((reason) => /setup converts well/i.test(reason))
   );
+});
+
+test("unspent Tera uncertainty only drags lines that depend on the type matchup", async () => {
+  const yourGreatTusk = makePokemon({
+    ident: "p1a: Great Tusk-tera-uncertainty",
+    species: "Great Tusk",
+    displayName: "Great Tusk",
+    active: true,
+    hpPercent: 92,
+    knownMoves: ["Headlong Rush", "Swords Dance"],
+    stats: { hp: 401, atk: 371, def: 298, spa: 126, spd: 219, spe: 339 },
+    types: ["Ground", "Fighting"]
+  });
+  const opponentGholdengo = makePokemon({
+    ident: "p2a: Gholdengo-tera-uncertainty",
+    species: "Gholdengo",
+    displayName: "Gholdengo",
+    active: true,
+    hpPercent: 82,
+    knownMoves: ["Make It Rain", "Shadow Ball"],
+    stats: { hp: 304, atk: 176, def: 226, spa: 389, spd: 236, spe: 276 },
+    types: ["Steel", "Ghost"],
+    teraType: "Steel",
+    terastallized: false
+  });
+
+  const unspentSnapshot = makeSnapshot({
+    roomId: "battle-tera-uncertainty-unspent",
+    turn: 6,
+    yourSide: {
+      slot: "p1",
+      name: "You",
+      active: yourGreatTusk,
+      team: [yourGreatTusk]
+    },
+    opponentSide: {
+      slot: "p2",
+      name: "Opponent",
+      active: opponentGholdengo,
+      team: [opponentGholdengo]
+    },
+    legalActions: [
+      { id: "move:headlongrush", kind: "move", label: "Headlong Rush", moveName: "Headlong Rush" },
+      { id: "move:swordsdance", kind: "move", label: "Swords Dance", moveName: "Swords Dance" }
+    ]
+  });
+  const spentSnapshot = makeSnapshot({
+    ...unspentSnapshot,
+    roomId: "battle-tera-uncertainty-spent",
+    opponentSide: {
+      ...unspentSnapshot.opponentSide,
+      active: {
+        ...opponentGholdengo,
+        terastallized: true
+      },
+      team: [
+        {
+          ...opponentGholdengo,
+          terastallized: true
+        }
+      ]
+    }
+  });
+
+  const unspentIntel = await buildLocalIntelSnapshot(unspentSnapshot);
+  const spentIntel = await buildLocalIntelSnapshot(spentSnapshot);
+  const unspentHeadlongRush = unspentIntel.selfActionRecommendation?.rankedActions.find((candidate) => candidate.actionId === "move:headlongrush");
+  const spentHeadlongRush = spentIntel.selfActionRecommendation?.rankedActions.find((candidate) => candidate.actionId === "move:headlongrush");
+  const unspentSwordsDance = unspentIntel.selfActionRecommendation?.rankedActions.find((candidate) => candidate.actionId === "move:swordsdance");
+  const spentSwordsDance = spentIntel.selfActionRecommendation?.rankedActions.find((candidate) => candidate.actionId === "move:swordsdance");
+
+  assert.ok(unspentHeadlongRush);
+  assert.ok(spentHeadlongRush);
+  assert.ok(unspentSwordsDance);
+  assert.ok(spentSwordsDance);
+  assert.ok((spentHeadlongRush?.score ?? 0) > (unspentHeadlongRush?.score ?? 0));
+  assert.ok(!(unspentSwordsDance?.riskFlags ?? []).some((flag) => /tera/i.test(flag)));
+  assert.ok((spentSwordsDance?.riskFlags ?? []).every((flag) => !/tera/i.test(flag)));
+});
+
+test("reply-aware self search includes close-score fifth actions and all switches", () => {
+  const actionIds = selectReplyAwareSearchActionIds([
+    { actionId: "move:a", kind: "move", label: "A", score: 80, reasons: [], riskFlags: [] },
+    { actionId: "move:b", kind: "move", label: "B", score: 79, reasons: [], riskFlags: [] },
+    { actionId: "move:c", kind: "move", label: "C", score: 78, reasons: [], riskFlags: [] },
+    { actionId: "move:d", kind: "move", label: "D", score: 77, reasons: [], riskFlags: [] },
+    { actionId: "move:e", kind: "move", label: "E", score: 74, reasons: [], riskFlags: [] },
+    { actionId: "switch:f", kind: "switch", label: "Switch to F", score: 60, reasons: [], riskFlags: [] }
+  ]);
+
+  assert.ok(actionIds.has("move:e"));
+  assert.ok(actionIds.has("switch:f"));
+});
+
+test("reply-aware opponent search expands beyond three replies when the extra branch still carries weight", () => {
+  const replies = weightedOpponentReplies({
+    topActionClass: "stay_attack",
+    confidenceTier: "medium",
+    reasons: [],
+    riskFlags: [],
+    topActions: [
+      { type: "known_move", actionClass: "stay_attack", label: "Attack A", moveName: "Thunderbolt", score: 100, reasons: [], riskFlags: [] },
+      { type: "known_move", actionClass: "stay_attack", label: "Attack B", moveName: "Volt Switch", score: 94, reasons: [], riskFlags: [] },
+      { type: "known_status_or_setup", actionClass: "status_or_setup", label: "Calm Mind", moveName: "Calm Mind", score: 90, reasons: [], riskFlags: [] },
+      { type: "likely_switch", actionClass: "switch", label: "Switch Dragonite", switchTargetSpecies: "Dragonite", source: "revealed_switch", score: 86, reasons: [], riskFlags: [] },
+      { type: "likely_hidden_move", actionClass: "stay_attack", label: "Hidden Power", moveName: "Hidden Power", source: "likely", score: 20, reasons: [], riskFlags: [] }
+    ]
+  });
+
+  assert.equal(replies.length, 4);
+  assert.equal(replies[3]?.candidate.switchTargetSpecies, "Dragonite");
+});
+
+test("reply-aware search now respects a weighted fourth opponent branch", () => {
+  const yourGreatTusk = makePokemon({
+    ident: "p1a: Great Tusk-fourth-reply",
+    species: "Great Tusk",
+    displayName: "Great Tusk",
+    active: true,
+    hpPercent: 100,
+    knownMoves: ["Headlong Rush", "Stealth Rock"],
+    stats: { hp: 401, atk: 371, def: 298, spa: 126, spd: 219, spe: 339 },
+    types: ["Ground", "Fighting"]
+  });
+  const opponentGholdengo = makePokemon({
+    ident: "p2a: Gholdengo-fourth-reply",
+    species: "Gholdengo",
+    displayName: "Gholdengo",
+    active: true,
+    hpPercent: 64,
+    knownMoves: ["Make It Rain", "Shadow Ball"],
+    stats: { hp: 304, atk: 176, def: 226, spa: 389, spd: 236, spe: 276 },
+    types: ["Steel", "Ghost"]
+  });
+  const opponentDragonite = makePokemon({
+    ident: "p2b: Dragonite-fourth-reply",
+    species: "Dragonite",
+    displayName: "Dragonite",
+    hpPercent: 100,
+    knownMoves: ["Extreme Speed"],
+    stats: { hp: 386, atk: 403, def: 226, spa: 236, spd: 236, spe: 259 },
+    types: ["Dragon", "Flying"]
+  });
+
+  const snapshot = makeSnapshot({
+    roomId: "battle-self-recommend-fourth-reply",
+    turn: 4,
+    yourSide: {
+      slot: "p1",
+      name: "You",
+      active: yourGreatTusk,
+      team: [yourGreatTusk]
+    },
+    opponentSide: {
+      slot: "p2",
+      name: "Opponent",
+      active: opponentGholdengo,
+      team: [opponentGholdengo, opponentDragonite]
+    },
+    legalActions: [
+      { id: "move:headlongrush", kind: "move", label: "Headlong Rush", moveName: "Headlong Rush" },
+      { id: "move:stealthrock", kind: "move", label: "Stealth Rock", moveName: "Stealth Rock" }
+    ]
+  });
+
+  const playerDamagePreview = buildDamagePreview(snapshot);
+  const opponentThreatPreview = buildThreatPreview(snapshot, {
+    moveCandidates: [
+      { name: "Make It Rain", source: "known" },
+      { name: "Shadow Ball", source: "known" }
+    ]
+  });
+  const basePrediction = {
+    topActionClass: "stay_attack" as const,
+    confidenceTier: "medium" as const,
+    reasons: [],
+    riskFlags: [],
+    topActions: [
+      { type: "known_move" as const, actionClass: "stay_attack" as const, label: "Make It Rain", moveName: "Make It Rain", score: 100, reasons: [], riskFlags: [] },
+      { type: "known_move" as const, actionClass: "stay_attack" as const, label: "Shadow Ball", moveName: "Shadow Ball", score: 94, reasons: [], riskFlags: [] },
+      { type: "known_status_or_setup" as const, actionClass: "status_or_setup" as const, label: "Nasty Plot", moveName: "Nasty Plot", score: 90, reasons: [], riskFlags: [] }
+    ]
+  };
+
+  const withoutFourthReply = buildSelfActionRecommendation({
+    snapshot,
+    playerDamagePreview,
+    opponentThreatPreview,
+    opponentActionPrediction: basePrediction
+  });
+  const withFourthReply = buildSelfActionRecommendation({
+    snapshot,
+    playerDamagePreview,
+    opponentThreatPreview,
+    opponentActionPrediction: {
+      ...basePrediction,
+      topActions: [
+        ...basePrediction.topActions,
+        { type: "likely_switch" as const, actionClass: "switch" as const, label: "Switch Dragonite", switchTargetSpecies: "Dragonite", source: "revealed_switch" as const, score: 86, reasons: [], riskFlags: [] }
+      ]
+    }
+  });
+
+  const noFourthSearch = withoutFourthReply?.rankedActions.find((candidate) => candidate.actionId === "move:headlongrush")?.scoreBreakdown
+    ?.find((entry) => entry.key === "search")?.value ?? 0;
+  const withFourthSearch = withFourthReply?.rankedActions.find((candidate) => candidate.actionId === "move:headlongrush")?.scoreBreakdown
+    ?.find((entry) => entry.key === "search")?.value ?? 0;
+
+  assert.ok(withFourthSearch < noFourthSearch);
 });
 
 test("predictor values early pivot attacks when a safe reserve exists", async () => {
@@ -3960,6 +4639,84 @@ test("strategic analysis prompt allows synthetic plan ids and emphasizes broader
   assert.match(prompt, /special:plan-primary, special:plan-secondary, special:plan-avoid/);
   assert.match(prompt, /broader strategic guidance/i);
   assert.match(prompt, /preserve vs sack decisions, scouting, tera timing, win conditions, hazard posture/i);
+});
+
+test("strategic analysis prompt treats stale snapshots as planning context instead of live clicks", () => {
+  const snapshot = makeSnapshot({
+    roomId: "battle-strategic-stale",
+    legalActions: [{ id: "move:uturn", kind: "move", label: "U-turn", moveName: "U-turn" }]
+  });
+
+  const prompt = buildAnalysisPrompt(snapshot, {
+    analysisMode: "strategic",
+    includeToolHint: false,
+    requestContext: {
+      tabStatus: "stale_snapshot",
+      actionableNow: false,
+      snapshotAgeMs: 42_000,
+      wait: false,
+      forceSwitch: false,
+      teamPreview: false
+    }
+  });
+
+  assert.match(prompt, /Tab status stale_snapshot; actionable now no\./);
+  assert.match(prompt, /Only rank current legal actions when requestContext\.actionableNow is true\./);
+  assert.match(prompt, /Treat stale or waiting snapshots as planning context, not as permission to recommend an immediate click\./);
+});
+
+test("tactical analysis prompt avoids injecting the deterministic self recommendation block", () => {
+  const snapshot = makeSnapshot();
+  const prompt = buildAnalysisPrompt(snapshot, {
+    analysisMode: "tactical",
+    includeToolHint: false,
+    localIntel: {
+      generatedAt: new Date().toISOString(),
+      note: "test",
+      opponents: [],
+      selfActionRecommendation: {
+        topActionId: "move:bulletpunch",
+        confidenceTier: "high",
+        rankedActions: [{
+          actionId: "move:bulletpunch",
+          kind: "move",
+          label: "Bullet Punch",
+          score: 91,
+          reasons: ["priority cleanup"],
+          riskFlags: [],
+          moveName: "Bullet Punch"
+        }],
+        reasons: ["priority cleanup"],
+        riskFlags: [],
+        summary: "Click Bullet Punch."
+      }
+    }
+  });
+
+  assert.doesNotMatch(prompt, /Deterministic self-recommendation:/);
+  assert.match(prompt, /Form an independent ranking from the snapshot and opponent context; do not assume a hidden deterministic best line exists\./);
+});
+
+test("gemini prompt allows synthetic strategic ids when the snapshot is not actionable", () => {
+  const snapshot = makeSnapshot({
+    roomId: "battle-gemini-strategic-stale",
+    legalActions: [{ id: "move:uturn", kind: "move", label: "U-turn", moveName: "U-turn" }]
+  });
+
+  const prompt = buildGeminiPrompt(snapshot, {
+    analysisMode: "strategic",
+    requestContext: {
+      tabStatus: "waiting_or_not_your_turn",
+      actionableNow: false,
+      snapshotAgeMs: 1800,
+      wait: true,
+      forceSwitch: false,
+      teamPreview: false
+    }
+  });
+
+  assert.match(prompt, /Otherwise use only these synthetic strategic IDs: special:plan-primary, special:plan-secondary, special:plan-avoid\./);
+  assert.doesNotMatch(prompt, /^Use only action IDs from snapshot\.legalActions\.$/m);
 });
 
 test("mock provider strategic mode emits strategic plan actions when no legal actions are present", async () => {

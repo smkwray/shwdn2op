@@ -84,6 +84,39 @@
         </select>
       </label>
 
+      <section class="toggle-group">
+        <h2>Second Opinion</h2>
+
+        <label class="checkbox">
+          <input id="compareMode" type="checkbox" />
+          <span>Run compare analysis alongside the primary provider</span>
+        </label>
+      </section>
+
+      <label class="field" id="compareProviderRow">
+        <span>Compare provider</span>
+        <select id="compareProvider">
+          <option value="codex">codex</option>
+          <option value="claude">claude</option>
+          <option value="gemini">gemini</option>
+        </select>
+      </label>
+
+      <label class="field" id="compareCodexModelRow">
+        <span>Compare Codex model</span>
+        <select id="compareCodexModel"></select>
+      </label>
+
+      <label class="field" id="compareClaudeModelRow">
+        <span>Compare Claude model</span>
+        <select id="compareClaudeModel"></select>
+      </label>
+
+      <label class="field" id="compareGeminiModelRow">
+        <span>Compare Gemini model</span>
+        <select id="compareGeminiModel"></select>
+      </label>
+
       <label class="checkbox">
         <input id="autoDownloadReplay" type="checkbox" />
         <span>Auto-save replay after game</span>

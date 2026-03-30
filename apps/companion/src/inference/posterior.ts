@@ -41,11 +41,16 @@ export interface PosteriorBattleSpeciesEvidence {
 }
 
 export interface PosteriorFormatStats {
-  battlesSeen: number;
-  moves: Record<string, number>;
-  items: Record<string, number>;
-  abilities: Record<string, number>;
-  teraTypes: Record<string, number>;
+  observedBattlesSeen: number;
+  curatedTeamCount?: number | undefined;
+  observedMoves: Record<string, number>;
+  observedItems: Record<string, number>;
+  observedAbilities: Record<string, number>;
+  observedTeraTypes: Record<string, number>;
+  curatedMoves: Record<string, number>;
+  curatedItems: Record<string, number>;
+  curatedAbilities: Record<string, number>;
+  curatedTeraTypes: Record<string, number>;
 }
 
 interface PosteriorBuildParams {
@@ -82,6 +87,7 @@ const DEFAULT_ITEMS = [
   "Assault Vest",
   "Eviolite"
 ];
+const CURATED_PRIOR_WEIGHT = 0.35;
 
 const ARCHETYPES: ArchetypeConfig[] = [
   { id: "fast_phys", nature: "Jolly", evs: { hp: 4, atk: 252, spe: 252 }, role: "physical" },
@@ -167,6 +173,44 @@ function smoothedShare(record: Record<string, number>, value: string | null, bat
   if (!value) return 1 / Math.max(1, candidateCount);
   const count = record[value] ?? 0;
   return (count + 1) / Math.max(1, battlesSeen + candidateCount);
+}
+
+function totalRecordedCounts(record: Record<string, number>) {
+  return Object.values(record ?? {}).reduce((sum, count) => sum + count, 0);
+}
+
+function combinedSmoothedShare(params: {
+  observedRecord: Record<string, number>;
+  observedSamples: number;
+  curatedRecord: Record<string, number>;
+  curatedSamples: number;
+  value: string | null;
+  candidateCount: number;
+}) {
+  const observedWeight = params.observedSamples > 0 && totalRecordedCounts(params.observedRecord) > 0 ? 1 : 0;
+  const curatedWeight = params.curatedSamples > 0 && totalRecordedCounts(params.curatedRecord) > 0 ? CURATED_PRIOR_WEIGHT : 0;
+  const totalWeight = observedWeight + curatedWeight;
+  if (totalWeight <= 0) return 1 / Math.max(1, params.candidateCount);
+  const observedShare = observedWeight > 0
+    ? smoothedShare(params.observedRecord, params.value, params.observedSamples, params.candidateCount)
+    : 0;
+  const curatedShare = curatedWeight > 0
+    ? smoothedShare(params.curatedRecord, params.value, params.curatedSamples, params.candidateCount)
+    : 0;
+  return ((observedShare * observedWeight) + (curatedShare * curatedWeight)) / totalWeight;
+}
+
+function combinedTopRecordNames(records: Array<Record<string, number>>, limit: number) {
+  const combined = new Map<string, number>();
+  for (const record of records) {
+    for (const [name, count] of Object.entries(record ?? {})) {
+      combined.set(name, (combined.get(name) ?? 0) + count);
+    }
+  }
+  return [...combined.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, limit)
+    .map(([name]) => name);
 }
 
 function uniqueNames(values: Array<string | null | undefined>) {
@@ -506,14 +550,20 @@ function candidateAbilities(opponent: PokemonSnapshot, format: string) {
 function candidateItems(opponent: PokemonSnapshot, formatStats: PosteriorFormatStats) {
   if (!opponent.item && opponent.removedItem) return [null];
   if (opponent.item) return [opponent.item];
-  return uniqueNames([...topRecordNames(formatStats.items, 4), ...DEFAULT_ITEMS]);
+  return uniqueNames([
+    ...combinedTopRecordNames([formatStats.observedItems, formatStats.curatedItems], 4),
+    ...DEFAULT_ITEMS
+  ]);
 }
 
 function candidateTeraTypes(opponent: PokemonSnapshot, format: string, formatStats: PosteriorFormatStats) {
   if (opponent.teraType) return [opponent.teraType];
   const gen = dataGen(generationFromFormat(format));
   const species = lookupSpecies(gen, opponent.species ?? opponent.displayName);
-  return uniqueNames([...topRecordNames(formatStats.teraTypes, 4), ...(species?.types ?? [])]);
+  return uniqueNames([
+    ...combinedTopRecordNames([formatStats.observedTeraTypes, formatStats.curatedTeraTypes], 4),
+    ...(species?.types ?? [])
+  ]);
 }
 
 function buildEvidenceSummary(params: {
@@ -522,10 +572,16 @@ function buildEvidenceSummary(params: {
   formatStats: PosteriorFormatStats;
 }) {
   const evidence: PosteriorEvidence[] = [];
-  if (params.formatStats.battlesSeen > 0) {
+  if (params.formatStats.observedBattlesSeen > 0 || (params.formatStats.curatedTeamCount ?? 0) > 0) {
+    const observed = params.formatStats.observedBattlesSeen;
+    const curated = params.formatStats.curatedTeamCount ?? 0;
+    const parts = [
+      observed > 0 ? `${observed} stored battle${observed === 1 ? "" : "s"}` : null,
+      curated > 0 ? `${curated} imported sample team${curated === 1 ? "" : "s"}` : null
+    ].filter(Boolean);
     evidence.push({
       kind: "priors",
-      label: `Species-format priors from ${params.formatStats.battlesSeen} stored battle${params.formatStats.battlesSeen === 1 ? "" : "s"}`
+      label: `Species-format priors from ${parts.join(" + ") || "curated support"}`
     });
   }
   if (params.opponent.item || params.opponent.ability || params.opponent.teraType) {
@@ -582,9 +638,30 @@ export function buildOpponentPosterior(params: PosteriorBuildParams): OpponentPo
     for (const item of items.length > 0 ? items : [null]) {
       for (const teraType of teraTypes.length > 0 ? teraTypes : [null]) {
         let logScore = 0;
-        logScore += Math.log(smoothedShare(params.formatStats.abilities, ability, params.formatStats.battlesSeen, Math.max(1, abilities.length)));
-        logScore += Math.log(smoothedShare(params.formatStats.items, item, params.formatStats.battlesSeen, Math.max(1, items.length)));
-        logScore += Math.log(smoothedShare(params.formatStats.teraTypes, teraType, params.formatStats.battlesSeen, Math.max(1, teraTypes.length)));
+        logScore += Math.log(combinedSmoothedShare({
+          observedRecord: params.formatStats.observedAbilities,
+          observedSamples: params.formatStats.observedBattlesSeen,
+          curatedRecord: params.formatStats.curatedAbilities,
+          curatedSamples: params.formatStats.curatedTeamCount ?? 0,
+          value: ability,
+          candidateCount: Math.max(1, abilities.length)
+        }));
+        logScore += Math.log(combinedSmoothedShare({
+          observedRecord: params.formatStats.observedItems,
+          observedSamples: params.formatStats.observedBattlesSeen,
+          curatedRecord: params.formatStats.curatedItems,
+          curatedSamples: params.formatStats.curatedTeamCount ?? 0,
+          value: item,
+          candidateCount: Math.max(1, items.length)
+        }));
+        logScore += Math.log(combinedSmoothedShare({
+          observedRecord: params.formatStats.observedTeraTypes,
+          observedSamples: params.formatStats.observedBattlesSeen,
+          curatedRecord: params.formatStats.curatedTeraTypes,
+          curatedSamples: params.formatStats.curatedTeamCount ?? 0,
+          value: teraType,
+          candidateCount: Math.max(1, teraTypes.length)
+        }));
         skeletons.push({ ability, item, teraType, logScore });
       }
     }

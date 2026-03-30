@@ -43,7 +43,8 @@ export class CodexProvider implements Provider {
   async analyzeDetailed(snapshot: BattleSnapshot, context: ProviderContext): Promise<ProviderRunResult> {
     const prompt = buildAnalysisPrompt(snapshot, {
       analysisMode: context.analysisMode,
-      localIntel: context.localIntel
+      localIntel: context.localIntel,
+      requestContext: context.requestContext
     });
     const model = this.resolveModel(context.requestedModel);
     const tempFile = path.join(os.tmpdir(), `sso-codex-${Date.now()}-${Math.random().toString(16).slice(2)}.json`);

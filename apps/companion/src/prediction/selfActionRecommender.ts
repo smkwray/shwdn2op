@@ -18,8 +18,11 @@ import type {
 } from "../types.js";
 
 const gens = new Generations(Dex as any);
-const SEARCH_PLAYER_TOP_K = 4;
-const SEARCH_OPPONENT_TOP_K = 3;
+const SEARCH_PLAYER_MIN_COUNT = 4;
+const SEARCH_PLAYER_SCORE_BAND = 8;
+const SEARCH_OPPONENT_MIN_COUNT = 3;
+const SEARCH_OPPONENT_SCORE_BAND = 10;
+const SEARCH_OPPONENT_WEIGHT_COVERAGE = 0.85;
 
 function normalizeName(value: string | null | undefined) {
   return String(value ?? "")
@@ -344,14 +347,44 @@ function scoreComponentsForOutput(components: ActionScoreComponent[]) {
     .sort((a, b) => Math.abs(b.value) - Math.abs(a.value));
 }
 
-function weightedOpponentReplies(prediction: OpponentActionPrediction | undefined) {
-  const topActions = (prediction?.topActions ?? []).slice(0, SEARCH_OPPONENT_TOP_K);
-  if (topActions.length === 0) return [] as Array<{ candidate: OpponentActionPrediction["topActions"][number]; weight: number }>;
-  const total = topActions.reduce((sum, candidate, index) => sum + Math.max(0.1, Number(candidate.score ?? 0)) * (index === 0 ? 1.15 : 1), 0);
-  if (!Number.isFinite(total) || total <= 0) return [] as Array<{ candidate: OpponentActionPrediction["topActions"][number]; weight: number }>;
-  return topActions.map((candidate, index) => ({
+export function weightedOpponentReplies(prediction: OpponentActionPrediction | undefined) {
+  const actions = prediction?.topActions ?? [];
+  if (actions.length === 0) return [] as Array<{ candidate: OpponentActionPrediction["topActions"][number]; weight: number }>;
+
+  const weighted = actions.map((candidate, index) => ({
     candidate,
-    weight: (Math.max(0.1, Number(candidate.score ?? 0)) * (index === 0 ? 1.15 : 1)) / total
+    rawWeight: Math.max(0.1, Number(candidate.score ?? 0)) * (index === 0 ? 1.15 : 1)
+  }));
+  const totalRawWeight = weighted.reduce((sum, entry) => sum + entry.rawWeight, 0);
+  if (!Number.isFinite(totalRawWeight) || totalRawWeight <= 0) {
+    return [] as Array<{ candidate: OpponentActionPrediction["topActions"][number]; weight: number }>;
+  }
+
+  const leaderScore = Number(weighted[0]?.candidate.score ?? 0);
+  const selected: Array<{ candidate: OpponentActionPrediction["topActions"][number]; rawWeight: number }> = [];
+  let coveredWeight = 0;
+
+  for (let index = 0; index < weighted.length; index += 1) {
+    const entry = weighted[index];
+    if (!entry) continue;
+    const candidateScore = Number(entry.candidate.score ?? 0);
+    const withinScoreBand = candidateScore >= leaderScore - SEARCH_OPPONENT_SCORE_BAND;
+    const needsMoreCoverage = coveredWeight < SEARCH_OPPONENT_WEIGHT_COVERAGE;
+    if (index >= SEARCH_OPPONENT_MIN_COUNT && !withinScoreBand && !needsMoreCoverage) {
+      break;
+    }
+    selected.push(entry);
+    coveredWeight += entry.rawWeight / totalRawWeight;
+  }
+
+  const selectedTotal = selected.reduce((sum, entry) => sum + entry.rawWeight, 0);
+  if (!Number.isFinite(selectedTotal) || selectedTotal <= 0) {
+    return [] as Array<{ candidate: OpponentActionPrediction["topActions"][number]; weight: number }>;
+  }
+
+  return selected.map((entry) => ({
+    candidate: entry.candidate,
+    weight: entry.rawWeight / selectedTotal
   }));
 }
 
@@ -449,25 +482,88 @@ function switchFeelsGreat(band: DamageAssumptionBand | null | undefined) {
   );
 }
 
-function uncertaintyPenalty(snapshot: BattleSnapshot, prediction: OpponentActionPrediction | undefined, volatileLine: boolean) {
-  if (!volatileLine) return 0;
-  let penalty = 0;
-  if (!prediction || prediction.confidenceTier === "low") penalty += 4;
-  if (!snapshot.opponentSide.active?.terastallized) penalty += 3;
-  return penalty;
+function predictionUncertaintyPenalty(prediction: OpponentActionPrediction | undefined, predictionSensitive: boolean) {
+  if (!predictionSensitive) return 0;
+  return !prediction || prediction.confidenceTier === "low" ? 4 : 0;
+}
+
+function teraUncertaintyPenalty(snapshot: BattleSnapshot, teraSensitive: boolean) {
+  if (!teraSensitive || snapshot.opponentSide.active?.terastallized) return 0;
+  return 3;
+}
+
+function moveLineIsTeraSensitive(params: {
+  snapshot: BattleSnapshot;
+  move: ReturnType<typeof lookupMove>;
+  likely: DamageAssumptionBand | null;
+  hazardMove: boolean;
+  hazardRemovalMove: boolean;
+  setupMove: boolean;
+  recoveryMove: boolean;
+  targetedStatusMove: boolean;
+}) {
+  if (!params.move) return false;
+  if (params.hazardMove || params.hazardRemovalMove || params.setupMove || params.recoveryMove) return false;
+  if (params.targetedStatusMove) {
+    return isImmuneOrBlockedBand(params.likely);
+  }
+
+  const category = String(params.move.category ?? "");
+  if (category === "Status") return false;
+
+  const gen = dataGen(params.snapshot.format);
+  const effectiveness = moveEffectivenessAgainstTarget(gen, params.move, params.snapshot.opponentSide.active);
+  if (effectiveness !== null && effectiveness !== 1) return true;
+  if (bandCoverageScore(params.likely) >= 1) return true;
+  if (isImmuneOrBlockedBand(params.likely)) return true;
+  return false;
+}
+
+function normalizedSwitchTargets(action: LegalAction) {
+  return uniqueStrings([
+    action.target,
+    String(action.id ?? "").replace(/^switch:/i, ""),
+    String(action.label ?? "").replace(/^switch\s+to\s+/i, ""),
+    String(action.details ?? "").replace(/^switch\s+to\s+/i, "")
+  ])
+    .map((value) => normalizeName(value))
+    .filter(Boolean);
+}
+
+function switchTargetMatchScore(actionTargets: string[], pokemon: PokemonSnapshot) {
+  if (pokemon.fainted || pokemon.active || actionTargets.length === 0) return 0;
+  const species = normalizeName(pokemon.species);
+  const displayName = normalizeName(pokemon.displayName);
+  const ident = normalizeName(pokemon.ident);
+
+  let bestScore = 0;
+  for (const target of actionTargets) {
+    if (!target) continue;
+    if (species && target === species) bestScore = Math.max(bestScore, 400);
+    if (displayName && target === displayName) bestScore = Math.max(bestScore, 300);
+    if (ident && target === ident) bestScore = Math.max(bestScore, 200);
+    if (species && target.includes(species)) bestScore = Math.max(bestScore, 120);
+    if (displayName && target.includes(displayName)) bestScore = Math.max(bestScore, 80);
+    if (ident && target.includes(ident)) bestScore = Math.max(bestScore, 40);
+  }
+
+  return bestScore;
 }
 
 function switchTargetForAction(snapshot: BattleSnapshot, action: LegalAction) {
-  const fromAction = normalizeName(action.label || action.details || action.id);
-  const byId = normalizeName(action.id);
-  return snapshot.yourSide.team.find((pokemon) => {
-    if (pokemon.fainted || pokemon.active) return false;
-    const names = uniqueStrings([pokemon.species, pokemon.displayName, pokemon.ident]);
-    return names.some((name) => {
-      const normalized = normalizeName(name);
-      return normalized && (fromAction.includes(normalized) || byId.includes(normalized));
-    });
-  }) ?? null;
+  const actionTargets = normalizedSwitchTargets(action);
+  let best: PokemonSnapshot | null = null;
+  let bestScore = 0;
+
+  for (const pokemon of snapshot.yourSide.team) {
+    const score = switchTargetMatchScore(actionTargets, pokemon);
+    if (score > bestScore) {
+      best = pokemon;
+      bestScore = score;
+    }
+  }
+
+  return best;
 }
 
 function damagePreviewForAction(action: LegalAction, previews: DamagePreview[]) {
@@ -1060,6 +1156,22 @@ function searchContributionForSwitch(params: {
   return { score: rounded, reasons: searchReasons, riskFlags: searchRisks };
 }
 
+export function selectReplyAwareSearchActionIds(candidates: SelfActionCandidate[]) {
+  const sorted = candidates
+    .slice()
+    .sort((a, b) => b.score - a.score || a.label.localeCompare(b.label));
+  const leaderScore = Number(sorted[0]?.score ?? 0);
+  return new Set(
+    sorted
+      .filter((candidate, index) => (
+        candidate.kind === "switch"
+        || index < SEARCH_PLAYER_MIN_COUNT
+        || Number(candidate.score ?? 0) >= leaderScore - SEARCH_PLAYER_SCORE_BAND
+      ))
+      .map((candidate) => candidate.actionId)
+  );
+}
+
 function applyReplyAwareSearch(params: {
   snapshot: BattleSnapshot;
   candidates: SelfActionCandidate[];
@@ -1069,13 +1181,7 @@ function applyReplyAwareSearch(params: {
   speedPreview?: SpeedPreview | undefined;
   opponentActionPrediction?: OpponentActionPrediction | undefined;
 }) {
-  const topActionIds = new Set(
-    params.candidates
-      .slice()
-      .sort((a, b) => b.score - a.score || a.label.localeCompare(b.label))
-      .slice(0, SEARCH_PLAYER_TOP_K)
-      .map((candidate) => candidate.actionId)
-  );
+  const topActionIds = selectReplyAwareSearchActionIds(params.candidates);
   const actionById = new Map(params.legalActions.map((action) => [action.id, action]));
 
   return params.candidates.map((candidate) => {
@@ -1375,16 +1481,27 @@ function buildMoveCandidate(params: {
     riskFlags.push("staying may throw away a low-HP piece");
   }
 
-  const volatilityPenalty = uncertaintyPenalty(
+  const predictionPenalty = predictionUncertaintyPenalty(params.opponentActionPrediction, true);
+  const teraPenalty = teraUncertaintyPenalty(
     params.snapshot,
-    params.opponentActionPrediction,
-    hazardMove || hazardRemovalMove || setupMove || recoveryMove
+    moveLineIsTeraSensitive({
+      snapshot: params.snapshot,
+      move,
+      likely,
+      hazardMove,
+      hazardRemovalMove,
+      setupMove,
+      recoveryMove,
+      targetedStatusMove
+    })
   );
-  riskScore -= volatilityPenalty;
-  if (volatilityPenalty >= 5) {
+  riskScore -= predictionPenalty + teraPenalty;
+  if (predictionPenalty > 0 && teraPenalty > 0) {
     riskFlags.push("hidden Tera or prediction uncertainty can swing this line");
-  } else if ((params.opponentActionPrediction?.riskFlags?.length ?? 0) > 0 && !params.snapshot.opponentSide.active?.terastallized) {
+  } else if (teraPenalty > 0) {
     riskFlags.push("unspent Tera can still shift this line");
+  } else if (predictionPenalty > 0) {
+    riskFlags.push("prediction uncertainty still makes this line thin");
   }
 
   pushScoreComponent(breakdown, "tactical", "Immediate tactical value", tacticalScore);
@@ -1552,9 +1669,10 @@ function buildSwitchCandidate(params: {
     }
   }
 
-  const volatilityPenalty = uncertaintyPenalty(params.snapshot, params.opponentActionPrediction, true);
-  riskScore -= volatilityPenalty;
-  if (volatilityPenalty >= 5 && !riskFlags.includes("hard switch can lose tempo into a likely opposing switch")) {
+  const predictionPenalty = predictionUncertaintyPenalty(params.opponentActionPrediction, true);
+  const teraPenalty = teraUncertaintyPenalty(params.snapshot, true);
+  riskScore -= predictionPenalty + teraPenalty;
+  if (predictionPenalty + teraPenalty >= 5 && !riskFlags.includes("hard switch can lose tempo into a likely opposing switch")) {
     riskFlags.push("hidden Tera or prediction uncertainty can punish a hard switch");
   }
 

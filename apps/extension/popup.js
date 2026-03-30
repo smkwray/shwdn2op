@@ -4,11 +4,20 @@ const providerEl = document.getElementById("provider");
 const codexRow = document.getElementById("codexModelRow");
 const claudeRow = document.getElementById("claudeModelRow");
 const geminiRow = document.getElementById("geminiModelRow");
+const compareProviderRow = document.getElementById("compareProviderRow");
+const compareCodexRow = document.getElementById("compareCodexModelRow");
+const compareClaudeRow = document.getElementById("compareClaudeModelRow");
+const compareGeminiRow = document.getElementById("compareGeminiModelRow");
 const companionUrlEl = document.getElementById("companionUrl");
 const codexModelEl = document.getElementById("codexModel");
 const claudeModelEl = document.getElementById("claudeModel");
 const geminiModelEl = document.getElementById("geminiModel");
 const analysisModeEl = document.getElementById("analysisMode");
+const compareModeEl = document.getElementById("compareMode");
+const compareProviderEl = document.getElementById("compareProvider");
+const compareCodexModelEl = document.getElementById("compareCodexModel");
+const compareClaudeModelEl = document.getElementById("compareClaudeModel");
+const compareGeminiModelEl = document.getElementById("compareGeminiModel");
 const showOverlayEl = document.getElementById("showOverlay");
 const autoDownloadReplayEl = document.getElementById("autoDownloadReplay");
 const showLocalIntelPanelEl = document.getElementById("showLocalIntelPanel");
@@ -74,13 +83,34 @@ function populateModelLists(settings) {
     PROVIDER_MODEL_OPTIONS.gemini,
     settings.geminiModel || DEFAULT_SETTINGS.geminiModel
   );
+  renderModelOptions(
+    compareCodexModelEl,
+    PROVIDER_MODEL_OPTIONS.codex,
+    settings.compareCodexModel || DEFAULT_SETTINGS.compareCodexModel
+  );
+  renderModelOptions(
+    compareClaudeModelEl,
+    PROVIDER_MODEL_OPTIONS.claude,
+    settings.compareClaudeModel || DEFAULT_SETTINGS.compareClaudeModel
+  );
+  renderModelOptions(
+    compareGeminiModelEl,
+    PROVIDER_MODEL_OPTIONS.gemini,
+    settings.compareGeminiModel || DEFAULT_SETTINGS.compareGeminiModel
+  );
 }
 
 function refreshModelRows() {
   const provider = providerEl.value;
+  const compareProvider = compareProviderEl.value;
+  const compareEnabled = compareModeEl.checked;
   codexRow.style.display = provider === "codex" ? "grid" : "none";
   claudeRow.style.display = provider === "claude" ? "grid" : "none";
   geminiRow.style.display = provider === "gemini" ? "grid" : "none";
+  compareProviderRow.style.display = compareEnabled ? "grid" : "none";
+  compareCodexRow.style.display = compareEnabled && compareProvider === "codex" ? "grid" : "none";
+  compareClaudeRow.style.display = compareEnabled && compareProvider === "claude" ? "grid" : "none";
+  compareGeminiRow.style.display = compareEnabled && compareProvider === "gemini" ? "grid" : "none";
 }
 
 function buildSettingsPayload() {
@@ -91,6 +121,11 @@ function buildSettingsPayload() {
     claudeModel: claudeModelEl.value,
     geminiModel: geminiModelEl.value,
     analysisMode: analysisModeEl.value,
+    compareMode: compareModeEl.checked,
+    compareProvider: compareProviderEl.value,
+    compareCodexModel: compareCodexModelEl.value,
+    compareClaudeModel: compareClaudeModelEl.value,
+    compareGeminiModel: compareGeminiModelEl.value,
     showOverlay: showOverlayEl.checked,
     autoDownloadReplay: autoDownloadReplayEl.checked,
     showLocalIntelPanel: showLocalIntelPanelEl.checked,
@@ -117,6 +152,11 @@ async function loadSettings() {
   providerEl.value = settings.provider;
   populateModelLists(settings);
   analysisModeEl.value = settings.analysisMode || DEFAULT_SETTINGS.analysisMode;
+  compareModeEl.checked = Boolean(settings.compareMode);
+  compareProviderEl.value = settings.compareProvider || DEFAULT_SETTINGS.compareProvider;
+  compareCodexModelEl.value = settings.compareCodexModel || DEFAULT_SETTINGS.compareCodexModel;
+  compareClaudeModelEl.value = settings.compareClaudeModel || DEFAULT_SETTINGS.compareClaudeModel;
+  compareGeminiModelEl.value = settings.compareGeminiModel || DEFAULT_SETTINGS.compareGeminiModel;
   showOverlayEl.checked = Boolean(settings.showOverlay);
   autoDownloadReplayEl.checked = Boolean(settings.autoDownloadReplay);
   showLocalIntelPanelEl.checked = Boolean(settings.showLocalIntelPanel);
@@ -243,6 +283,13 @@ claudeModelEl.addEventListener("change", autoSaveSettings);
 geminiModelEl.addEventListener("change", autoSaveSettings);
 analysisModeEl.addEventListener("change", refreshAnalyzeButtonLabel);
 analysisModeEl.addEventListener("change", autoSaveSettings);
+compareModeEl.addEventListener("change", refreshModelRows);
+compareModeEl.addEventListener("change", autoSaveSettings);
+compareProviderEl.addEventListener("change", refreshModelRows);
+compareProviderEl.addEventListener("change", autoSaveSettings);
+compareCodexModelEl.addEventListener("change", autoSaveSettings);
+compareClaudeModelEl.addEventListener("change", autoSaveSettings);
+compareGeminiModelEl.addEventListener("change", autoSaveSettings);
 showOverlayEl.addEventListener("change", autoSaveSettings);
 showLocalIntelPanelEl.addEventListener("change", autoSaveSettings);
 showOpponentActionPanelEl.addEventListener("change", autoSaveSettings);

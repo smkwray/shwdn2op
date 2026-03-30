@@ -30,7 +30,7 @@ export const DEFAULT_SETTINGS = {
   compareClaudeModel: "sonnet",
   compareGeminiModel: "gemini-2.5-flash",
   autoAnalyzeOnRequest: false,
-  autoDownloadReplay: false,
+  autoDownloadReplay: true,
   showOverlay: true,
   showAskFriendCard: true,
   showMoveSuggestions: true,

@@ -17,7 +17,9 @@ async function main() {
   const inputPath = process.argv[2] ?? DEFAULT_REPLAY_DIR;
   const outputPath = process.argv[3] ?? DEFAULT_REPLAY_OUTPUT;
   const tempStorePath = path.join(os.tmpdir(), `showdnass-replay-extract-${process.pid}-${Date.now()}.json`);
+  const tempCuratedPath = path.join(os.tmpdir(), `showdnass-replay-extract-curated-${process.pid}-${Date.now()}.json`);
   process.env.LOCAL_INTEL_STORE_PATH = tempStorePath;
+  process.env.EXTERNAL_CURATED_STORE_PATH = tempCuratedPath;
 
   const { buildLocalIntelSnapshot } = await import("../apps/companion/src/history/opponentIntelStore.js");
 
@@ -66,6 +68,7 @@ async function main() {
   console.log(JSON.stringify(summary, null, 2));
 
   await fs.rm(tempStorePath, { force: true });
+  await fs.rm(tempCuratedPath, { force: true });
 }
 
 main().catch((error) => {

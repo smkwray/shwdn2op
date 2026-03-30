@@ -23,6 +23,7 @@ type SwitchTargetPreview = {
   damagePreview: DamagePreview[];
   hazardDamagePercent: number;
   stickyWeb: boolean;
+  source: "revealed_switch" | "previewed_switch";
 };
 
 function normalizeName(value: string | null | undefined) {
@@ -318,7 +319,8 @@ function createSwitchSnapshot(snapshot: BattleSnapshot, switchTarget: PokemonSna
 function buildSwitchTargetPreview(
   snapshot: BattleSnapshot,
   pokemon: PokemonSnapshot,
-  entry: OpponentIntelEntry | undefined
+  entry: OpponentIntelEntry | undefined,
+  source: "revealed_switch" | "previewed_switch"
 ): SwitchTargetPreview {
   const simulated = createSwitchSnapshot(snapshot, pokemon);
   const damagePreview = buildDamagePreview(simulated, {
@@ -332,7 +334,8 @@ function buildSwitchTargetPreview(
     entry,
     damagePreview,
     hazardDamagePercent: hazardInfo.damagePercent,
-    stickyWeb: hazardInfo.stickyWeb
+    stickyWeb: hazardInfo.stickyWeb,
+    source
   };
 }
 
@@ -344,11 +347,17 @@ function buildSwitchCandidates(params: {
 }): SwitchTargetPreview[] {
   const activeKey = normalizeName(params.activeOpponent.ident ?? params.activeOpponent.species ?? params.activeOpponent.displayName);
   return params.snapshot.opponentSide.team
-    .filter((pokemon) => !pokemon.fainted && !pokemon.active && pokemon.revealed)
+    .filter((pokemon) => !pokemon.fainted && !pokemon.active)
+    .filter((pokemon) => Boolean(pokemon.species ?? pokemon.displayName))
     .filter((pokemon) => normalizeName(pokemon.ident ?? pokemon.species ?? pokemon.displayName) !== activeKey)
     .map((pokemon) => {
       const entry = params.allOpponentEntries.find((candidate) => normalizeName(candidate.species) === normalizeName(pokemon.species ?? pokemon.displayName));
-      return buildSwitchTargetPreview(params.snapshot, pokemon, entry);
+      return buildSwitchTargetPreview(
+        params.snapshot,
+        pokemon,
+        entry,
+        pokemon.revealed ? "revealed_switch" : "previewed_switch"
+      );
     })
     .slice(0, 5);
 }
@@ -554,13 +563,13 @@ function buildSwitchActionCandidates(params: {
       pushUnique(reasons, "switch target absorbs your best attacks");
     } else if (band.coverage === "misses_current_hp" && bandMaxPercent(band) <= 50) {
       score += 12;
-      pushUnique(reasons, "revealed pivot is safer than staying");
+      pushUnique(reasons, target.source === "previewed_switch" ? "known reserve looks safer than staying" : "revealed pivot is safer than staying");
     } else if (band.coverage === "can_cover_current_hp") {
       score -= 12;
-      pushUnique(riskFlags, "best revealed switch can still take a heavy hit");
+      pushUnique(riskFlags, target.source === "previewed_switch" ? "best known reserve can still take a heavy hit" : "best revealed switch can still take a heavy hit");
     } else if (band.coverage === "covers_current_hp") {
       score -= 24;
-      pushUnique(riskFlags, "best revealed switch can still be punished hard");
+      pushUnique(riskFlags, target.source === "previewed_switch" ? "best known reserve can still be punished hard" : "best revealed switch can still be punished hard");
     }
 
     if (target.hazardDamagePercent >= 25) {
@@ -592,7 +601,7 @@ function buildSwitchActionCandidates(params: {
       actionClass: "switch",
       label: `Switch to ${target.pokemon.species ?? target.pokemon.displayName ?? "reserve"}`,
       switchTargetSpecies: target.pokemon.species ?? target.pokemon.displayName ?? "reserve",
-      source: "revealed_switch",
+      source: target.source,
       score: clampScore(score),
       reasons: uniqueStrings(reasons),
       riskFlags: uniqueStrings(riskFlags)
@@ -643,6 +652,10 @@ function buildStatusCandidates(params: {
     let score = 14;
     const matchingThreat = statusThreatPreviewForMove(params.opponentThreatPreview, move.name);
     const currentBand = likelyBand(matchingThreat?.currentTarget?.bands);
+    const liveSwitchStatusCount = (matchingThreat?.switchTargets ?? [])
+      .map((target) => likelyBand(target.bands))
+      .filter((band) => band?.outcome === "status")
+      .length;
     const sideCondition = normalizeName(String(moveData.sideCondition ?? ""));
     const hasBoosts = Boolean(moveData.boosts) || Boolean(moveData.self?.boosts);
     const selfTargeting = String(moveData.target ?? "") === "self";
@@ -717,8 +730,12 @@ function buildStatusCandidates(params: {
         score += 8;
         pushUnique(reasons, "status line is live into your active");
       } else if (currentBand?.outcome === "immune" || currentBand?.outcome === "blocked") {
-        score -= 18;
+        score -= 26;
         pushUnique(riskFlags, "your active can ignore or block this status");
+        if (liveSwitchStatusCount > 0 && playerReserveCount > 0) {
+          score += liveSwitchStatusCount >= 2 ? 8 : 5;
+          pushUnique(reasons, "status mainly punishes a switch, not the current target");
+        }
       }
     }
 
@@ -832,7 +849,9 @@ export function buildOpponentActionPrediction(params: {
   const riskFlags = uniqueStrings([
     ...(allCandidates[0]?.riskFlags ?? []),
     ...((params.activeOpponentEntry?.likelyTeraTypes?.length ?? 0) > 0 && !activeOpponent.terastallized ? ["unspent Tera can still change this line"] : []),
-    ...(switchTargets.length === 0 && params.snapshot.opponentSide.team.some((pokemon) => !pokemon.fainted && !pokemon.active) ? ["no revealed safe switch target is available in the current snapshot"] : [])
+    ...(switchTargets.length === 0 && params.snapshot.opponentSide.team.some((pokemon) => !pokemon.fainted && !pokemon.active)
+      ? ["no safe known reserve switch target is available in the current snapshot"]
+      : [])
   ]).slice(0, 4);
 
   const confidence = confidenceTier({

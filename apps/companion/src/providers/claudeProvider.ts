@@ -43,11 +43,13 @@ export class ClaudeProvider implements Provider {
     const prompt = buildAnalysisPrompt(snapshot, {
       analysisMode: context.analysisMode,
       includeToolHint: config.claudeEnableMcp,
-      maxDeterministicNotes: 6,
-      maxRecentLogEntries: 12,
-      maxSnapshotNotes: 6,
+      maxDeterministicNotes: 4,
+      maxRecentLogEntries: 6,
+      maxSnapshotNotes: 3,
       prettySnapshot: false,
-      localIntel: context.localIntel
+      compactSnapshot: true,
+      localIntel: context.localIntel,
+      requestContext: context.requestContext
     });
     const model = this.resolveModel(context.requestedModel);
     const schema = JSON.parse(await fs.readFile(config.analysisSchemaPath, "utf8"));
@@ -61,6 +63,8 @@ export class ClaudeProvider implements Provider {
       "--no-session-persistence",
       "--tools",
       "",
+      "--effort",
+      "low",
       "--model",
       model,
       "--output-format",
@@ -76,6 +80,9 @@ export class ClaudeProvider implements Provider {
       } catch {
         // ignore missing project config
       }
+    } else {
+      // Keep Claude isolated from unrelated global MCP servers unless this app explicitly enables them.
+      args.push("--strict-mcp-config", "--mcp-config", "{\"mcpServers\":{}}");
     }
 
     args.push("--", prompt);
