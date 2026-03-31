@@ -62,6 +62,9 @@ export class GeminiProvider implements Provider {
 
   async analyzeDetailed(snapshot: BattleSnapshot, context: ProviderContext): Promise<ProviderRunResult> {
     const prompt = buildGeminiPrompt(snapshot, context);
+    const timeoutMs = context.analysisMode === "strategic"
+      ? Math.max(config.geminiTimeoutMs, config.strategicTimeoutMs)
+      : config.geminiTimeoutMs;
 
     const result = await runCommand(
       config.geminiBin,
@@ -77,7 +80,7 @@ export class GeminiProvider implements Provider {
       ],
       {
         cwd: repoRoot,
-        timeoutMs: config.geminiTimeoutMs
+        timeoutMs
       }
     );
 

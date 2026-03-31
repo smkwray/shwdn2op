@@ -15,6 +15,7 @@ import type {
   ThreatPreview,
   ThreatTargetPreview
 } from "../types.js";
+import { filterLiveLikelyHeldItemNames } from "../mechanics/liveLikelyItems.js";
 
 const calcGens = CalcGenerations;
 const dataGens = new DataGenerations(Dex as any);
@@ -45,6 +46,10 @@ const MOVE_TYPE_IMMUNITY_ABILITY_LABELS: Record<string, string[]> = {
   water: ["Water Absorb", "Dry Skin", "Storm Drain"],
   electric: ["Volt Absorb", "Lightning Rod", "Motor Drive"],
   grass: ["Sap Sipper"]
+};
+
+const MOVE_TYPE_IMMUNITY_ITEM_LABELS: Record<string, string[]> = {
+  ground: ["Air Balloon"]
 };
 
 const STATUS_IMMUNITY_ABILITY_LABELS: Record<string, string[]> = {
@@ -321,6 +326,17 @@ function makeStatusBand(outcome: StatusOutcome): DamageAssumptionBand {
   };
 }
 
+function makeDamagingImmunityBand(outcome: StatusOutcome): DamageAssumptionBand {
+  return {
+    label: outcome.label,
+    minPercent: 0,
+    maxPercent: 0,
+    coverage: "misses_current_hp",
+    outcome: outcome.outcome,
+    detail: outcome.detail
+  };
+}
+
 function moveTypeImmunityAbilityOutcome(moveType: string | undefined, defenderAbility: string | null | undefined): StatusOutcome | null {
   const abilityId = normalizeName(defenderAbility);
   const moveTypeId = normalizeName(moveType);
@@ -340,6 +356,17 @@ function moveTypeImmunityAbilityOutcome(moveType: string | undefined, defenderAb
   }
   if (abilityId === "sapsipper" && moveTypeId === "grass") {
     return { label: "immune", outcome: "immune", detail: "Sap Sipper blocks Grass-type moves." };
+  }
+  return null;
+}
+
+function moveTypeImmunityItemOutcome(moveType: string | undefined, defenderItem: string | null | undefined): StatusOutcome | null {
+  const itemId = normalizeName(defenderItem);
+  const moveTypeId = normalizeName(moveType);
+  if (!itemId || !moveTypeId) return null;
+
+  if (itemId === "airballoon" && moveTypeId === "ground") {
+    return { label: "immune", outcome: "immune", detail: "Air Balloon blocks Ground-type moves until it is removed." };
   }
   return null;
 }
@@ -509,44 +536,33 @@ function buildPossibleAbilityInteractionHints(params: {
   attackerMon: PokemonSnapshot;
   defenderMon: PokemonSnapshot;
   moveName: string;
+  likelyDefenderItems?: string[] | undefined;
   likelyDefenderAbilities?: string[] | undefined;
 }): InteractionHint[] {
-  if (params.defenderMon.ability) return [];
-
   const gen = dataGen(params.genNum);
   const move = lookupMoveData(gen, params.moveName);
   if (!move) return [];
 
   const likelyAbilities = [...new Set((params.likelyDefenderAbilities ?? []).filter(Boolean))];
-  if (likelyAbilities.length === 0) return [];
-
-  const byNormalized = new Map(likelyAbilities.map((ability) => [normalizeName(ability), ability]));
+  const likelyItems = [...new Set((params.likelyDefenderItems ?? []).filter(Boolean))];
+  if (likelyAbilities.length === 0 && likelyItems.length === 0) return [];
   const hints: InteractionHint[] = [];
 
-  const moveTypeCandidates = move.type ? (MOVE_TYPE_IMMUNITY_ABILITY_LABELS[normalizeName(move.type)] ?? []) : [];
-  for (const candidate of moveTypeCandidates) {
-    const label = byNormalized.get(normalizeName(candidate));
-    if (!label) continue;
-    hints.push({
-      label,
-      detail: `${label} would make ${params.moveName} do 0.`,
-      certainty: "possible"
-    });
-  }
+  if (!params.defenderMon.ability && likelyAbilities.length > 0) {
+    const byNormalized = new Map(likelyAbilities.map((ability) => [normalizeName(ability), ability]));
+    const moveTypeCandidates = move.type ? (MOVE_TYPE_IMMUNITY_ABILITY_LABELS[normalizeName(move.type)] ?? []) : [];
+    for (const candidate of moveTypeCandidates) {
+      const label = byNormalized.get(normalizeName(candidate));
+      if (!label) continue;
+      hints.push({
+        label,
+        detail: `${label} would make ${params.moveName} do 0.`,
+        certainty: "possible"
+      });
+    }
 
-  const statusCandidates = move.status ? (STATUS_IMMUNITY_ABILITY_LABELS[normalizeName(move.status)] ?? []) : [];
-  for (const candidate of statusCandidates) {
-    const label = byNormalized.get(normalizeName(candidate));
-    if (!label) continue;
-    hints.push({
-      label,
-      detail: `${label} would block ${params.moveName}.`,
-      certainty: "possible"
-    });
-  }
-
-  if (move.category === "Status") {
-    for (const candidate of ["Good as Gold", "Comatose"]) {
+    const statusCandidates = move.status ? (STATUS_IMMUNITY_ABILITY_LABELS[normalizeName(move.status)] ?? []) : [];
+    for (const candidate of statusCandidates) {
       const label = byNormalized.get(normalizeName(candidate));
       if (!label) continue;
       hints.push({
@@ -555,8 +571,9 @@ function buildPossibleAbilityInteractionHints(params: {
         certainty: "possible"
       });
     }
-    if ((move.status || normalizeName(move.name) === "yawn")) {
-      for (const candidate of ["Purifying Salt"]) {
+
+    if (move.category === "Status") {
+      for (const candidate of ["Good as Gold", "Comatose"]) {
         const label = byNormalized.get(normalizeName(candidate));
         if (!label) continue;
         hints.push({
@@ -565,16 +582,41 @@ function buildPossibleAbilityInteractionHints(params: {
           certainty: "possible"
         });
       }
-      if (/sun/i.test(params.snapshot.field.weather ?? "")) {
-        const label = byNormalized.get(normalizeName("Leaf Guard"));
-        if (label) {
+      if ((move.status || normalizeName(move.name) === "yawn")) {
+        for (const candidate of ["Purifying Salt"]) {
+          const label = byNormalized.get(normalizeName(candidate));
+          if (!label) continue;
           hints.push({
             label,
-            detail: `${label} would block ${params.moveName} in sun.`,
+            detail: `${label} would block ${params.moveName}.`,
             certainty: "possible"
           });
         }
+        if (/sun/i.test(params.snapshot.field.weather ?? "")) {
+          const label = byNormalized.get(normalizeName("Leaf Guard"));
+          if (label) {
+            hints.push({
+              label,
+              detail: `${label} would block ${params.moveName} in sun.`,
+              certainty: "possible"
+            });
+          }
+        }
       }
+    }
+  }
+
+  if (!params.defenderMon.item && !params.defenderMon.removedItem && likelyItems.length > 0) {
+    const byNormalized = new Map(likelyItems.map((item) => [normalizeName(item), item]));
+    const moveTypeCandidates = move.type ? (MOVE_TYPE_IMMUNITY_ITEM_LABELS[normalizeName(move.type)] ?? []) : [];
+    for (const candidate of moveTypeCandidates) {
+      const label = byNormalized.get(normalizeName(candidate));
+      if (!label) continue;
+      hints.push({
+        label,
+        detail: `${label} would make ${params.moveName} do 0.`,
+        certainty: "possible"
+      });
     }
   }
 
@@ -647,6 +689,16 @@ function posteriorConfidenceUsable(posterior: OpponentPosteriorPreview | undefin
   return posterior?.confidenceTier === "usable" || posterior?.confidenceTier === "strong";
 }
 
+function posteriorConsensusValue(posterior: OpponentPosteriorPreview | undefined, key: "item" | "ability" | "teraType") {
+  if (!posteriorConfidenceUsable(posterior) || !posterior) return null;
+  const topValues = posterior.topHypotheses
+    .slice(0, 3)
+    .map((hypothesis) => hypothesis[key])
+    .filter((value): value is string => Boolean(value));
+  if (topValues.length === 0) return null;
+  return topValues.every((value) => normalizeName(value) === normalizeName(topValues[0])) ? topValues[0] ?? null : null;
+}
+
 function posteriorConsensusValues(posterior: OpponentPosteriorPreview | undefined, key: "item" | "ability" | "teraType") {
   if (!posterior) return [];
   const values = new Set<string>();
@@ -656,6 +708,37 @@ function posteriorConsensusValues(posterior: OpponentPosteriorPreview | undefine
     if (values.size >= 3) break;
   }
   return [...values];
+}
+
+function buildDamagingImmunityBand(params: {
+  genNum: number;
+  snapshot: BattleSnapshot;
+  attackerMon: PokemonSnapshot;
+  defenderMon: PokemonSnapshot;
+  moveName: string;
+  defenderPosterior?: OpponentPosteriorPreview | undefined;
+}) {
+  const gen = dataGen(params.genNum);
+  const move = lookupMoveData(gen, params.moveName);
+  if (!move || move.category === "Status") return null;
+
+  const defenderTypes = currentBattleTypes(gen, params.defenderMon);
+  const resolvedAbility = params.defenderMon.ability ?? posteriorConsensusValue(params.defenderPosterior, "ability");
+  const resolvedItem = params.defenderMon.item
+    ?? (!params.defenderMon.removedItem ? posteriorConsensusValue(params.defenderPosterior, "item") : null);
+
+  if (!attackerIgnoresDefenderAbility(params.attackerMon)) {
+    const abilityOutcome = moveTypeImmunityAbilityOutcome(move.type, resolvedAbility);
+    if (abilityOutcome) return makeDamagingImmunityBand(abilityOutcome);
+  }
+
+  const typeOutcome = targetedTypeImmunityOutcome(gen, move, defenderTypes);
+  if (typeOutcome) return makeDamagingImmunityBand(typeOutcome);
+
+  const itemOutcome = moveTypeImmunityItemOutcome(move.type, resolvedItem);
+  if (itemOutcome) return makeDamagingImmunityBand(itemOutcome);
+
+  return null;
 }
 
 function posteriorWeightedPercentile(values: Array<{ value: number; weight: number }>, percentile: number) {
@@ -820,6 +903,18 @@ function buildBands(params: {
     })];
   }
 
+  const deterministicImmunityBand = buildDamagingImmunityBand({
+    genNum,
+    snapshot: params.snapshot,
+    attackerMon: params.attackerMon,
+    defenderMon: params.defenderMon,
+    moveName: params.moveName,
+    defenderPosterior: params.defenderPosterior
+  });
+  if (deterministicImmunityBand) {
+    return [deterministicImmunityBand];
+  }
+
   const posteriorDirection = params.direction === "your" ? "defender" : "attacker";
   const posterior = posteriorDirection === "attacker" ? params.attackerPosterior : params.defenderPosterior;
   const posteriorBands = posteriorBandsFromHypotheses(
@@ -920,6 +1015,7 @@ export function buildDamagePreview(snapshot: BattleSnapshot, options: DamageOpti
   const genNum = generationFromFormat(snapshot.format);
   const defenderPosterior = options.defenderPosterior;
   const usePosterior = posteriorConfidenceUsable(defenderPosterior);
+  const liveLikelyDefenderItems = filterLiveLikelyHeldItemNames(snapshot.format, opponentActive, options.likelyDefenderItems);
   return snapshot.legalActions
     .filter((action) => action.kind === "move" && action.moveName)
     .map((action) => {
@@ -935,9 +1031,14 @@ export function buildDamagePreview(snapshot: BattleSnapshot, options: DamageOpti
       });
       const posteriorItems = posteriorConsensusValues(defenderPosterior, "item");
       const posteriorAbilities = posteriorConsensusValues(defenderPosterior, "ability");
+      const resolvedLikelyDefenderItems = filterLiveLikelyHeldItemNames(
+        snapshot.format,
+        opponentActive,
+        posteriorItems.length > 0 ? posteriorItems : liveLikelyDefenderItems
+      );
       const survivalCaveats = buildSurvivalCaveats(opponentActive, {
-        likelyItems: posteriorItems.length > 0 ? posteriorItems : options.likelyDefenderItems,
-      likelyAbilities: posteriorAbilities.length > 0 ? posteriorAbilities : options.likelyDefenderAbilities
+        likelyItems: resolvedLikelyDefenderItems,
+        likelyAbilities: posteriorAbilities.length > 0 ? posteriorAbilities : options.likelyDefenderAbilities
       });
       const interactionHints = buildPossibleAbilityInteractionHints({
         genNum,
@@ -945,6 +1046,7 @@ export function buildDamagePreview(snapshot: BattleSnapshot, options: DamageOpti
         attackerMon: yourActive,
         defenderMon: opponentActive,
         moveName: action.moveName ?? action.label,
+        likelyDefenderItems: resolvedLikelyDefenderItems,
         likelyDefenderAbilities: posteriorAbilities.length > 0 ? posteriorAbilities : options.likelyDefenderAbilities
       });
       const observedRange = options.observedPlayerDamageResolver?.(
@@ -988,6 +1090,7 @@ export function buildThreatPreview(
   const genNum = generationFromFormat(snapshot.format);
   const attackerPosterior = options.attackerPosterior;
   const usePosterior = posteriorConfidenceUsable(attackerPosterior);
+  const liveLikelyDefenderItems = filterLiveLikelyHeldItemNames(snapshot.format, yourActive, options.likelyDefenderItems);
 
   return options.moveCandidates
     .map((candidate) => {
@@ -1015,6 +1118,7 @@ export function buildThreatPreview(
         attackerMon: opponentActive,
         defenderMon: yourActive,
         moveName: candidate.name,
+        likelyDefenderItems: liveLikelyDefenderItems,
         likelyDefenderAbilities: options.likelyDefenderAbilities
       });
       const narrowedCurrent = usePosterior
@@ -1054,6 +1158,7 @@ export function buildThreatPreview(
             attackerMon: opponentActive,
             defenderMon: pokemon,
             moveName: candidate.name,
+            likelyDefenderItems: filterLiveLikelyHeldItemNames(snapshot.format, pokemon, options.likelyDefenderItems),
             likelyDefenderAbilities: options.likelyDefenderAbilities
           });
           const narrowed = usePosterior

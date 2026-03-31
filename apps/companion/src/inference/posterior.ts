@@ -57,6 +57,7 @@ interface PosteriorBuildParams {
   format: string;
   opponent: PokemonSnapshot;
   formatStats: PosteriorFormatStats;
+  battleSnapshot?: BattleSnapshot | undefined;
   battleEvidence?: PosteriorBattleSpeciesEvidence | undefined;
 }
 
@@ -99,6 +100,21 @@ const ARCHETYPES: ArchetypeConfig[] = [
   { id: "scarf_phys", nature: "Adamant", evs: { hp: 4, atk: 252, spe: 252 }, role: "physical" },
   { id: "scarf_spec", nature: "Modest", evs: { hp: 4, spa: 252, spe: 252 }, role: "special" }
 ];
+
+type FieldSpeedAbilityRule = {
+  abilityId: string;
+  multiplier: number;
+  weather?: RegExp | undefined;
+  terrain?: RegExp | undefined;
+};
+
+const FIELD_SPEED_ABILITY_RULES: readonly FieldSpeedAbilityRule[] = [
+  { abilityId: "chlorophyll", multiplier: 2, weather: /sun/i },
+  { abilityId: "sandrush", multiplier: 2, weather: /sand/i },
+  { abilityId: "slushrush", multiplier: 2, weather: /snow|hail/i },
+  { abilityId: "swiftswim", multiplier: 2, weather: /rain/i },
+  { abilityId: "surgesurfer", multiplier: 2, terrain: /electric/i }
+] as const;
 
 function generationFromFormat(format: string): number {
   const match = String(format ?? "").match(/\[Gen\s*(\d+)\]/i);
@@ -454,7 +470,37 @@ function moveCompatibilityScore(item: string | null, archetype: ArchetypeConfig,
   return 0;
 }
 
-function effectiveSpeedForHypothesis(format: string, opponent: PokemonSnapshot, hypothesis: PosteriorHypothesis) {
+function speedStageMultiplier(stage: number | null | undefined) {
+  if (!Number.isFinite(stage)) return 1;
+  const numeric = Math.max(-6, Math.min(6, Number(stage)));
+  if (numeric === 0) return 1;
+  if (numeric > 0) return (2 + numeric) / 2;
+  return 2 / (2 + Math.abs(numeric));
+}
+
+function paralysisSpeedMultiplier(format: string) {
+  return generationFromFormat(format) >= 7 ? 0.5 : 0.25;
+}
+
+function matchingFieldSpeedAbilityRule(abilityId: string, field: BattleSnapshot["field"] | undefined) {
+  if (!abilityId || !field) return null;
+  return FIELD_SPEED_ABILITY_RULES.find((rule) => {
+    if (rule.abilityId !== abilityId) return false;
+    if (rule.weather && !rule.weather.test(field.weather ?? "")) return false;
+    if (rule.terrain && !rule.terrain.test(field.terrain ?? "")) return false;
+    return true;
+  }) ?? null;
+}
+
+function effectiveSpeedForHypothesis(
+  format: string,
+  opponent: PokemonSnapshot,
+  hypothesis: PosteriorHypothesis,
+  options: {
+    battleSnapshot?: BattleSnapshot | undefined;
+    includeCurrentBoardModifiers?: boolean | undefined;
+  } = {}
+) {
   const gen = dataGen(generationFromFormat(format));
   const species = lookupSpecies(gen, opponent.species ?? opponent.displayName);
   if (!species) return null;
@@ -462,6 +508,23 @@ function effectiveSpeedForHypothesis(format: string, opponent: PokemonSnapshot, 
   let speed = estimateNonHpStat(species.baseStats.spe, level, hypothesis.evs.spe ?? 0, natureMultiplier("spe", hypothesis.nature));
   if (normalizeName(hypothesis.item) === "choicescarf") speed = Math.floor(speed * 1.5);
   if (normalizeName(hypothesis.item) === "ironball") speed = Math.floor(speed * 0.5);
+  if (!options.includeCurrentBoardModifiers) return speed;
+
+  const abilityId = normalizeName(hypothesis.ability);
+  speed = Math.floor(speed * speedStageMultiplier(opponent.boosts?.spe ?? 0));
+  if (opponent.status === "par" && abilityId !== "quickfeet") {
+    speed = Math.floor(speed * paralysisSpeedMultiplier(format));
+  }
+  if (opponent.status && abilityId === "quickfeet") {
+    speed = Math.floor(speed * 1.5);
+  }
+  if (options.battleSnapshot?.field.opponentSideConditions.some((value) => /tailwind/i.test(value))) {
+    speed = Math.floor(speed * 2);
+  }
+  const fieldSpeedRule = matchingFieldSpeedAbilityRule(abilityId, options.battleSnapshot?.field);
+  if (fieldSpeedRule) {
+    speed = Math.floor(speed * fieldSpeedRule.multiplier);
+  }
   return speed;
 }
 
@@ -701,7 +764,10 @@ export function buildOpponentPosterior(params: PosteriorBuildParams): OpponentPo
       for (const observation of params.battleEvidence?.outgoingDamage ?? []) {
         logScore += damageObservationLogScore(params.format, params.opponent, hypothesis, observation);
       }
-      hypothesis.effectiveSpeed = effectiveSpeedForHypothesis(params.format, params.opponent, hypothesis);
+      hypothesis.effectiveSpeed = effectiveSpeedForHypothesis(params.format, params.opponent, hypothesis, {
+        battleSnapshot: params.battleSnapshot,
+        includeCurrentBoardModifiers: true
+      });
       hypothesis.weight = logScore;
       scoredHypotheses.push(hypothesis);
     }

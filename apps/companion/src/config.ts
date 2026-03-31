@@ -28,6 +28,7 @@ export const config = {
   claudeTimeoutMs: Number.parseInt(env("CLAUDE_TIMEOUT_MS", "240000"), 10),
   claudeEnableMcp: envBoolean("CLAUDE_ENABLE_MCP", false),
   geminiTimeoutMs: Number.parseInt(env("GEMINI_TIMEOUT_MS", "120000"), 10),
+  strategicTimeoutMs: Number.parseInt(env("STRATEGIC_TIMEOUT_MS", "300000"), 10),
   localIntelStorePath: env("LOCAL_INTEL_STORE_PATH", path.resolve(repoRoot, ".local-data/opponent-intel.json")),
   externalCuratedStorePath: env("EXTERNAL_CURATED_STORE_PATH", path.resolve(repoRoot, ".local-data/external-curated-priors.json")),
   replaysDir: env("REPLAYS_DIR", path.resolve(repoRoot, "replays")),

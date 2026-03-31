@@ -574,6 +574,23 @@ function damagePreviewForAction(action: LegalAction, previews: DamagePreview[]) 
     ?? null;
 }
 
+function interactionHintLabels(hints: Array<{ label: string }> | null | undefined) {
+  return uniqueStrings((hints ?? []).map((hint) => hint.label));
+}
+
+function formatNullifierLabels(labels: string[]) {
+  return uniqueStrings(labels).slice(0, 2).join(" / ");
+}
+
+function possibleNullifierRiskText(labels: string[], suffix: string) {
+  const formatted = formatNullifierLabels(labels);
+  return formatted ? `possible ${formatted} ${suffix}` : null;
+}
+
+function cleanBandDetail(detail: string | undefined) {
+  return typeof detail === "string" ? detail.replace(/[.\s]+$/g, "") : null;
+}
+
 function hasSideCondition(conditions: string[], sideCondition: string | null | undefined) {
   const expected = normalizeName(sideCondition);
   if (!expected) return false;
@@ -764,6 +781,9 @@ function searchContributionForMove(params: {
   let setupConversionReward = false;
   let lateHazardDrag = false;
   let endgameCollapseReward = false;
+  const possibleSwitchNullifierLabels = new Set<string>();
+  const hardSwitchNullifierDetails = new Set<string>();
+  let hardSwitchNullifier = false;
   let expectedScore = 0;
 
   for (const reply of replies) {
@@ -847,31 +867,44 @@ function searchContributionForMove(params: {
         setupConversionReward = true;
       }
     } else if (reply.candidate.actionClass === "switch") {
-      const switchTarget = findOpponentPokemon(params.snapshot, reply.candidate.switchTargetSpecies);
-      const effectiveness = moveEffectivenessAgainstTarget(gen, move, switchTarget);
-      const switchPunishDamage = effectiveness === null
-        ? 0
-        : effectiveness <= 0
-          ? 0
-          : effectiveness < 1
-            ? immediatePressure * 0.45
-            : effectiveness >= 2
-              ? Math.max(immediatePressure, 65)
-              : Math.max(immediatePressure, 35);
+      const switchPreview = damagePreviewForAction(params.action, reply.candidate.switchTargetPlayerPreview ?? []);
+      const switchBand = likelyBand(switchPreview?.bands);
+      const switchHintLabels = interactionHintLabels(switchPreview?.interactionHints);
+      const switchPunishDamage = switchBand
+        ? bandAveragePercent(switchBand)
+        : 0;
       const projectedTempoGain = (pivotMove ? 4 : 0) + (hazardMove && !existingHazard ? 1 : 0) + (setupMove ? 2 : 0);
-      if (effectiveness !== null) {
-        if (effectiveness <= 0) {
+
+      if (switchBand) {
+        if (isImmuneOrBlockedBand(switchBand)) {
+          branchScore -= 24;
+          punishedLikelySwitchTarget = true;
+          hardSwitchNullifier = true;
+          const detail = cleanBandDetail(switchBand.detail);
+          if (detail) hardSwitchNullifierDetails.add(detail);
+        } else if (switchHintLabels.length > 0) {
+          branchScore -= 12;
+          punishedLikelySwitchTarget = true;
+          for (const label of switchHintLabels) possibleSwitchNullifierLabels.add(label);
+        } else if (switchBand.coverage === "misses_current_hp" && bandMaxPercent(switchBand) <= 25) {
           branchScore -= 18;
           punishedLikelySwitchTarget = true;
-        } else if (effectiveness < 1) {
+        } else if (switchBand.coverage === "misses_current_hp" && bandMaxPercent(switchBand) <= 45) {
           branchScore -= 10;
           punishedLikelySwitchTarget = true;
-        } else if (effectiveness >= 2) {
+        } else if (switchBand.coverage === "covers_current_hp" || bandAveragePercent(switchBand) >= 65) {
           branchScore += 12;
           rewardedLikelySwitchPunish = true;
-        } else if (effectiveness > 1) {
+        } else if (switchBand.coverage === "can_cover_current_hp" || bandAveragePercent(switchBand) >= 35) {
           branchScore += 6;
           rewardedLikelySwitchPunish = true;
+        }
+      } else {
+        const switchTarget = findOpponentPokemon(params.snapshot, reply.candidate.switchTargetSpecies);
+        const effectiveness = moveEffectivenessAgainstTarget(gen, move, switchTarget);
+        if (effectiveness !== null && effectiveness <= 0) {
+          branchScore -= 10;
+          punishedLikelySwitchTarget = true;
         }
       }
 
@@ -969,6 +1002,14 @@ function searchContributionForMove(params: {
   }
   if (punishedLikelySwitchTarget) {
     searchRisks.push("likely switch target blunts this line");
+  }
+  if (hardSwitchNullifier) {
+    const detail = [...hardSwitchNullifierDetails][0];
+    searchRisks.push(detail ? `likely switch target blanks this move (${detail})` : "likely switch target blanks this move");
+  }
+  const possibleSwitchNullifierRisk = possibleNullifierRiskText([...possibleSwitchNullifierLabels], "switch-in");
+  if (possibleSwitchNullifierRisk) {
+    searchRisks.push(possibleSwitchNullifierRisk);
   }
   if (punishedSpecificStayAttack) {
     searchRisks.push("top opposing punish line still contests this");
@@ -1322,6 +1363,17 @@ function buildMoveCandidate(params: {
 
       if (params.preview.observedRange && params.preview.observedRange.sampleCount >= 2) {
         tacticalScore += 2;
+      }
+    }
+
+    if (!isImmuneOrBlockedBand(likely)) {
+      const possibleCurrentNullifierRisk = possibleNullifierRiskText(
+        interactionHintLabels(params.preview.interactionHints),
+        "on the current target"
+      );
+      if (possibleCurrentNullifierRisk) {
+        riskScore -= 10;
+        riskFlags.push(possibleCurrentNullifierRisk);
       }
     }
   }

@@ -1,5 +1,7 @@
 import type { ActionScoreComponent, BattleSnapshot, LegalAction } from "../types.js";
 
+export type ReplaySplitTag = "train" | "dev" | "gold";
+
 export interface ReplayPolicyLabel {
   actionId: string;
   kind: Extract<LegalAction["kind"], "move" | "switch">;
@@ -21,9 +23,42 @@ export interface ReplayPolicyCandidateFeature {
   riskFlags: string[];
 }
 
+export interface ReplayDeterministicSummary {
+  selfActionRecommendation?: {
+    topActionId: string | null;
+    confidenceTier: "low" | "medium" | "high";
+    topScore: number | null;
+    secondScore: number | null;
+    topScoreGap: number | null;
+  } | undefined;
+  opponentActionPrediction?: {
+    topActionClass: "stay_attack" | "switch" | "status_or_setup" | "unknown";
+    confidenceTier: "low" | "medium" | "high";
+    topActionLabel: string | null;
+  } | undefined;
+  opponentLeadPrediction?: {
+    topLeadSpecies: string | null;
+    confidenceTier: "low" | "medium" | "high";
+  } | undefined;
+  playerLeadRecommendation?: {
+    topLeadSpecies: string | null;
+    confidenceTier: "low" | "medium" | "high";
+  } | undefined;
+  speedPreview?: {
+    activeRelation: "faster" | "slower" | "overlap" | "unknown";
+    yourActiveEffectiveSpeed: number | null;
+    opponentEffectiveSpeedMin: number | null;
+    opponentEffectiveSpeedMax: number | null;
+    reason: string | null;
+  } | undefined;
+  hazardSummary?: string | null | undefined;
+}
+
 export interface ReplayPolicyExample {
-  schemaVersion: "replay-policy-example@0.1";
+  schemaVersion: "replay-policy-example@0.1" | "replay-policy-example@0.2";
+  exampleId: string;
   extractedAt: string;
+  splitTag: ReplaySplitTag;
   source: {
     replayFile: string;
     replayKind: "log" | "html";
@@ -37,6 +72,7 @@ export interface ReplayPolicyExample {
     didActingSideWin?: boolean | null | undefined;
   };
   snapshot: BattleSnapshot;
+  deterministic?: ReplayDeterministicSummary | undefined;
   label: ReplayPolicyLabel;
   candidateFeatures: ReplayPolicyCandidateFeature[];
   observation: {

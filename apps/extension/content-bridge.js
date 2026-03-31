@@ -658,6 +658,11 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
     `;
   }
 
+  function findLikelyBand(bands) {
+    if (!Array.isArray(bands) || bands.length === 0) return null;
+    return bands.find((band) => band.label === "likely") ?? bands[0] ?? null;
+  }
+
   function formatCompactThreatBand(band) {
     if (!band) return "";
     if (band.outcome && band.outcome !== "damage") {
@@ -669,6 +674,59 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
     return "unknown";
   }
 
+  function compactHintLabel(hints) {
+    if (!Array.isArray(hints) || hints.length === 0) return "";
+    return hints[0]?.label ?? "";
+  }
+
+  function renderSwitchDamagePeek(summaryLabel, rows) {
+    if (!Array.isArray(rows) || rows.length === 0) return "";
+    return `
+      <details style="margin-top:6px">
+        <summary style="cursor:pointer;font-size:11px;opacity:.72">${escapeHtml(summaryLabel)}</summary>
+        <div style="margin-top:6px;display:grid;gap:6px">
+          ${rows.map((row) => `
+            <div style="padding:6px 8px;border-radius:8px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.06);font-size:11px;line-height:1.35">
+              <strong style="font-weight:600">${escapeHtml(row.label ?? "Unknown")}</strong>
+              <span style="opacity:.84"> ${escapeHtml(row.damageText ?? "unknown")}</span>
+              ${row.note ? `<span style="opacity:.62"> · ${escapeHtml(row.note)}</span>` : ""}
+            </div>
+          `).join("")}
+        </div>
+      </details>
+    `;
+  }
+
+  function collectSwitchInRowsForMove(prediction, moveName) {
+    const normalizedMove = String(moveName ?? "").trim().toLowerCase();
+    if (!normalizedMove || !Array.isArray(prediction?.topActions)) return [];
+    const seen = new Set();
+    const rows = [];
+    for (const candidate of prediction.topActions) {
+      if (candidate?.actionClass !== "switch" || !candidate?.switchTargetSpecies || !Array.isArray(candidate?.switchTargetPlayerPreview)) continue;
+      const preview = candidate.switchTargetPlayerPreview.find((entry) => String(entry?.moveName ?? "").trim().toLowerCase() === normalizedMove);
+      if (!preview) continue;
+      const key = String(candidate.switchTargetSpecies).trim().toLowerCase();
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      rows.push({
+        label: candidate.switchTargetSpecies,
+        damageText: formatCompactThreatBand(findLikelyBand(preview.bands)),
+        note: compactHintLabel(preview.interactionHints)
+      });
+    }
+    return rows;
+  }
+
+  function collectThreatSwitchRows(threatEntry) {
+    const targets = Array.isArray(threatEntry?.switchTargets) ? threatEntry.switchTargets : [];
+    return targets.map((target) => ({
+      label: target.species ?? "Unknown",
+      damageText: formatCompactThreatBand(findLikelyBand(target.bands)),
+      note: compactHintLabel(target.interactionHints) || (target.relation ? formatSpeedRelation(target.relation) : "")
+    }));
+  }
+
   function formatSpeedRange(range) {
     if (!range || !Number.isFinite(range.min) || !Number.isFinite(range.max)) return "?";
     if (range.min === range.max) return `${Math.round(range.min)}`;
@@ -676,10 +734,34 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
   }
 
   function formatSpeedRelation(relation) {
-    if (relation === "faster") return "likely faster";
-    if (relation === "slower") return "likely slower";
-    if (relation === "overlap") return "roughly even";
+    if (relation === "faster") return "you outspeed";
+    if (relation === "slower") return "they outspeed";
+    if (relation === "overlap") return "range overlap";
     return "speed unclear";
+  }
+
+  function relationFromSpeedNumber(yourSpeed, opponentRange) {
+    if (!Number.isFinite(yourSpeed) || !opponentRange || !Number.isFinite(opponentRange.min) || !Number.isFinite(opponentRange.max)) {
+      return "unknown";
+    }
+    if (yourSpeed > opponentRange.max) return "faster";
+    if (yourSpeed < opponentRange.min) return "slower";
+    return "overlap";
+  }
+
+  function formatSwitchSpeedText(matchup, possibleRange) {
+    const liveLabel = formatSpeedRelation(matchup?.relation);
+    const possibleRelation = relationFromSpeedNumber(Number(matchup?.effectiveSpeed), possibleRange);
+    if (!possibleRange || possibleRelation === "unknown" || possibleRelation === matchup?.relation) {
+      return liveLabel;
+    }
+    if (matchup?.relation === "faster" && possibleRelation !== "faster") {
+      return "you outspeed live; item risk";
+    }
+    if (matchup?.relation === "overlap" && possibleRelation === "slower") {
+      return "range overlap; item risk";
+    }
+    return `${liveLabel}; item risk`;
   }
 
   function renderMechanicsCard(title, body, footer = "") {
@@ -696,9 +778,11 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
     const yourSpeed = Number(speedPreview?.yourActiveEffectiveSpeed);
     const neutralRange = speedPreview?.neutralRange;
     const opponentRange = speedPreview?.effectiveRange;
+    const possibleRange = speedPreview?.possibleRange;
     const hasYourSpeed = Number.isFinite(yourSpeed);
     const hasNeutralRange = neutralRange && Number.isFinite(neutralRange.min) && Number.isFinite(neutralRange.max);
     const hasOpponentRange = opponentRange && Number.isFinite(opponentRange.min) && Number.isFinite(opponentRange.max);
+    const hasPossibleRange = possibleRange && Number.isFinite(possibleRange.min) && Number.isFinite(possibleRange.max);
     if (!hasYourSpeed && !hasOpponentRange) {
       return speedPreview?.activeSummary
         ? `<div style="margin-top:4px;opacity:.72">${speedPreview.activeSummary}</div>`
@@ -732,17 +816,22 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
         `}
         ${hasNeutralRange ? `
           <span style="display:inline-flex;align-items:center;gap:6px;padding:3px 8px;border-radius:999px;border:1px solid rgba(255,255,255,0.08);background:rgba(255,255,255,0.05);font-size:11px;line-height:1.2;white-space:nowrap">
-            <strong style="font-weight:600">opp raw</strong>
+            <strong style="font-weight:600">base est</strong>
             <span>${formatSpeedRange(neutralRange)}</span>
           </span>
         ` : ""}
         ${hasOpponentRange ? `
           <span style="display:inline-flex;align-items:center;gap:6px;padding:3px 8px;border-radius:999px;border:1px solid rgba(255,255,255,0.08);background:rgba(255,255,255,0.05);font-size:11px;line-height:1.2;white-space:nowrap">
-            <strong style="font-weight:600">opp now</strong>
+            <strong style="font-weight:600">live est</strong>
             <span>${formatSpeedRange(opponentRange)}</span>
           </span>
         ` : ""}
-        ${speedPreview?.reason ? renderCompactChip("why", String(speedPreview.reason).replace(/_/g, " "), "accent", `Primary speed reason: ${speedPreview.reason}`) : ""}
+        ${hasPossibleRange ? `
+          <span style="display:inline-flex;align-items:center;gap:6px;padding:3px 8px;border-radius:999px;border:1px solid rgba(255,255,255,0.08);background:rgba(251,191,36,0.12);border-color:rgba(251,191,36,0.28);font-size:11px;line-height:1.2;white-space:nowrap">
+            <strong style="font-weight:600">item range</strong>
+            <span>${formatSpeedRange(possibleRange)}</span>
+          </span>
+        ` : ""}
       </div>
       ${speedPreview?.activeSummary ? `<div style="margin-top:4px;font-size:10px;opacity:.66">${speedPreview.activeSummary}</div>` : ""}
     `;
@@ -834,10 +923,7 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
     const leadPrediction = localIntel?.opponentLeadPrediction ?? null;
     if (!prediction && leadPrediction) {
       const topCandidates = Array.isArray(leadPrediction.topCandidates) ? leadPrediction.topCandidates : [];
-      const reasons = Array.isArray(leadPrediction.reasons) ? leadPrediction.reasons : [];
-      const riskFlags = Array.isArray(leadPrediction.riskFlags) ? leadPrediction.riskFlags : [];
       return `
-        <div style="margin-top:6px;font-size:11px;opacity:.58">Preview-phase deterministic opening line to respect.</div>
         <div style="margin-top:8px;display:flex;flex-wrap:wrap;gap:6px">
           <span style="display:inline-flex;align-items:center;gap:6px;padding:3px 8px;border-radius:999px;border:1px solid rgba(255,255,255,0.08);background:rgba(246,173,85,0.16);border-color:rgba(246,173,85,0.28);font-size:11px;line-height:1.2;white-space:nowrap">
             <strong style="font-weight:600">lead</strong>
@@ -865,23 +951,10 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
             `).join("")}
           </div>
         ` : `<div style="margin-top:10px;opacity:.72">No ranked lead candidates yet.</div>`}
-        ${reasons.length > 0 ? `
-          <div style="margin-top:10px">
-            <div style="font-size:11px;opacity:.62;text-transform:uppercase;letter-spacing:.05em">Why</div>
-            <div style="margin-top:6px;display:flex;flex-wrap:wrap;gap:6px">${reasons.map((reason) => renderPredictionChip(reason, "reason")).join("")}</div>
-          </div>
-        ` : ""}
-        ${riskFlags.length > 0 ? `
-          <div style="margin-top:10px">
-            <div style="font-size:11px;opacity:.62;text-transform:uppercase;letter-spacing:.05em">Risk flags</div>
-            <div style="margin-top:6px;display:flex;flex-wrap:wrap;gap:6px">${riskFlags.map((flag) => renderPredictionChip(flag, "risk")).join("")}</div>
-          </div>
-        ` : ""}
       `;
     }
     if (!prediction) {
       return `
-        <div style="margin-top:6px;font-size:11px;opacity:.58">Deterministic line-to-respect view from speed, damage bands, hazards, revealed pivots, and high-confidence hidden info.</div>
         <div style="margin-top:10px;font-size:12px;opacity:.72">
           No opponent line-to-respect view yet for this board state.
         </div>
@@ -889,12 +962,9 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
     }
 
     const topActions = Array.isArray(prediction.topActions) ? prediction.topActions : [];
-    const reasons = Array.isArray(prediction.reasons) ? prediction.reasons : [];
-    const riskFlags = Array.isArray(prediction.riskFlags) ? prediction.riskFlags : [];
     const classScores = prediction.classScores ?? null;
 
     return `
-      <div style="margin-top:6px;font-size:11px;opacity:.58">Compact deterministic line most worth respecting on the current board.</div>
       <div style="margin-top:8px;display:flex;flex-wrap:wrap;gap:6px">
         <span style="display:inline-flex;align-items:center;gap:6px;padding:3px 8px;border-radius:999px;border:1px solid rgba(255,255,255,0.08);${predictionClassChipStyle(prediction.topActionClass)};font-size:11px;line-height:1.2;white-space:nowrap">
           <strong style="font-weight:600">class</strong>
@@ -936,27 +1006,47 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
           `).join("")}
         </div>
       ` : `<div style="margin-top:10px;opacity:.72">No ranked concrete action lines yet.</div>`}
-      ${reasons.length > 0 ? `
-        <div style="margin-top:10px">
-          <div style="font-size:11px;opacity:.62;text-transform:uppercase;letter-spacing:.05em">Why</div>
-          <div style="margin-top:6px;display:flex;flex-wrap:wrap;gap:6px">${reasons.map((reason) => renderPredictionChip(reason, "reason")).join("")}</div>
-        </div>
-      ` : ""}
-      ${riskFlags.length > 0 ? `
-        <div style="margin-top:10px">
-          <div style="font-size:11px;opacity:.62;text-transform:uppercase;letter-spacing:.05em">Risk flags</div>
-          <div style="margin-top:6px;display:flex;flex-wrap:wrap;gap:6px">${riskFlags.map((flag) => renderPredictionChip(flag, "risk")).join("")}</div>
-        </div>
-      ` : ""}
     `;
   }
 
   function renderSelfActionPanelMarkup() {
     const localIntel = getLocalIntel();
     const recommendation = localIntel?.selfActionRecommendation ?? null;
+    const leadRecommendation = localIntel?.playerLeadRecommendation ?? null;
+    if (!recommendation && leadRecommendation) {
+      const topCandidates = Array.isArray(leadRecommendation.topCandidates) ? leadRecommendation.topCandidates : [];
+      return `
+        <div style="margin-top:8px;display:flex;flex-wrap:wrap;gap:6px">
+          <span style="display:inline-flex;align-items:center;gap:6px;padding:3px 8px;border-radius:999px;border:1px solid rgba(255,255,255,0.08);background:rgba(94,210,255,0.16);border-color:rgba(94,210,255,0.28);font-size:11px;line-height:1.2;white-space:nowrap">
+            <strong style="font-weight:600">starter</strong>
+            <span>${escapeHtml(leadRecommendation.topLeadSpecies ?? "Unknown")}</span>
+          </span>
+          <span style="display:inline-flex;align-items:center;gap:6px;padding:3px 8px;border-radius:999px;border:1px solid rgba(255,255,255,0.08);${predictionConfidenceChipStyle(leadRecommendation.confidenceTier)};font-size:11px;line-height:1.2;white-space:nowrap">
+            <strong style="font-weight:600">confidence</strong>
+            <span>${escapeHtml(leadRecommendation.confidenceTier)}</span>
+          </span>
+        </div>
+        ${topCandidates.length > 0 ? `
+          <div style="margin-top:10px;display:grid;gap:8px">
+            ${topCandidates.slice(0, 3).map((candidate, index) => `
+              <div style="padding:8px 9px;border-radius:10px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.08)">
+                <div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start">
+                  <div>
+                    <div style="font-weight:600">${index + 1}. ${escapeHtml(candidate.species ?? "Starter")}</div>
+                    <div style="margin-top:2px;font-size:11px;opacity:.62">preview starter candidate</div>
+                  </div>
+                  <span style="font-size:11px;opacity:.74">${escapeHtml(formatPredictionScore(candidate.score))}</span>
+                </div>
+                ${candidate.reasons?.length ? `<div style="margin-top:6px;display:flex;flex-wrap:wrap;gap:6px">${candidate.reasons.slice(0, 2).map((reason) => renderPredictionChip(reason, "reason")).join("")}</div>` : ""}
+                ${candidate.riskFlags?.length ? `<div style="margin-top:6px;display:flex;flex-wrap:wrap;gap:6px">${candidate.riskFlags.slice(0, 2).map((flag) => renderPredictionChip(flag, "risk")).join("")}</div>` : ""}
+              </div>
+            `).join("")}
+          </div>
+        ` : `<div style="margin-top:10px;opacity:.72">No ranked starter candidates yet.</div>`}
+      `;
+    }
     if (!recommendation) {
       return `
-        <div style="margin-top:6px;font-size:11px;opacity:.58">Compact deterministic ranking for your legal moves and switches.</div>
         <div style="margin-top:10px;font-size:12px;opacity:.72">
           No self-recommendation yet for this board state.
         </div>
@@ -964,11 +1054,7 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
     }
 
     const rankedActions = Array.isArray(recommendation.rankedActions) ? recommendation.rankedActions : [];
-    const reasons = Array.isArray(recommendation.reasons) ? recommendation.reasons : [];
-    const riskFlags = Array.isArray(recommendation.riskFlags) ? recommendation.riskFlags : [];
-
     return `
-      <div style="margin-top:6px;font-size:11px;opacity:.58">Compact deterministic recommendation built from damage, threat, speed, hazards, and local opponent intel.</div>
       <div style="margin-top:8px;display:flex;flex-wrap:wrap;gap:6px">
         <span style="display:inline-flex;align-items:center;gap:6px;padding:3px 8px;border-radius:999px;border:1px solid rgba(255,255,255,0.08);background:rgba(94,210,255,0.16);border-color:rgba(94,210,255,0.28);font-size:11px;line-height:1.2;white-space:nowrap">
           <strong style="font-weight:600">top</strong>
@@ -978,9 +1064,6 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
           <strong style="font-weight:600">confidence</strong>
           <span>${escapeHtml(recommendation.confidenceTier)}</span>
         </span>
-      </div>
-      <div style="margin-top:10px;padding:9px 10px;border-radius:10px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.08)">
-        ${escapeHtml(recommendation.summary ?? "No summary available.")}
       </div>
       ${rankedActions.length > 0 ? `
         <div style="margin-top:10px;display:grid;gap:8px">
@@ -999,18 +1082,6 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
           `).join("")}
         </div>
       ` : `<div style="margin-top:10px;opacity:.72">No ranked legal actions yet.</div>`}
-      ${reasons.length > 0 ? `
-        <div style="margin-top:10px">
-          <div style="font-size:11px;opacity:.62;text-transform:uppercase;letter-spacing:.05em">Why</div>
-          <div style="margin-top:6px;display:flex;flex-wrap:wrap;gap:6px">${reasons.map((reason) => renderPredictionChip(reason, "reason")).join("")}</div>
-        </div>
-      ` : ""}
-      ${riskFlags.length > 0 ? `
-        <div style="margin-top:10px">
-          <div style="font-size:11px;opacity:.62;text-transform:uppercase;letter-spacing:.05em">Risk flags</div>
-          <div style="margin-top:6px;display:flex;flex-wrap:wrap;gap:6px">${riskFlags.map((flag) => renderPredictionChip(flag, "risk")).join("")}</div>
-        </div>
-      ` : ""}
     `;
   }
 
@@ -1048,13 +1119,16 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
     const localIntel = getLocalIntel();
     const playerDamagePreview = Array.isArray(localIntel?.playerDamagePreview) ? localIntel.playerDamagePreview : [];
     const opponentThreatPreview = Array.isArray(localIntel?.opponentThreatPreview) ? localIntel.opponentThreatPreview : [];
+    const opponentActionPrediction = localIntel?.opponentActionPrediction ?? null;
 
     const yourMoves = playerDamagePreview.length
       ? `
           <div style="margin-top:8px;font-weight:600">Your moves</div>
           ${playerDamagePreview
             .map(
-              (entry) => `
+              (entry) => {
+                const switchInRows = collectSwitchInRowsForMove(opponentActionPrediction, entry.moveName ?? entry.label);
+                return `
                 <div style="margin-top:8px;padding-top:8px;border-top:1px solid rgba(255,255,255,0.08)">
                   <div style="font-weight:600">${entry.label}</div>
                   <div style="margin-top:2px;font-size:11px;opacity:.62">${entry.targetName ?? "Opponent active"}</div>
@@ -1062,8 +1136,10 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
                   ${renderObservedDamageNote(entry.observedRange)}
                   ${renderCaveatChips(entry.survivalCaveats)}
                   ${renderInteractionHints(entry.interactionHints)}
+                  ${renderSwitchDamagePeek("switch-ins", switchInRows)}
                 </div>
-              `
+              `;
+              }
             )
             .join("")}
         `
@@ -1075,27 +1151,19 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
             <div style="font-weight:600">Opponent threats</div>
             ${opponentThreatPreview
               .map(
-                (entry) => `
+                (entry) => {
+                  const switchRows = collectThreatSwitchRows(entry);
+                  return `
                   <div style="margin-top:8px;padding-top:8px;border-top:1px solid rgba(255,255,255,0.08)">
                   <div style="font-weight:600">${entry.moveName ?? entry.label ?? "Likely move"}${entry.moveSource ? ` · ${entry.moveSource}` : ""}</div>
                   <div style="margin-top:2px;font-size:11px;opacity:.62">${entry.currentTarget?.species ?? "Your active"}</div>
                     ${renderDamageBandRow(entry.currentTarget?.bands, entry.currentTarget?.targetCurrentHpPercent, entry.currentTarget?.likelyBandSource)}
                     ${renderObservedDamageNote(entry.currentTarget?.observedRange)}
                     ${renderInteractionHints(entry.currentTarget?.interactionHints)}
-                    ${Array.isArray(entry.switchTargets) && entry.switchTargets.length > 0 ? `
-                      <div style="margin-top:6px;font-size:11px;opacity:.62">Switches: ${entry.switchTargets
-                        .map((target) => {
-                          const band = Array.isArray(target.bands) ? target.bands.find((candidate) => candidate.label === "likely") ?? target.bands[0] : null;
-                          const observed = target.observedRange && Number.isFinite(target.observedRange.minPercent)
-                            ? ` seen ${formatPercentRange(target.observedRange.minPercent, target.observedRange.maxPercent)}`
-                            : "";
-                          const bandText = formatCompactThreatBand(band);
-                          return `${target.species ?? "Unknown"}${target.relation ? ` (${target.relation})` : ""}${bandText ? ` ${bandText}` : ""}${observed}`;
-                        })
-                        .join("; ")}</div>
-                    ` : ""}
+                    ${renderSwitchDamagePeek("your switches", switchRows)}
                   </div>
-                `
+                `;
+                }
               )
               .join("")}
           </div>
@@ -1103,7 +1171,6 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
       : "";
 
     return `
-      <div style="margin-top:6px;font-size:11px;opacity:.58">Compact deterministic damage bands from current state and local history priors.</div>
       ${yourMoves}
       ${threats}
     `;
@@ -1111,45 +1178,30 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
 
   function renderMechanicsPanelMarkup() {
     const localIntel = getLocalIntel();
-    const opponents = Array.isArray(localIntel?.opponents) ? localIntel.opponents : [];
-    const teraUsedBy = opponents.find((entry) => entry.currentTerastallized)?.species ?? null;
     const speedPreview = localIntel?.speedPreview ?? null;
+    const possibleRange = speedPreview?.possibleRange ?? null;
     const switchSpeedMatchups = Array.isArray(speedPreview?.switchMatchups) ? speedPreview.switchMatchups : [];
     const speedNotes = Array.isArray(speedPreview?.historyNotes) ? speedPreview.historyNotes : [];
-    const survivalCaveats = Array.isArray(localIntel?.survivalCaveats) ? localIntel.survivalCaveats : [];
-    const hazards = localIntel?.hazardSummary ?? null;
     const switchSpeedMarkup = switchSpeedMatchups.length > 0
       ? `${switchSpeedMatchups.map((matchup) => renderCompactChip(
           matchup.species ?? matchup.label ?? "Unknown",
-          `${Number.isFinite(matchup.effectiveSpeed) ? Math.round(matchup.effectiveSpeed) : "?"} · ${formatSpeedRelation(matchup.relation)}`,
+          `${Number.isFinite(matchup.effectiveSpeed) ? Math.round(matchup.effectiveSpeed) : "?"} · ${formatSwitchSpeedText(matchup, possibleRange)}`,
           matchup.relation === "faster" ? "positive" : matchup.relation === "slower" ? "danger" : "neutral",
-          `${matchup.species ?? matchup.label ?? "Unknown"}: ${Number.isFinite(matchup.effectiveSpeed) ? `${Math.round(matchup.effectiveSpeed)} Speed` : "unknown Speed"}; ${formatSpeedRelation(matchup.relation)}`
+          `${matchup.species ?? matchup.label ?? "Unknown"}: ${Number.isFinite(matchup.effectiveSpeed) ? `${Math.round(matchup.effectiveSpeed)} Speed` : "unknown Speed"}; ${formatSwitchSpeedText(matchup, possibleRange)}`
         )).join("")}`
       : "";
-    const boardStateMarkup = `
-      <div style="display:flex;flex-wrap:wrap;gap:6px">
-        ${teraUsedBy
-          ? renderCompactChip("tera", `${teraUsedBy} used`, "accent", `${teraUsedBy} has Terastallized in the current game`)
-          : renderCompactChip("tera", "unused", "neutral", "The opponent has not Terastallized in the current game")}
-        ${hazards ? renderCompactChip("hazards", hazards, "neutral", hazards) : ""}
-        ${survivalCaveats.map((entry) => renderCompactChip("caveat", entry, "warn", entry)).join("")}
-        ${switchSpeedMarkup}
-      </div>
-      ${!hazards && survivalCaveats.length === 0 && !switchSpeedMarkup ? `<div style="margin-top:4px;font-size:10px;opacity:.66">No extra mechanic flags right now.</div>` : ""}
-    `;
 
     return `
-      <div style="margin-top:6px;font-size:11px;opacity:.58">Compact deterministic mechanics from current board state, active field effects, and local observations.</div>
       <div style="margin-top:8px;display:flex;flex-wrap:wrap;gap:8px;align-items:flex-start">
         ${renderMechanicsCard(
           "Speed",
           `
             ${renderSpeedSummaryMarkup(speedPreview, speedPreview?.activeRelation ?? "unknown")}
             ${renderSpeedEvidence(speedPreview)}
+            ${switchSpeedMarkup ? `<div style="margin-top:6px;display:flex;flex-wrap:wrap;gap:6px">${switchSpeedMarkup}</div>` : ""}
           `,
-          speedNotes.length > 0 ? speedNotes.join(" ") : "No clean historical speed observations yet."
+          speedNotes.length > 0 ? speedNotes.join(" ") : ""
         )}
-        ${renderMechanicsCard("State", boardStateMarkup)}
       </div>
     `;
   }

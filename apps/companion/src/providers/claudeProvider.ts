@@ -52,6 +52,9 @@ export class ClaudeProvider implements Provider {
       requestContext: context.requestContext
     });
     const model = this.resolveModel(context.requestedModel);
+    const timeoutMs = context.analysisMode === "strategic"
+      ? Math.max(config.claudeTimeoutMs, config.strategicTimeoutMs)
+      : config.claudeTimeoutMs;
     const schema = JSON.parse(await fs.readFile(config.analysisSchemaPath, "utf8"));
     if (schema && typeof schema === "object" && schema.properties) {
       schema.required = Object.keys(schema.properties);
@@ -89,7 +92,7 @@ export class ClaudeProvider implements Provider {
 
     const result = await runCommand(config.claudeBin, args, {
       cwd: repoRoot,
-      timeoutMs: config.claudeTimeoutMs
+      timeoutMs
     });
 
     if (result.exitCode !== 0) {

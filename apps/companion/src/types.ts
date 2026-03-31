@@ -214,6 +214,7 @@ export interface SpeedPreview {
   opponentSpecies: string;
   neutralRange?: { min: number; max: number } | undefined;
   effectiveRange?: { min: number; max: number } | undefined;
+  possibleRange?: { min: number; max: number } | undefined;
   yourActiveEffectiveSpeed?: number | undefined;
   activeRelation: "faster" | "slower" | "overlap" | "unknown";
   activeSummary?: string | undefined;
@@ -244,6 +245,7 @@ export interface OpponentActionCandidate {
   moveName?: string | undefined;
   source?: "known" | "likely" | "revealed_switch" | "previewed_switch" | undefined;
   switchTargetSpecies?: string | undefined;
+  switchTargetPlayerPreview?: DamagePreview[] | undefined;
   score: number;
   reasons: string[];
   riskFlags: string[];
@@ -287,6 +289,22 @@ export interface OpponentLeadPrediction {
   topCandidates: OpponentLeadCandidate[];
   reasons: string[];
   riskFlags: string[];
+}
+
+export interface PlayerLeadCandidate {
+  species: string;
+  score: number;
+  reasons: string[];
+  riskFlags: string[];
+}
+
+export interface PlayerLeadRecommendation {
+  confidenceTier: "low" | "medium" | "high";
+  topLeadSpecies: string | null;
+  topCandidates: PlayerLeadCandidate[];
+  reasons: string[];
+  riskFlags: string[];
+  summary: string;
 }
 
 export interface ActionScoreComponent {
@@ -336,6 +354,7 @@ export interface OpponentIntelEntry {
   likelyTeraTypes: LikelihoodEntry[];
   neutralSpeedRange?: { min: number; max: number } | undefined;
   currentSpeedRange?: { min: number; max: number } | undefined;
+  possibleSpeedRange?: { min: number; max: number } | undefined;
   activeYourEffectiveSpeed?: number | undefined;
   activeSpeedRelation?: "faster" | "slower" | "overlap" | "unknown" | undefined;
   currentSpeedSummary?: string | undefined;
@@ -354,6 +373,7 @@ export interface LocalIntelSnapshot {
   opponentThreatPreview?: ThreatPreview[] | undefined;
   opponentActionPrediction?: OpponentActionPrediction | undefined;
   opponentLeadPrediction?: OpponentLeadPrediction | undefined;
+  playerLeadRecommendation?: PlayerLeadRecommendation | undefined;
   selfActionRecommendation?: SelfActionRecommendation | undefined;
   speedPreview?: SpeedPreview | undefined;
   hazardSummary?: string | undefined;

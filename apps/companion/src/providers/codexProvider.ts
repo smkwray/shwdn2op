@@ -47,6 +47,9 @@ export class CodexProvider implements Provider {
       requestContext: context.requestContext
     });
     const model = this.resolveModel(context.requestedModel);
+    const timeoutMs = context.analysisMode === "strategic"
+      ? config.strategicTimeoutMs
+      : 120000;
     const tempFile = path.join(os.tmpdir(), `sso-codex-${Date.now()}-${Math.random().toString(16).slice(2)}.json`);
     const schemaFile = path.join(os.tmpdir(), `sso-codex-schema-${Date.now()}-${Math.random().toString(16).slice(2)}.json`);
 
@@ -72,7 +75,7 @@ export class CodexProvider implements Provider {
         ],
         {
           cwd: repoRoot,
-          timeoutMs: 120000
+          timeoutMs
         }
       );
 

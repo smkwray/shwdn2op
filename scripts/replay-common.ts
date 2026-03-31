@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 
-import type { ReplayPolicyExample } from "../apps/companion/src/ml/replayPolicyExample.js";
+import type { ReplayDeterministicSummary, ReplayPolicyExample, ReplaySplitTag } from "../apps/companion/src/ml/replayPolicyExample.js";
 import type { BattleSnapshot, LegalAction, LocalIntelSnapshot } from "../apps/companion/src/types.js";
 // The extension parser is the canonical reducer for battle protocol.
 // It is imported directly here so replay extraction stays aligned with the live capture path.
@@ -49,6 +49,22 @@ function moveActionId(moveName: string) {
 
 function switchActionId(speciesName: string) {
   return `switch:${normalizeName(speciesName)}`;
+}
+
+function stableHash(value: string) {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
+export function splitTagForBattle(roomId: string): ReplaySplitTag {
+  const bucket = stableHash(String(roomId ?? "")) % 100;
+  if (bucket < 15) return "gold";
+  if (bucket < 30) return "dev";
+  return "train";
 }
 
 function uniqueById(actions: LegalAction[]) {
@@ -244,6 +260,55 @@ function candidateFeaturesFromIntel(localIntel: LocalIntelSnapshot | undefined) 
   }));
 }
 
+function deterministicSummaryFromIntel(localIntel: LocalIntelSnapshot | undefined): ReplayDeterministicSummary | undefined {
+  if (!localIntel) return undefined;
+  const selfRanked = localIntel.selfActionRecommendation?.rankedActions ?? [];
+  const topScore = Number.isFinite(selfRanked[0]?.score) ? Number(selfRanked[0]?.score) : null;
+  const secondScore = Number.isFinite(selfRanked[1]?.score) ? Number(selfRanked[1]?.score) : null;
+  const topScoreGap = topScore !== null && secondScore !== null ? Number((topScore - secondScore).toFixed(1)) : null;
+
+  return {
+    selfActionRecommendation: localIntel.selfActionRecommendation
+      ? {
+          topActionId: localIntel.selfActionRecommendation.topActionId,
+          confidenceTier: localIntel.selfActionRecommendation.confidenceTier,
+          topScore,
+          secondScore,
+          topScoreGap
+        }
+      : undefined,
+    opponentActionPrediction: localIntel.opponentActionPrediction
+      ? {
+          topActionClass: localIntel.opponentActionPrediction.topActionClass,
+          confidenceTier: localIntel.opponentActionPrediction.confidenceTier,
+          topActionLabel: localIntel.opponentActionPrediction.topActions[0]?.label ?? null
+        }
+      : undefined,
+    opponentLeadPrediction: localIntel.opponentLeadPrediction
+      ? {
+          topLeadSpecies: localIntel.opponentLeadPrediction.topLeadSpecies,
+          confidenceTier: localIntel.opponentLeadPrediction.confidenceTier
+        }
+      : undefined,
+    playerLeadRecommendation: localIntel.playerLeadRecommendation
+      ? {
+          topLeadSpecies: localIntel.playerLeadRecommendation.topLeadSpecies,
+          confidenceTier: localIntel.playerLeadRecommendation.confidenceTier
+        }
+      : undefined,
+    speedPreview: localIntel.speedPreview
+      ? {
+          activeRelation: localIntel.speedPreview.activeRelation,
+          yourActiveEffectiveSpeed: localIntel.speedPreview.yourActiveEffectiveSpeed ?? null,
+          opponentEffectiveSpeedMin: localIntel.speedPreview.effectiveRange?.min ?? null,
+          opponentEffectiveSpeedMax: localIntel.speedPreview.effectiveRange?.max ?? null,
+          reason: localIntel.speedPreview.reason ?? null
+        }
+      : undefined,
+    hazardSummary: localIntel.hazardSummary ?? null
+  };
+}
+
 function observationFromSnapshot(snapshot: BattleSnapshot) {
   const knownMoveCount = snapshot.yourSide.active?.knownMoves?.length ?? 0;
   return {
@@ -321,10 +386,13 @@ export async function extractReplayExamples(source: ReplaySource, context: Repla
       if (!candidateFeatures.some((candidate) => candidate.actionId === observedAction.actionId)) {
         notes.push("Chosen action was not present in deterministic candidate features after extraction.");
       }
+      const exampleId = `${snapshot.roomId}|${turn}|${side}`;
 
       examples.push({
-        schemaVersion: "replay-policy-example@0.1",
+        schemaVersion: "replay-policy-example@0.2",
+        exampleId,
         extractedAt: new Date().toISOString(),
+        splitTag: splitTagForBattle(snapshot.roomId),
         source: {
           replayFile: source.replayFile,
           replayKind: source.replayKind,
@@ -338,6 +406,7 @@ export async function extractReplayExamples(source: ReplaySource, context: Repla
           didActingSideWin: winnerSide ? winnerSide === side : null
         },
         snapshot,
+        deterministic: deterministicSummaryFromIntel(localIntel),
         label: {
           actionId: observedAction.actionId,
           kind: observedAction.kind,

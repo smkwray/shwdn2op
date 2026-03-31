@@ -601,6 +601,7 @@ function buildSwitchActionCandidates(params: {
       actionClass: "switch",
       label: `Switch to ${target.pokemon.species ?? target.pokemon.displayName ?? "reserve"}`,
       switchTargetSpecies: target.pokemon.species ?? target.pokemon.displayName ?? "reserve",
+      switchTargetPlayerPreview: target.damagePreview,
       source: target.source,
       score: clampScore(score),
       reasons: uniqueStrings(reasons),

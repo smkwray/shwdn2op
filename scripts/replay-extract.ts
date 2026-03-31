@@ -10,6 +10,7 @@ import {
   extractReplayExamples,
   listReplayFiles,
   readReplaySource,
+  splitTagForBattle,
   writeJsonl
 } from "./replay-common.js";
 
@@ -56,6 +57,13 @@ async function main() {
     replayKinds: Object.fromEntries(
       [...deduped.reduce((map, example) => {
         map.set(example.source.replayKind, (map.get(example.source.replayKind) ?? 0) + 1);
+        return map;
+      }, new Map<string, number>()).entries()].sort((a, b) => a[0].localeCompare(b[0]))
+    ),
+    splitTags: Object.fromEntries(
+      [...deduped.reduce((map, example) => {
+        const splitTag = example.splitTag ?? splitTagForBattle(example.source.roomId);
+        map.set(splitTag, (map.get(splitTag) ?? 0) + 1);
         return map;
       }, new Map<string, number>()).entries()].sort((a, b) => a[0].localeCompare(b[0]))
     )

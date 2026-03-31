@@ -160,6 +160,12 @@ function describeSelfRecommendationAction(
   return `${action.label} (${kind}, score ${Math.round(action.score)})`;
 }
 
+function describePlayerLeadCandidate(
+  candidate: NonNullable<LocalIntelSnapshot["playerLeadRecommendation"]>["topCandidates"][number]
+) {
+  return `${candidate.species} (score ${Math.round(candidate.score)})`;
+}
+
 export function buildAnalysisPrompt(snapshot: BattleSnapshot, options: AnalysisPromptOptions = {}): string {
   const analysisMode = analysisModeForOptions(options);
   const promptSnapshot = buildPromptSnapshot(snapshot, options);
@@ -230,6 +236,17 @@ export function buildAnalysisPrompt(snapshot: BattleSnapshot, options: AnalysisP
         ...(options.localIntel.opponentLeadPrediction.riskFlags.slice(0, 2).map((risk) => `- Risk: ${risk}.`))
       ]
     : [];
+  const playerLeadLines = options.localIntel?.playerLeadRecommendation
+    ? [
+        "",
+        "Deterministic self lead view:",
+        `- Recommended starter ${options.localIntel.playerLeadRecommendation.topLeadSpecies ?? "unknown"}; confidence ${options.localIntel.playerLeadRecommendation.confidenceTier}.`,
+        `- Summary: ${options.localIntel.playerLeadRecommendation.summary}`,
+        ...(options.localIntel.playerLeadRecommendation.topCandidates.slice(0, 3).map((candidate) => `- ${describePlayerLeadCandidate(candidate)}.`)),
+        ...(options.localIntel.playerLeadRecommendation.reasons.slice(0, 3).map((reason) => `- Why: ${reason}.`)),
+        ...(options.localIntel.playerLeadRecommendation.riskFlags.slice(0, 2).map((risk) => `- Risk: ${risk}.`))
+      ]
+    : [];
   const requestContextLines = options.requestContext
     ? [
         "",
@@ -256,6 +273,7 @@ export function buildAnalysisPrompt(snapshot: BattleSnapshot, options: AnalysisP
     : [];
   const structuredMechanicsLines = [
     ...opponentLeadLines,
+    ...playerLeadLines,
     ...selfRecommendationLines,
     ...opponentActionLines,
     ...(Array.isArray(options.localIntel?.playerDamagePreview) && options.localIntel.playerDamagePreview.length > 0

@@ -29,9 +29,11 @@ import type {
   SpeedPreview,
   SwitchSpeedMatchup
 } from "../types.js";
+import { filterLiveLikelyHeldItemEntries, filterLiveLikelyHeldItemNames } from "../mechanics/liveLikelyItems.js";
 import { buildDamagePreview, buildThreatPreview } from "../prompting/damageNotes.js";
 import { buildOpponentActionPrediction } from "../prediction/opponentActionPredictor.js";
 import { buildOpponentLeadPrediction } from "../prediction/opponentLeadPredictor.js";
+import { buildPlayerLeadRecommendation } from "../prediction/playerLeadPredictor.js";
 import { buildSelfActionRecommendation } from "../prediction/selfActionRecommender.js";
 
 interface IntelFormatRecord {
@@ -202,12 +204,11 @@ function revealedItemName(pokemon: PokemonSnapshot | null | undefined): string |
 }
 
 function liveLikelyHeldItems(
+  format: string,
   pokemon: PokemonSnapshot | null | undefined,
   likelyItems: LikelihoodEntry[] | undefined
 ) {
-  if (!pokemon) return [];
-  if (!pokemon.item && pokemon.removedItem) return [];
-  return likelyItems?.map((entry) => entry.name) ?? [];
+  return filterLiveLikelyHeldItemNames(format, pokemon, likelyItems?.map((entry) => entry.name) ?? []);
 }
 
 function uniqueStrings(values: Array<string | null | undefined>) {
@@ -1630,11 +1631,73 @@ function formatRange(range: { min: number; max: number } | null | undefined) {
   return range.min === range.max ? `${range.min}` : `${range.min}-${range.max}`;
 }
 
-function buildCurrentSpeedIntel(snapshot: BattleSnapshot, speciesName: string, formatRecord: IntelFormatRecord) {
+function likelySpeedItemEntries(likelyItems: LikelihoodEntry[] | undefined) {
+  return (likelyItems ?? []).filter((entry) => {
+    const itemId = normalizedItemId(entry.name);
+    if (!["choicescarf", "ironball"].includes(itemId)) return false;
+    return entry.confidenceTier === "strong" || entry.confidenceTier === "usable" || entry.share >= 0.45;
+  });
+}
+
+function possibleItemAdjustedSpeedRange(params: {
+  format: string;
+  neutralRange: { min: number; max: number } | null;
+  currentRange: { min: number; max: number } | null;
+  pokemon: PokemonSnapshot | null | undefined;
+  sideConditions: string[];
+  field: BattleSnapshot["field"];
+  likelyItems: LikelihoodEntry[] | undefined;
+}) {
+  if (!params.neutralRange || !params.currentRange || !params.pokemon || params.pokemon.item || params.pokemon.removedItem) {
+    return null;
+  }
+
+  const candidates = likelySpeedItemEntries(params.likelyItems);
+  if (candidates.length === 0) return null;
+
+  let range: { min: number; max: number } | null = null;
+  const labels: string[] = [];
+  for (const candidate of candidates) {
+    const adjusted = effectiveSpeedRangeForPokemon(
+      params.format,
+      params.neutralRange,
+      {
+        ...params.pokemon,
+        item: candidate.name,
+        removedItem: null
+      },
+      params.sideConditions,
+      params.field
+    );
+    if (!adjusted) continue;
+    if (adjusted.min === params.currentRange.min && adjusted.max === params.currentRange.max) continue;
+    range = range
+      ? {
+          min: Math.min(range.min, adjusted.min),
+          max: Math.max(range.max, adjusted.max)
+        }
+      : adjusted;
+    labels.push(candidate.name);
+  }
+
+  if (!range || labels.length === 0) return null;
+  return {
+    range,
+    labels: uniqueStrings(labels)
+  };
+}
+
+function buildCurrentSpeedIntel(
+  snapshot: BattleSnapshot,
+  speciesName: string,
+  formatRecord: IntelFormatRecord,
+  likelyItems?: LikelihoodEntry[]
+) {
   const opponentActive = snapshot.opponentSide.active;
   if (!opponentActive || normalizeName(speciesNameFromSnapshot(opponentActive)) !== normalizeName(speciesName)) {
     return {
       currentSpeedRange: undefined,
+      possibleSpeedRange: undefined,
       currentSpeedSummary: undefined,
       switchSpeedMatchups: undefined,
       speedEvidence: undefined,
@@ -1664,6 +1727,15 @@ function buildCurrentSpeedIntel(snapshot: BattleSnapshot, speciesName: string, f
     snapshot.field.opponentSideConditions,
     snapshot.field
   );
+  const possibleItemRange = possibleItemAdjustedSpeedRange({
+    format: snapshot.format,
+    neutralRange,
+    currentRange: opponentRange,
+    pokemon: opponentActive,
+    sideConditions: snapshot.field.opponentSideConditions,
+    field: snapshot.field,
+    likelyItems
+  });
   const activeSpeed = effectiveShownSpeed(snapshot.format, snapshot.yourSide.active, snapshot.field.yourSideConditions);
   const relation = speedRelation(activeSpeed, opponentRange);
   const activeSpeedText = formatRange(activeSpeed);
@@ -1718,6 +1790,13 @@ function buildCurrentSpeedIntel(snapshot: BattleSnapshot, speciesName: string, f
       ].filter(Boolean).join(", ")
     });
   }
+  if (possibleItemRange) {
+    speedEvidence.push({
+      kind: "item_ability_assumption",
+      label: `Possible item range: ${formatRange(possibleItemRange.range)}`,
+      detail: possibleItemRange.labels.join(", ")
+    });
+  }
   if (!hasYourShownSpeed) {
     speedEvidence.push({
       kind: "capture_gap",
@@ -1750,7 +1829,13 @@ function buildCurrentSpeedIntel(snapshot: BattleSnapshot, speciesName: string, f
             ? "item_ability_assumption"
             : "base_range";
   const currentSpeedSummary = opponentSpeedText
-    ? `Active speed: ${compactRelationLabel(relation)}${activeSpeedText ? ` (you ${activeSpeedText}, opp est ${opponentSpeedText})` : ` (opp est ${opponentSpeedText})`}${!activeSpeedText ? "; your exact Speed is missing from the snapshot" : ""}${trickRoomActive ? "; Trick Room flips move order." : ""}${confounders.length > 0 ? `; confounded by ${confounders.join(", ")}.` : "."}`
+    ? [
+        activeSpeedText ? `You ${activeSpeedText}; live ${opponentSpeedText}.` : `Live ${opponentSpeedText}.`,
+        possibleItemRange ? `Item range ${formatRange(possibleItemRange.range)} via ${possibleItemRange.labels.join(", ")}.` : null,
+        !activeSpeedText ? "Your Speed is missing." : null,
+        trickRoomActive ? "Trick Room flips order." : null,
+        confounders.length > 0 ? `Confounded by ${confounders.join(", ")}.` : null
+      ].filter(Boolean).join(" ")
     : undefined;
 
   const switchSpeedMatchups: SwitchSpeedMatchup[] = snapshot.yourSide.team
@@ -1768,6 +1853,7 @@ function buildCurrentSpeedIntel(snapshot: BattleSnapshot, speciesName: string, f
 
   return {
     currentSpeedRange: opponentRange ?? undefined,
+    possibleSpeedRange: possibleItemRange?.range ?? undefined,
     currentSpeedSummary,
     switchSpeedMatchups: switchSpeedMatchups.length > 0 ? switchSpeedMatchups : undefined,
     neutralRange: neutralRange ?? undefined,
@@ -1979,12 +2065,33 @@ export async function buildLocalIntelSnapshot(snapshot: BattleSnapshot): Promise
     const curatedFormatRecord = externalCuratedFormatRecord(store, speciesKey, snapshot.format);
     const confidenceSamples = effectivePriorConfidenceSamples(formatRecord.battlesSeen, curatedFormatRecord.teamCount);
     const revealedMoves = [...merged.revealedMoves];
-    const currentSpeedIntel = buildCurrentSpeedIntel(snapshot, merged.species, formatRecord);
+    const likelyItems = filterLiveLikelyHeldItemEntries(
+      snapshot.format,
+      merged.pokemon,
+      summarizeEntries({
+        observedRecord: formatRecord.items,
+        observedSamples: formatRecord.battlesSeen,
+        curatedRecord: curatedFormatRecord.items,
+        curatedSamples: curatedFormatRecord.teamCount,
+        exclude: merged.revealedItem ? [merged.revealedItem] : []
+      })
+    );
+    const likelyAbilities = summarizeEntries(
+      {
+        observedRecord: formatRecord.abilities,
+        observedSamples: formatRecord.battlesSeen,
+        curatedRecord: curatedFormatRecord.abilities,
+        curatedSamples: curatedFormatRecord.teamCount,
+        exclude: merged.revealedAbility ? [merged.revealedAbility] : []
+      }
+    );
+    const currentSpeedIntel = buildCurrentSpeedIntel(snapshot, merged.species, formatRecord, likelyItems);
     const battleSpecies = normalizeBattleSpeciesLedger(activeBattle?.species?.[speciesKey]);
     const importInfo = store.externalCurated.imports[snapshot.format] ?? null;
     const posterior = buildOpponentPosterior({
       format: snapshot.format,
       opponent: merged.pokemon,
+      battleSnapshot: snapshot,
       formatStats: {
         observedBattlesSeen: formatRecord.battlesSeen,
         curatedTeamCount: curatedFormatRecord.teamCount,
@@ -2041,22 +2148,8 @@ export async function buildLocalIntelSnapshot(snapshot: BattleSnapshot): Promise
       revealedAbility: merged.revealedAbility,
       revealedTeraType: merged.revealedTeraType,
       likelyMoves,
-      likelyItems: summarizeEntries({
-        observedRecord: formatRecord.items,
-        observedSamples: formatRecord.battlesSeen,
-        curatedRecord: curatedFormatRecord.items,
-        curatedSamples: curatedFormatRecord.teamCount,
-        exclude: merged.revealedItem ? [merged.revealedItem] : []
-      }),
-      likelyAbilities: summarizeEntries(
-        {
-          observedRecord: formatRecord.abilities,
-          observedSamples: formatRecord.battlesSeen,
-          curatedRecord: curatedFormatRecord.abilities,
-          curatedSamples: curatedFormatRecord.teamCount,
-          exclude: merged.revealedAbility ? [merged.revealedAbility] : []
-        }
-      ),
+      likelyItems,
+      likelyAbilities,
       likelyTeraTypes: summarizeEntries(
         {
           observedRecord: formatRecord.teraTypes,
@@ -2068,6 +2161,7 @@ export async function buildLocalIntelSnapshot(snapshot: BattleSnapshot): Promise
       ),
       neutralSpeedRange: currentSpeedIntel.neutralRange,
       currentSpeedRange: currentSpeedIntel.currentSpeedRange,
+      possibleSpeedRange: currentSpeedIntel.possibleSpeedRange,
       activeYourEffectiveSpeed: currentSpeedIntel.activeSpeed,
       activeSpeedRelation: currentSpeedIntel.activeRelation,
       currentSpeedSummary: currentSpeedIntel.currentSpeedSummary,
@@ -2113,6 +2207,7 @@ export async function buildLocalIntelSnapshot(snapshot: BattleSnapshot): Promise
         opponentSpecies: activeOpponentEntry.species,
         neutralRange: activeOpponentEntry.neutralSpeedRange,
         effectiveRange: activeOpponentEntry.currentSpeedRange,
+        possibleRange: activeOpponentEntry.possibleSpeedRange,
         yourActiveEffectiveSpeed: activeOpponentEntry.activeYourEffectiveSpeed,
         activeRelation: activeOpponentEntry.activeSpeedRelation ?? "unknown",
         activeSummary: activeOpponentEntry.currentSpeedSummary,
@@ -2126,7 +2221,7 @@ export async function buildLocalIntelSnapshot(snapshot: BattleSnapshot): Promise
   const threatMoves = pickThreatMoves(activeOpponentEntry);
   const opponentThreatPreview = buildThreatPreview(snapshot, {
     moveCandidates: threatMoves,
-    likelyAttackerItems: liveLikelyHeldItems(snapshot.opponentSide.active, activeOpponentEntry?.likelyItems),
+    likelyAttackerItems: liveLikelyHeldItems(snapshot.format, snapshot.opponentSide.active, activeOpponentEntry?.likelyItems),
     likelyAttackerAbilities: activeOpponentEntry?.likelyAbilities.map((entry) => entry.name) ?? [],
     attackerPosterior: activeOpponentEntry?.posterior,
     observedThreats: opponentObservedThreats,
@@ -2151,7 +2246,7 @@ export async function buildLocalIntelSnapshot(snapshot: BattleSnapshot): Promise
     }))
   }));
   const playerDamagePreview = buildDamagePreview(snapshot, {
-    likelyDefenderItems: liveLikelyHeldItems(snapshot.opponentSide.active, activeOpponentEntry?.likelyItems),
+    likelyDefenderItems: liveLikelyHeldItems(snapshot.format, snapshot.opponentSide.active, activeOpponentEntry?.likelyItems),
     likelyDefenderAbilities: activeOpponentEntry?.likelyAbilities.map((entry) => entry.name) ?? [],
     defenderPosterior: activeOpponentEntry?.posterior,
     observedPlayerDamage: playerObservedDamage,
@@ -2184,6 +2279,11 @@ export async function buildLocalIntelSnapshot(snapshot: BattleSnapshot): Promise
     snapshot,
     allOpponentEntries: opponents
   });
+  const playerLeadRecommendation = buildPlayerLeadRecommendation({
+    snapshot,
+    allOpponentEntries: opponents,
+    opponentLeadPrediction
+  });
   const currentBattlePredictionStats = summarizePredictionHistory(activeBattle?.predictionHistory ?? []);
   const overallPredictionStats = summarizePredictionHistory(
     Object.values(store.battles).flatMap((battle) => battle.predictionHistory ?? [])
@@ -2208,12 +2308,12 @@ export async function buildLocalIntelSnapshot(snapshot: BattleSnapshot): Promise
 
   return {
     generatedAt: new Date().toISOString(),
-    note:
-      "Local opponent intel keeps observed species-format history, imported external-curated priors, and clean battle-local evidence as separate channels. Posterior set guesses stay bounded and deterministic, and thin-confidence cases still fall back to generic calc ranges.",
+    note: "Observed history, priors, and current inferences.",
     playerDamagePreview,
     opponentThreatPreview,
     opponentActionPrediction,
     opponentLeadPrediction,
+    playerLeadRecommendation,
     selfActionRecommendation,
     speedPreview,
     hazardSummary: [
@@ -2273,6 +2373,13 @@ export async function buildLocalIntelSnapshot(snapshot: BattleSnapshot): Promise
             topLeadSpecies: opponentLeadPrediction.topLeadSpecies,
             confidenceTier: opponentLeadPrediction.confidenceTier,
             topCandidates: opponentLeadPrediction.topCandidates.slice(0, 4)
+          }
+        : null,
+      playerLeadRecommendation: playerLeadRecommendation
+        ? {
+            topLeadSpecies: playerLeadRecommendation.topLeadSpecies,
+            confidenceTier: playerLeadRecommendation.confidenceTier,
+            topCandidates: playerLeadRecommendation.topCandidates.slice(0, 4)
           }
         : null,
       predictionStats: {
