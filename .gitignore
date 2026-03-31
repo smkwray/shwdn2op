@@ -32,3 +32,4 @@ replays/
 .local-data/
 ml-artifacts/
 public-release/
+output/

@@ -12,7 +12,9 @@ const companionUrlEl = document.getElementById("companionUrl");
 const codexModelEl = document.getElementById("codexModel");
 const claudeModelEl = document.getElementById("claudeModel");
 const geminiModelEl = document.getElementById("geminiModel");
-const analysisModeEl = document.getElementById("analysisMode");
+const analysisModeTacticalEl = document.getElementById("analysisModeTactical");
+const analysisModeStrategicEl = document.getElementById("analysisModeStrategic");
+const analysisModeHelpEl = document.getElementById("analysisModeHelp");
 const compareModeEl = document.getElementById("compareMode");
 const compareProviderEl = document.getElementById("compareProvider");
 const compareCodexModelEl = document.getElementById("compareCodexModel");
@@ -30,8 +32,12 @@ const summaryEl = document.getElementById("summary");
 const snapshotInfoEl = document.getElementById("snapshotInfo");
 const roomStatusEl = document.getElementById("roomStatus");
 const healthEl = document.getElementById("health");
-const saveEl = document.getElementById("save");
 const analyzeEl = document.getElementById("analyze");
+
+function setHealthLabel(text, state) {
+  healthEl.textContent = text;
+  healthEl.className = `status-value ${state}`;
+}
 
 function humanizeStatus(status) {
   switch (status) {
@@ -120,7 +126,7 @@ function buildSettingsPayload() {
     codexModel: codexModelEl.value,
     claudeModel: claudeModelEl.value,
     geminiModel: geminiModelEl.value,
-    analysisMode: analysisModeEl.value,
+    analysisMode: selectedAnalysisMode(),
     compareMode: compareModeEl.checked,
     compareProvider: compareProviderEl.value,
     compareCodexModel: compareCodexModelEl.value,
@@ -139,10 +145,16 @@ function buildSettingsPayload() {
   };
 }
 
-function refreshAnalyzeButtonLabel() {
-  analyzeEl.textContent = analysisModeEl.value === "strategic"
-    ? "Ask a Friend: Strategic"
-    : "Ask a Friend: Tactical";
+function selectedAnalysisMode() {
+  return analysisModeStrategicEl.checked ? "strategic" : "tactical";
+}
+
+function refreshAnalysisModeUi() {
+  if (selectedAnalysisMode() === "strategic") {
+    analysisModeHelpEl.textContent = "Broader game-plan guidance for the current position.";
+    return;
+  }
+  analysisModeHelpEl.textContent = "Best current-turn recommendation.";
 }
 
 async function loadSettings() {
@@ -151,7 +163,9 @@ async function loadSettings() {
   companionUrlEl.value = settings.companionUrl;
   providerEl.value = settings.provider;
   populateModelLists(settings);
-  analysisModeEl.value = settings.analysisMode || DEFAULT_SETTINGS.analysisMode;
+  const analysisMode = settings.analysisMode || DEFAULT_SETTINGS.analysisMode;
+  analysisModeTacticalEl.checked = analysisMode !== "strategic";
+  analysisModeStrategicEl.checked = analysisMode === "strategic";
   compareModeEl.checked = Boolean(settings.compareMode);
   compareProviderEl.value = settings.compareProvider || DEFAULT_SETTINGS.compareProvider;
   compareCodexModelEl.value = settings.compareCodexModel || DEFAULT_SETTINGS.compareCodexModel;
@@ -166,7 +180,7 @@ async function loadSettings() {
   showMechanicsPanelEl.checked = Boolean(settings.showMechanicsPanel);
   showDebugPanelEl.checked = Boolean(settings.showDebugPanel);
   refreshModelRows();
-  refreshAnalyzeButtonLabel();
+  refreshAnalysisModeUi();
 }
 
 async function saveSettings() {
@@ -193,17 +207,17 @@ async function autoSaveSettings() {
 }
 
 async function refreshHealth() {
-  healthEl.textContent = "checking...";
+  setHealthLabel("checking local companion...", "checking");
   const response = await chrome.runtime.sendMessage({ type: "companion-health" });
   if (!response?.ok) {
-    healthEl.textContent = response?.error ?? "offline";
+    setHealthLabel(`unreachable at ${companionUrlEl.value.trim() || DEFAULT_SETTINGS.companionUrl}`, "bad");
     return;
   }
   const health = response.health;
   const codex = health.providers?.codex?.available ? "codex ✓" : "codex ×";
   const claude = health.providers?.claude?.available ? "claude ✓" : "claude ×";
   const gemini = health.providers?.gemini?.available ? "gemini ✓" : "gemini ×";
-  healthEl.textContent = `${codex} · ${claude} · ${gemini}`;
+  setHealthLabel(`reachable · ${codex} · ${claude} · ${gemini}`, "ok");
 }
 
 async function refreshSnapshot() {
@@ -258,7 +272,7 @@ async function analyzeCurrentTurn() {
     summaryEl.textContent = "No active tab.";
     return;
   }
-  const analysisMode = analysisModeEl.value || DEFAULT_SETTINGS.analysisMode;
+  const analysisMode = selectedAnalysisMode() || DEFAULT_SETTINGS.analysisMode;
   summaryEl.textContent = analysisMode === "strategic" ? "Running strategic analysis..." : "Running tactical analysis...";
   const response = await chrome.runtime.sendMessage({
     type: "analyze-current-state",
@@ -281,8 +295,10 @@ providerEl.addEventListener("change", autoSaveSettings);
 codexModelEl.addEventListener("change", autoSaveSettings);
 claudeModelEl.addEventListener("change", autoSaveSettings);
 geminiModelEl.addEventListener("change", autoSaveSettings);
-analysisModeEl.addEventListener("change", refreshAnalyzeButtonLabel);
-analysisModeEl.addEventListener("change", autoSaveSettings);
+analysisModeTacticalEl.addEventListener("change", refreshAnalysisModeUi);
+analysisModeStrategicEl.addEventListener("change", refreshAnalysisModeUi);
+analysisModeTacticalEl.addEventListener("change", autoSaveSettings);
+analysisModeStrategicEl.addEventListener("change", autoSaveSettings);
 compareModeEl.addEventListener("change", refreshModelRows);
 compareModeEl.addEventListener("change", autoSaveSettings);
 compareProviderEl.addEventListener("change", refreshModelRows);
@@ -299,11 +315,6 @@ showMechanicsPanelEl.addEventListener("change", autoSaveSettings);
 showDebugPanelEl.addEventListener("change", autoSaveSettings);
 autoDownloadReplayEl.addEventListener("change", autoSaveSettings);
 companionUrlEl.addEventListener("change", autoSaveSettings);
-saveEl.addEventListener("click", async () => {
-  const response = await saveSettings();
-  await refreshActiveTabOverlayConfig(response?.settings ?? buildSettingsPayload());
-  await refreshHealth();
-});
 analyzeEl.addEventListener("click", analyzeCurrentTurn);
 
 await loadSettings();

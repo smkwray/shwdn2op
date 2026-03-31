@@ -13,7 +13,17 @@
       </div>
 
       <section class="toggle-group">
-        <h2>Panels</h2>
+        <h2>Windows & Panels</h2>
+
+        <label class="checkbox">
+          <input id="showOverlay" type="checkbox" />
+          <span>Show Ask a Friend panel</span>
+        </label>
+
+        <label class="checkbox">
+          <input id="autoDownloadReplay" type="checkbox" />
+          <span>Auto-save replay after game</span>
+        </label>
 
         <label class="checkbox">
           <input id="showLocalIntelPanel" type="checkbox" />
@@ -76,16 +86,23 @@
         <select id="geminiModel"></select>
       </label>
 
-      <label class="field">
-        <span>Ask a Friend mode</span>
-        <select id="analysisMode">
-          <option value="tactical">Tactical: best current-turn recommendation</option>
-          <option value="strategic">Strategic: broader game-plan guidance</option>
-        </select>
-      </label>
-
       <section class="toggle-group">
-        <h2>Second Opinion</h2>
+        <h2>Ask a Friend</h2>
+
+        <div class="field">
+          <span>Mode</span>
+          <div class="mode-toggle" role="radiogroup" aria-label="Ask a Friend mode">
+            <label class="mode-option">
+              <input id="analysisModeTactical" name="analysisMode" type="radio" value="tactical" />
+              <span>Tactical</span>
+            </label>
+            <label class="mode-option">
+              <input id="analysisModeStrategic" name="analysisMode" type="radio" value="strategic" />
+              <span>Strategic</span>
+            </label>
+          </div>
+          <div class="field-note" id="analysisModeHelp">Best current-turn recommendation.</div>
+        </div>
 
         <label class="checkbox">
           <input id="compareMode" type="checkbox" />
@@ -117,24 +134,11 @@
         <select id="compareGeminiModel"></select>
       </label>
 
-      <label class="checkbox">
-        <input id="autoDownloadReplay" type="checkbox" />
-        <span>Auto-save replay after game</span>
-      </label>
-
-      <section class="toggle-group">
-        <h2>Analysis Window</h2>
-
-        <label class="checkbox">
-          <input id="showOverlay" type="checkbox" />
-          <span>Show Ask a Friend panel</span>
-        </label>
-      </section>
-
       <div class="actions">
-        <button id="save">Save</button>
         <button id="analyze" class="primary">Ask a Friend</button>
       </div>
+
+      <div class="actions-note">Settings save automatically.</div>
 
       <section class="status">
         <div class="status-row">

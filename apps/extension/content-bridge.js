@@ -1,5 +1,6 @@
 const BRAND_NAME = "shwdn2op";
 const SOURCE = "showdnass";
+const CONTENT_BRIDGE_VERSION = "2026-03-31-bridge-1";
 const OVERLAY_ID = "showdnass-overlay";
 const OVERLAY_POSITION_KEY = "showdnass.overlay-position";
 const OVERLAY_COLLAPSED_KEY = "showdnass.overlay-collapsed";
@@ -15,7 +16,7 @@ const PANEL_DEFS = [
   { key: "opponentAction", id: "showdnass-panel-opponent-action", title: "Line To Respect", width: 360, zIndex: 10003, background: "rgba(38, 28, 18, 0.97)", border: "rgba(246, 173, 85, 0.24)" },
   { key: "selfAction", id: "showdnass-panel-self-action", title: "Best Line", width: 360, zIndex: 10004, background: "rgba(18, 29, 38, 0.97)", border: "rgba(94, 210, 255, 0.24)" },
   { key: "damage", id: "showdnass-panel-damage", title: "Damage Matrix", width: 390, zIndex: 10005, background: "rgba(34, 19, 19, 0.97)", border: "rgba(255, 124, 124, 0.24)" },
-  { key: "mechanics", id: "showdnass-panel-mechanics", title: "Mechanics", width: 350, zIndex: 10006, background: "rgba(18, 23, 38, 0.97)", border: "rgba(109, 169, 255, 0.24)" },
+  { key: "mechanics", id: "showdnass-panel-mechanics", title: "Mechanics", width: 390, zIndex: 10006, background: "rgba(18, 23, 38, 0.97)", border: "rgba(109, 169, 255, 0.24)" },
   { key: "debug", id: "showdnass-panel-debug", title: "Debug", width: 420, zIndex: 10007, background: "rgba(24, 24, 28, 0.98)", border: "rgba(210, 210, 210, 0.18)" }
 ];
 
@@ -34,8 +35,9 @@ const PANEL_SETTING_KEYS = {
   debug: "showDebugPanel"
 };
 
-if (!window.__showdownSecondOpinionContentBridgeInstalled) {
+if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSION) {
   window.__showdownSecondOpinionContentBridgeInstalled = true;
+  window.__showdownSecondOpinionContentBridgeVersion = CONTENT_BRIDGE_VERSION;
 
   let extensionContextValid = true;
   let overlayVisible = true;
@@ -625,6 +627,20 @@ if (!window.__showdownSecondOpinionContentBridgeInstalled) {
     `;
   }
 
+  function renderInteractionHints(hints) {
+    if (!Array.isArray(hints) || hints.length === 0) return "";
+    return `
+      <div style="margin-top:6px;display:flex;flex-wrap:wrap;gap:6px">
+        ${hints.map((hint) => renderCompactChip(
+          hint.certainty === "possible" ? "maybe" : "immune",
+          hint.label,
+          hint.certainty === "possible" ? "warn" : "accent",
+          hint.detail ?? hint.label
+        )).join("")}
+      </div>
+    `;
+  }
+
   function renderObservedDamageNote(observedRange) {
     if (!observedRange || !Number.isFinite(observedRange.minPercent) || !Number.isFinite(observedRange.maxPercent) || !Number.isFinite(observedRange.sampleCount)) {
       return "";
@@ -666,10 +682,22 @@ if (!window.__showdownSecondOpinionContentBridgeInstalled) {
     return "speed unclear";
   }
 
+  function renderMechanicsCard(title, body, footer = "") {
+    return `
+      <div style="flex:1 1 170px;min-width:0;padding:7px 8px;border:1px solid rgba(255,255,255,0.08);border-radius:12px;background:rgba(255,255,255,0.04)">
+        <div style="font-size:11px;opacity:.62;text-transform:uppercase;letter-spacing:.05em">${title}</div>
+        <div style="margin-top:5px">${body}</div>
+        ${footer ? `<div style="margin-top:5px;font-size:10px;opacity:.56">${footer}</div>` : ""}
+      </div>
+    `;
+  }
+
   function renderSpeedSummaryMarkup(speedPreview, relation) {
     const yourSpeed = Number(speedPreview?.yourActiveEffectiveSpeed);
+    const neutralRange = speedPreview?.neutralRange;
     const opponentRange = speedPreview?.effectiveRange;
     const hasYourSpeed = Number.isFinite(yourSpeed);
+    const hasNeutralRange = neutralRange && Number.isFinite(neutralRange.min) && Number.isFinite(neutralRange.max);
     const hasOpponentRange = opponentRange && Number.isFinite(opponentRange.min) && Number.isFinite(opponentRange.max);
     if (!hasYourSpeed && !hasOpponentRange) {
       return speedPreview?.activeSummary
@@ -702,14 +730,21 @@ if (!window.__showdownSecondOpinionContentBridgeInstalled) {
             <span>?</span>
           </span>
         `}
+        ${hasNeutralRange ? `
+          <span style="display:inline-flex;align-items:center;gap:6px;padding:3px 8px;border-radius:999px;border:1px solid rgba(255,255,255,0.08);background:rgba(255,255,255,0.05);font-size:11px;line-height:1.2;white-space:nowrap">
+            <strong style="font-weight:600">opp raw</strong>
+            <span>${formatSpeedRange(neutralRange)}</span>
+          </span>
+        ` : ""}
         ${hasOpponentRange ? `
           <span style="display:inline-flex;align-items:center;gap:6px;padding:3px 8px;border-radius:999px;border:1px solid rgba(255,255,255,0.08);background:rgba(255,255,255,0.05);font-size:11px;line-height:1.2;white-space:nowrap">
-            <strong style="font-weight:600">opp est</strong>
+            <strong style="font-weight:600">opp now</strong>
             <span>${formatSpeedRange(opponentRange)}</span>
           </span>
         ` : ""}
+        ${speedPreview?.reason ? renderCompactChip("why", String(speedPreview.reason).replace(/_/g, " "), "accent", `Primary speed reason: ${speedPreview.reason}`) : ""}
       </div>
-      ${speedPreview?.activeSummary ? `<div style="margin-top:4px;font-size:11px;opacity:.68">${speedPreview.activeSummary}</div>` : ""}
+      ${speedPreview?.activeSummary ? `<div style="margin-top:4px;font-size:10px;opacity:.66">${speedPreview.activeSummary}</div>` : ""}
     `;
   }
 
@@ -718,9 +753,14 @@ if (!window.__showdownSecondOpinionContentBridgeInstalled) {
     const confounders = Array.isArray(speedPreview?.confounders) ? speedPreview.confounders : [];
     if (evidence.length === 0 && confounders.length === 0) return "";
     return `
-      <div style="margin-top:6px;font-size:11px;opacity:.68">
-        ${evidence.map((entry) => `${entry.label}${entry.detail ? `: ${entry.detail}` : ""}`).join("<br>")}
-        ${confounders.length > 0 ? `<div style="margin-top:4px">Confounders: ${confounders.join(", ")}</div>` : ""}
+      <div style="margin-top:6px;display:flex;flex-wrap:wrap;gap:6px">
+        ${evidence.map((entry) => renderCompactChip(
+          entry.kind.replace(/_/g, " "),
+          entry.label,
+          entry.kind === "confounded" || entry.kind === "capture_gap" ? "warn" : "neutral",
+          `${entry.label}${entry.detail ? `: ${entry.detail}` : ""}`
+        )).join("")}
+        ${confounders.map((entry) => renderCompactChip("confounder", entry, "warn", entry)).join("")}
       </div>
     `;
   }
@@ -1021,6 +1061,7 @@ if (!window.__showdownSecondOpinionContentBridgeInstalled) {
                   ${renderDamageBandRow(entry.bands, entry.targetCurrentHpPercent, entry.likelyBandSource)}
                   ${renderObservedDamageNote(entry.observedRange)}
                   ${renderCaveatChips(entry.survivalCaveats)}
+                  ${renderInteractionHints(entry.interactionHints)}
                 </div>
               `
             )
@@ -1040,6 +1081,7 @@ if (!window.__showdownSecondOpinionContentBridgeInstalled) {
                   <div style="margin-top:2px;font-size:11px;opacity:.62">${entry.currentTarget?.species ?? "Your active"}</div>
                     ${renderDamageBandRow(entry.currentTarget?.bands, entry.currentTarget?.targetCurrentHpPercent, entry.currentTarget?.likelyBandSource)}
                     ${renderObservedDamageNote(entry.currentTarget?.observedRange)}
+                    ${renderInteractionHints(entry.currentTarget?.interactionHints)}
                     ${Array.isArray(entry.switchTargets) && entry.switchTargets.length > 0 ? `
                       <div style="margin-top:6px;font-size:11px;opacity:.62">Switches: ${entry.switchTargets
                         .map((target) => {
@@ -1076,40 +1118,39 @@ if (!window.__showdownSecondOpinionContentBridgeInstalled) {
     const speedNotes = Array.isArray(speedPreview?.historyNotes) ? speedPreview.historyNotes : [];
     const survivalCaveats = Array.isArray(localIntel?.survivalCaveats) ? localIntel.survivalCaveats : [];
     const hazards = localIntel?.hazardSummary ?? null;
-
-    return `
-      <div style="margin-top:6px;display:flex;flex-wrap:wrap;gap:6px">
+    const switchSpeedMarkup = switchSpeedMatchups.length > 0
+      ? `${switchSpeedMatchups.map((matchup) => renderCompactChip(
+          matchup.species ?? matchup.label ?? "Unknown",
+          `${Number.isFinite(matchup.effectiveSpeed) ? Math.round(matchup.effectiveSpeed) : "?"} · ${formatSpeedRelation(matchup.relation)}`,
+          matchup.relation === "faster" ? "positive" : matchup.relation === "slower" ? "danger" : "neutral",
+          `${matchup.species ?? matchup.label ?? "Unknown"}: ${Number.isFinite(matchup.effectiveSpeed) ? `${Math.round(matchup.effectiveSpeed)} Speed` : "unknown Speed"}; ${formatSpeedRelation(matchup.relation)}`
+        )).join("")}`
+      : "";
+    const boardStateMarkup = `
+      <div style="display:flex;flex-wrap:wrap;gap:6px">
         ${teraUsedBy
           ? renderCompactChip("tera", `${teraUsedBy} used`, "accent", `${teraUsedBy} has Terastallized in the current game`)
           : renderCompactChip("tera", "unused", "neutral", "The opponent has not Terastallized in the current game")}
+        ${hazards ? renderCompactChip("hazards", hazards, "neutral", hazards) : ""}
+        ${survivalCaveats.map((entry) => renderCompactChip("caveat", entry, "warn", entry)).join("")}
+        ${switchSpeedMarkup}
       </div>
-      <div style="margin-top:6px">
-        <div style="font-size:11px;opacity:.62;text-transform:uppercase;letter-spacing:.05em">Speed</div>
-        ${renderSpeedSummaryMarkup(
-          speedPreview,
-          speedPreview?.activeRelation ?? "unknown"
+      ${!hazards && survivalCaveats.length === 0 && !switchSpeedMarkup ? `<div style="margin-top:4px;font-size:10px;opacity:.66">No extra mechanic flags right now.</div>` : ""}
+    `;
+
+    return `
+      <div style="margin-top:6px;font-size:11px;opacity:.58">Compact deterministic mechanics from current board state, active field effects, and local observations.</div>
+      <div style="margin-top:8px;display:flex;flex-wrap:wrap;gap:8px;align-items:flex-start">
+        ${renderMechanicsCard(
+          "Speed",
+          `
+            ${renderSpeedSummaryMarkup(speedPreview, speedPreview?.activeRelation ?? "unknown")}
+            ${renderSpeedEvidence(speedPreview)}
+          `,
+          speedNotes.length > 0 ? speedNotes.join(" ") : "No clean historical speed observations yet."
         )}
-        ${renderSpeedEvidence(speedPreview)}
+        ${renderMechanicsCard("State", boardStateMarkup)}
       </div>
-      ${switchSpeedMatchups.length > 0 ? `
-        <details style="margin-top:8px">
-          <summary style="cursor:pointer;opacity:.78">Switch speed matchups</summary>
-          <div style="margin-top:4px">${switchSpeedMatchups.map((matchup) => `${matchup.species ?? matchup.label ?? "Unknown"} · ${Number.isFinite(matchup.effectiveSpeed) ? `${Math.round(matchup.effectiveSpeed)} Spe` : "unknown Spe"} · ${formatSpeedRelation(matchup.relation)}`).join("<br>")}</div>
-        </details>
-      ` : ""}
-      ${hazards ? `
-        <div style="margin-top:8px">
-          <div style="font-size:11px;opacity:.62;text-transform:uppercase;letter-spacing:.05em">Hazards</div>
-          <div style="margin-top:2px">${hazards}</div>
-        </div>
-      ` : ""}
-      ${survivalCaveats.length > 0 ? `
-        <div style="margin-top:8px">
-          <div style="font-size:11px;opacity:.62;text-transform:uppercase;letter-spacing:.05em">Survival caveats</div>
-          <div style="margin-top:2px">${survivalCaveats.join("<br>")}</div>
-        </div>
-      ` : ""}
-      <div style="margin-top:8px;font-size:11px;opacity:.56">${speedNotes.length > 0 ? speedNotes.join(" ") : "No clean historical speed observations yet."}</div>
     `;
   }
 

@@ -112,6 +112,12 @@ export interface ObservedRangeSummary {
   source?: "context" | "aggregate" | undefined;
 }
 
+export interface InteractionHint {
+  label: string;
+  detail: string;
+  certainty: "known" | "possible";
+}
+
 export type PosteriorEvidenceKind = "priors" | "reveals" | "moves" | "speed" | "damage";
 
 export interface PosteriorEvidence {
@@ -169,6 +175,7 @@ export interface DamagePreview {
   likelyBandSource?: "calc" | "context" | "aggregate" | "posterior" | undefined;
   summary: string;
   survivalCaveats: SurvivalCaveat[];
+  interactionHints: InteractionHint[];
 }
 
 export interface ThreatTargetPreview {
@@ -179,6 +186,7 @@ export interface ThreatTargetPreview {
   observedRange?: ObservedRangeSummary | undefined;
   likelyBandSource?: "calc" | "context" | "aggregate" | "posterior" | undefined;
   summary: string;
+  interactionHints: InteractionHint[];
 }
 
 export interface ThreatPreview {

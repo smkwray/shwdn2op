@@ -1,4 +1,4 @@
-import { applyRawFrameToRoomMap, roomToSnapshot } from "./lib/showdown-parser.js";
+import { applyRawFrameToRoomMap, mergeRoomState, roomToSnapshot } from "./lib/showdown-parser.js";
 import { DEFAULT_SETTINGS, PROVIDER_MODEL_OPTIONS, getSettings, setSettings } from "./lib/storage.js";
 import { buildTabSelection, TAB_STATUS } from "./lib/tab-state.js";
 
@@ -586,10 +586,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return true;
     }
     state.lastRoomProtocolByRoomId.set(roomId, rawData);
-    const nextRooms = new Map(state.rooms);
-    nextRooms.delete(roomId);
-    applyRawFrameToRoomMap(nextRooms, rawData);
-    state.rooms = nextRooms;
+    const snapshotRooms = new Map();
+    applyRawFrameToRoomMap(snapshotRooms, rawData);
+    const snapshotRoom = snapshotRooms.get(roomId);
+    if (snapshotRoom) {
+      const nextRooms = new Map(state.rooms);
+      const previousRoom = nextRooms.get(roomId) ?? null;
+      nextRooms.set(roomId, previousRoom ? mergeRoomState(previousRoom, snapshotRoom) : snapshotRoom);
+      state.rooms = nextRooms;
+    }
     if (!state.activeRoomId && typeof message.payload?.roomSlot === "string") {
       state.activeRoomId = roomId;
     }

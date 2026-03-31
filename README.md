@@ -74,10 +74,13 @@ The companion listens on `http://127.0.0.1:6127` by default.
 2. Start or join a battle
 3. Open the extension popup
 4. Confirm the **Companion URL** is `http://127.0.0.1:6127`
-5. Select a provider — use `mock` for a safe smoke test, or `codex` for the real default path
-6. Click **Ask a Friend**
+5. Confirm the popup says **Companion: reachable** before you start relying on the overlay or **Ask a Friend**
+6. Select a provider — use `mock` for a safe smoke test, or `codex` for the real default path
+7. Click **Ask a Friend**
 
-The popup reports the current room status:
+If the popup says `unreachable`, the local companion daemon is not answering on `http://127.0.0.1:6127` and battle snapshots will not analyze correctly.
+
+The popup reports the current room status once the companion is reachable:
 
 | Status | Meaning |
 |--------|---------|

@@ -1,7 +1,9 @@
 (() => {
   const SOURCE = "showdnass";
-  if (window.__showdownSecondOpinionHookInstalled) return;
+  const PAGE_HOOK_VERSION = "2026-03-31-hook-1";
+  if (window.__showdownSecondOpinionHookVersion === PAGE_HOOK_VERSION) return;
   window.__showdownSecondOpinionHookInstalled = true;
+  window.__showdownSecondOpinionHookVersion = PAGE_HOOK_VERSION;
   let lastRoomId = null;
   let hooksInstalled = false;
   const lastProtocolByRoomId = new Map();
@@ -67,6 +69,17 @@
     return Object.keys(next).length > 0 ? next : undefined;
   }
 
+  function sanitizeBoosts(boosts) {
+    if (!boosts || typeof boosts !== "object") return undefined;
+    const next = {};
+    for (const [key, value] of Object.entries(boosts)) {
+      if (Number.isFinite(value)) {
+        next[key] = Number(value);
+      }
+    }
+    return Object.keys(next).length > 0 ? next : undefined;
+  }
+
   function buildConditionFromBattlePokemon(entry) {
     const condition = normalizeOptionalString(entry?.condition);
     if (condition) return condition;
@@ -81,7 +94,7 @@
     return fainted ? "0 fnt" : status ? `100/100 ${status}` : null;
   }
 
-  function sanitizeBattlePokemon(entry) {
+  function sanitizeBattlePokemon(entry, side) {
     if (!entry || typeof entry !== "object") return null;
     const ident = normalizeOptionalString(entry.ident);
     const details = normalizeOptionalString(entry.details)
@@ -90,13 +103,14 @@
         : null);
     if (!ident && !details) return null;
     const condition = buildConditionFromBattlePokemon(entry);
-    return {
+    const pokemon = {
       ident,
       details,
       condition,
       active: Boolean(entry.active),
       level: Number.isFinite(entry.level) ? Number(entry.level) : undefined,
       stats: sanitizeStats(entry.stats),
+      boosts: sanitizeBoosts(entry.boosts),
       moves: Array.isArray(entry.moves)
         ? entry.moves.map((move) => normalizeOptionalString(move)).filter(Boolean)
         : undefined,
@@ -106,6 +120,65 @@
       teraType: normalizeOptionalString(entry.teraType),
       terastallized: Boolean(entry.terastallized)
     };
+    if (side) pokemon.side = side;
+    return pokemon;
+  }
+
+  function normalizeEffectList(value) {
+    if (Array.isArray(value)) {
+      return value.map((entry) => normalizeOptionalString(entry)).filter(Boolean);
+    }
+    if (value && typeof value === "object") {
+      return Object.keys(value).map((entry) => normalizeOptionalString(entry)).filter(Boolean);
+    }
+    return [];
+  }
+
+  function mergeSupplementalPokemon(existing, next) {
+    if (!existing) return next;
+    if (!next) return existing;
+    return {
+      ...existing,
+      ...next,
+      side: next.side ?? existing.side,
+      ident: next.ident ?? existing.ident,
+      details: next.details ?? existing.details,
+      condition: next.condition ?? existing.condition,
+      active: Boolean(next.active || existing.active),
+      level: next.level ?? existing.level,
+      stats: next.stats ? { ...(existing.stats ?? {}), ...next.stats } : existing.stats,
+      boosts: next.boosts ? { ...(existing.boosts ?? {}), ...next.boosts } : existing.boosts,
+      moves: next.moves?.length ? [...new Set([...(existing.moves ?? []), ...next.moves])] : existing.moves,
+      item: next.item ?? existing.item,
+      ability: next.ability ?? existing.ability,
+      baseAbility: next.baseAbility ?? existing.baseAbility,
+      teraType: next.teraType ?? existing.teraType,
+      terastallized: Boolean(next.terastallized || existing.terastallized)
+    };
+  }
+
+  function supplementalPokemonKey(entry) {
+    return entry?.ident ?? `${entry?.side ?? "?"}:${entry?.details ?? "unknown"}`;
+  }
+
+  function pushSupplementalPokemon(collection, entry, sideId = null) {
+    const sanitized = sanitizeBattlePokemon(entry, sideId);
+    if (!sanitized) return;
+    const key = supplementalPokemonKey(sanitized);
+    collection.set(key, mergeSupplementalPokemon(collection.get(key), sanitized));
+  }
+
+  function sideSnapshotCandidate(sideLike, fallbackSideId = null) {
+    if (!sideLike || typeof sideLike !== "object") return null;
+    const sideId = roomSideLabelToSlot(sideLike.sideid) ?? roomSideLabelToSlot(sideLike.id) ?? fallbackSideId;
+    const pokemon = Array.isArray(sideLike.pokemon) ? sideLike.pokemon : [];
+    if (!sideId && pokemon.length === 0) return null;
+    return {
+      sideId,
+      name: normalizeOptionalString(sideLike.name),
+      pokemon,
+      sideConditions: normalizeEffectList(sideLike.sideConditions ?? sideLike.conditions)
+    };
   }
 
   function buildSupplementalBattleState(room) {
@@ -113,13 +186,54 @@
     const playerSide = roomSideLabelToSlot(room.request?.side?.id)
       ?? roomSideLabelToSlot(room.battle?.mySide?.sideid)
       ?? roomSideLabelToSlot(room.battle?.mySide?.id);
-    const myPokemon = Array.isArray(room.battle?.myPokemon)
-      ? room.battle.myPokemon.map((entry) => sanitizeBattlePokemon(entry)).filter(Boolean)
-      : [];
-    if (!playerSide && myPokemon.length === 0) return null;
+    const opponentSide = playerSide === "p1" ? "p2" : playerSide === "p2" ? "p1" : null;
+    const pokemon = new Map();
+    const sideNames = {};
+    const sideConditions = {};
+
+    const pushSideCandidate = (candidate) => {
+      if (!candidate) return;
+      if (candidate.sideId && candidate.name) sideNames[candidate.sideId] = candidate.name;
+      if (candidate.sideId && candidate.sideConditions.length > 0) {
+        sideConditions[candidate.sideId] = [...new Set(candidate.sideConditions)];
+      }
+      for (const entry of candidate.pokemon) {
+        pushSupplementalPokemon(pokemon, entry, candidate.sideId);
+      }
+    };
+
+    if (Array.isArray(room.battle?.myPokemon)) {
+      for (const entry of room.battle.myPokemon) pushSupplementalPokemon(pokemon, entry, playerSide);
+    }
+    if (Array.isArray(room.battle?.yourPokemon)) {
+      for (const entry of room.battle.yourPokemon) pushSupplementalPokemon(pokemon, entry, opponentSide);
+    }
+
+    pushSideCandidate(sideSnapshotCandidate(room.battle?.mySide, playerSide));
+    pushSideCandidate(sideSnapshotCandidate(room.battle?.yourSide, opponentSide));
+    pushSideCandidate(sideSnapshotCandidate(room.battle?.nearSide));
+    pushSideCandidate(sideSnapshotCandidate(room.battle?.farSide));
+
+    if (Array.isArray(room.battle?.sides)) {
+      for (const sideLike of room.battle.sides) {
+        pushSideCandidate(sideSnapshotCandidate(sideLike));
+      }
+    }
+
+    const field = {
+      weather: normalizeOptionalString(room.battle?.weather),
+      terrain: normalizeOptionalString(room.battle?.terrain),
+      pseudoWeather: normalizeEffectList(room.battle?.pseudoWeather),
+      yourSideConditions: playerSide ? sideConditions[playerSide] ?? [] : [],
+      opponentSideConditions: opponentSide ? sideConditions[opponentSide] ?? [] : []
+    };
+
+    if (!playerSide && pokemon.size === 0) return null;
     return {
       playerSide,
-      myPokemon
+      sideNames,
+      pokemon: [...pokemon.values()],
+      field
     };
   }
 

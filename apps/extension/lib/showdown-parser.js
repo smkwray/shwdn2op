@@ -177,10 +177,23 @@ function mergeFiniteStats(existing, next) {
   return merged;
 }
 
+function mergeUniqueStrings(existing, next) {
+  const merged = [];
+  for (const value of [...(existing ?? []), ...(next ?? [])]) {
+    if (typeof value !== "string") continue;
+    if (!merged.includes(value)) merged.push(value);
+  }
+  return merged;
+}
+
 function normalizeKnownString(value) {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
   return trimmed || null;
+}
+
+function isStackableSideCondition(condition) {
+  return /^(spikes|toxic spikes)$/i.test(String(condition ?? "").trim());
 }
 
 function applyKnownPokemonState(room, entry, fallbackSideId = null) {
@@ -196,6 +209,7 @@ function applyKnownPokemonState(room, entry, fallbackSideId = null) {
   }
   pokemon.level = Number.isFinite(entry.level) ? Number(entry.level) : pokemon.level;
   pokemon.stats = mergeFiniteStats(pokemon.stats, entry.stats);
+  pokemon.boosts = mergeFiniteStats(pokemon.boosts, entry.boosts);
 
   if (Object.prototype.hasOwnProperty.call(entry, "item")) {
     const nextItem = normalizeKnownString(entry.item) ?? null;
@@ -231,37 +245,78 @@ function applySupplementalState(room, payload) {
     room.opponentSideId = payload.playerSide === "p1" ? "p2" : "p1";
   }
 
+  if (payload.sideNames && typeof payload.sideNames === "object") {
+    for (const [sideId, sideName] of Object.entries(payload.sideNames)) {
+      if (sideId !== "p1" && sideId !== "p2") continue;
+      if (!sideName) continue;
+      ensureSide(room, sideId).name = sideName;
+    }
+  }
+
+  if (payload.field && typeof payload.field === "object") {
+    room.hasSupplementalFieldSnapshot = true;
+    if (Object.prototype.hasOwnProperty.call(payload.field, "weather")) {
+      room.field.weather = normalizeKnownString(payload.field.weather) ?? null;
+    }
+    if (Object.prototype.hasOwnProperty.call(payload.field, "terrain")) {
+      room.field.terrain = normalizeKnownString(payload.field.terrain) ?? null;
+    }
+    if (Array.isArray(payload.field.pseudoWeather)) {
+      room.field.pseudoWeather = mergeUniqueStrings(room.field.pseudoWeather, payload.field.pseudoWeather);
+    }
+    if (room.playerSide && Array.isArray(payload.field.yourSideConditions)) {
+      room.sideConditions[room.playerSide] = payload.field.yourSideConditions.filter((value) => typeof value === "string");
+    }
+    if (room.opponentSideId && Array.isArray(payload.field.opponentSideConditions)) {
+      room.sideConditions[room.opponentSideId] = payload.field.opponentSideConditions.filter((value) => typeof value === "string");
+    }
+  }
+
   const sideId = room.playerSide;
   const side = sideId ? ensureSide(room, sideId) : null;
-  let activeKey = null;
-  if (Array.isArray(payload.myPokemon)) {
-    for (const entry of payload.myPokemon) {
-      const pokemon = applyKnownPokemonState(room, entry, sideId);
+  const activeKeysBySide = new Map();
+  const supplementalPokemon = Array.isArray(payload.pokemon)
+    ? payload.pokemon
+    : Array.isArray(payload.myPokemon)
+      ? payload.myPokemon
+      : [];
+  if (supplementalPokemon.length > 0) {
+    for (const entry of supplementalPokemon) {
+      const entrySideId = entry?.side === "p1" || entry?.side === "p2"
+        ? entry.side
+        : sideId;
+      const pokemon = applyKnownPokemonState(room, entry, entrySideId);
       if (!pokemon) continue;
       if (entry?.active) {
         const parsed = normalizeIdent(entry.ident ?? pokemon.ident);
         if (parsed.side && parsed.teamKey) {
-          activeKey = parsed.teamKey;
+          activeKeysBySide.set(parsed.side, parsed.teamKey);
         }
       }
     }
   }
 
-  if (side && activeKey) {
-    side.activeKey = activeKey;
-    for (const [teamKey, pokemon] of Object.entries(side.team)) {
+  for (const [entrySideId, activeKey] of activeKeysBySide.entries()) {
+    const targetSide = ensureSide(room, entrySideId);
+    targetSide.activeKey = activeKey;
+    for (const [teamKey, pokemon] of Object.entries(targetSide.team)) {
       pokemon.active = teamKey === activeKey;
     }
   }
-  if (room.notes[room.notes.length - 1] !== "Merged supplemental page-state for your side.") {
-    pushRecent(room.notes, "Merged supplemental page-state for your side.");
+  if (side && activeKeysBySide.has(sideId)) {
+    side.activeKey = activeKeysBySide.get(sideId);
+  }
+  if (room.notes[room.notes.length - 1] !== "Merged supplemental page-state for live battle state.") {
+    pushRecent(room.notes, "Merged supplemental page-state for live battle state.");
   }
 }
 
 function addSideCondition(room, sideId, condition) {
   const conditions = room.sideConditions[sideId];
   if (!conditions) return;
-  if (!conditions.includes(condition)) conditions.push(condition);
+  if (isStackableSideCondition(condition) || !conditions.includes(condition)) {
+    conditions.push(condition);
+  }
 }
 
 function removeSideCondition(room, sideId, condition) {
@@ -714,6 +769,7 @@ export function createEmptyRoomState(roomId) {
       terrain: null,
       pseudoWeather: []
     },
+    hasSupplementalFieldSnapshot: false,
     sideConditions: {
       p1: [],
       p2: []
@@ -815,6 +871,116 @@ export function roomToSnapshot(room) {
         }
       : null,
     notes: [...room.notes].slice(-10)
+  };
+}
+
+function mergePokemonState(previous, next) {
+  if (!previous) return next;
+  if (!next) return previous;
+  return {
+    ...previous,
+    ...next,
+    ident: next.ident ?? previous.ident,
+    species: next.species ?? previous.species,
+    displayName: next.displayName ?? previous.displayName,
+    level: next.level ?? previous.level,
+    conditionText: next.conditionText ?? previous.conditionText,
+    hpPercent: next.hpPercent ?? previous.hpPercent,
+    status: next.status ?? previous.status,
+    fainted: Boolean(next.fainted || previous.fainted),
+    active: Boolean(next.active || previous.active),
+    revealed: Boolean(next.revealed || previous.revealed),
+    boosts: mergeFiniteStats(previous.boosts, next.boosts),
+    stats: mergeFiniteStats(previous.stats, next.stats),
+    knownMoves: mergeUniqueStrings(previous.knownMoves, next.knownMoves),
+    item: next.item ?? previous.item,
+    removedItem: next.removedItem ?? previous.removedItem,
+    ability: next.ability ?? previous.ability,
+    types: mergeUniqueStrings(previous.types, next.types),
+    teraType: next.teraType ?? previous.teraType,
+    terastallized: Boolean(next.terastallized || previous.terastallized)
+  };
+}
+
+function mergeSideState(previous, next) {
+  const mergedTeam = {};
+  const keys = new Set([
+    ...Object.keys(previous?.team ?? {}),
+    ...Object.keys(next?.team ?? {})
+  ]);
+  for (const key of keys) {
+    const mergedPokemon = mergePokemonState(previous?.team?.[key], next?.team?.[key]);
+    if (mergedPokemon) mergedTeam[key] = mergedPokemon;
+  }
+
+  const activeKey = next?.activeKey ?? previous?.activeKey ?? null;
+  if (activeKey) {
+    for (const [teamKey, pokemon] of Object.entries(mergedTeam)) {
+      pokemon.active = teamKey === activeKey;
+    }
+  }
+
+  return {
+    slot: next?.slot ?? previous?.slot ?? null,
+    name: next?.name ?? previous?.name ?? null,
+    team: mergedTeam,
+    activeKey
+  };
+}
+
+export function mergeRoomState(previous, next) {
+  if (!previous) return next;
+  if (!next) return previous;
+
+  const playerSide = next.playerSide ?? previous.playerSide ?? null;
+  const opponentSideId = next.opponentSideId ?? previous.opponentSideId ?? (playerSide === "p1" ? "p2" : playerSide === "p2" ? "p1" : null);
+
+  return {
+    ...previous,
+    ...next,
+    title: next.title ?? previous.title,
+    format: next.format ?? previous.format,
+    gameType: next.gameType ?? previous.gameType,
+    turn: Math.max(previous.turn ?? 0, next.turn ?? 0),
+    phase: next.phase && next.phase !== "unknown" ? next.phase : previous.phase,
+    winner: next.winner ?? previous.winner,
+    playerSide,
+    opponentSideId,
+    lastRequest: next.lastRequest ?? previous.lastRequest,
+    legalActions: next.lastRequest ? [...(next.legalActions ?? [])] : [...(previous.legalActions ?? [])],
+    recentLog: next.recentLog?.length ? [...next.recentLog] : [...(previous.recentLog ?? [])],
+    notes: next.notes?.length ? [...next.notes] : [...(previous.notes ?? [])],
+    sides: {
+      p1: mergeSideState(previous.sides?.p1, next.sides?.p1),
+      p2: mergeSideState(previous.sides?.p2, next.sides?.p2)
+    },
+    unownedTeam: {
+      ...(previous.unownedTeam ?? {}),
+      ...(next.unownedTeam ?? {})
+    },
+    field: {
+      weather: next.hasSupplementalFieldSnapshot ? (next.field?.weather ?? null) : (next.field?.weather ?? previous.field?.weather ?? null),
+      terrain: next.hasSupplementalFieldSnapshot ? (next.field?.terrain ?? null) : (next.field?.terrain ?? previous.field?.terrain ?? null),
+      pseudoWeather: next.hasSupplementalFieldSnapshot
+        ? [...(next.field?.pseudoWeather ?? [])]
+        : next.field?.pseudoWeather?.length
+          ? [...next.field.pseudoWeather]
+          : [...(previous.field?.pseudoWeather ?? [])]
+    },
+    hasSupplementalFieldSnapshot: Boolean(previous.hasSupplementalFieldSnapshot || next.hasSupplementalFieldSnapshot),
+    sideConditions: {
+      p1: next.hasSupplementalFieldSnapshot
+        ? [...(next.sideConditions?.p1 ?? [])]
+        : next.sideConditions?.p1?.length
+          ? [...next.sideConditions.p1]
+          : [...(previous.sideConditions?.p1 ?? [])],
+      p2: next.hasSupplementalFieldSnapshot
+        ? [...(next.sideConditions?.p2 ?? [])]
+        : next.sideConditions?.p2?.length
+          ? [...next.sideConditions.p2]
+          : [...(previous.sideConditions?.p2 ?? [])]
+    },
+    updatedAt: Math.max(previous.updatedAt ?? 0, next.updatedAt ?? 0)
   };
 }
 

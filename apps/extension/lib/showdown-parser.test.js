@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { applyRawFrameToRoomMap, roomToSnapshot } from "./showdown-parser.js";
+import { applyRawFrameToRoomMap, mergeRoomState, roomToSnapshot } from "./showdown-parser.js";
 import { buildTabSelection, TAB_STATUS } from "./tab-state.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -234,6 +234,100 @@ test("supplemental page-state restores full player stats when request stats are 
   assert.equal(snapshot?.yourSide?.active?.item, "Choice Band");
   assert.equal(snapshot?.yourSide?.active?.ability, "Technician");
   assert.equal(snapshot?.yourSide?.slot, "p1");
+});
+
+test("supplemental page-state can rebuild opponent team on a fresh reload snapshot", () => {
+  const raw = `
+>battle-gen9uu-sso-restore-opponent
+|init|battle
+|player|p1|You
+|player|p2|Opponent
+|tier|[Gen 9] UU
+|request|{"side":{"id":"p1","name":"You","pokemon":[{"ident":"p1: Fezandipiti","details":"Fezandipiti, L100","condition":"100/100","active":true,"stats":{"hp":380,"atk":176,"def":262,"spa":176,"spd":262,"spe":260},"moves":["Moonblast","Roost"]}]},"active":[{"moves":[{"move":"Moonblast","id":"moonblast","pp":15},{"move":"Roost","id":"roost","pp":16}]}]}
+|sso-state|{"playerSide":"p1","sideNames":{"p1":"You","p2":"Opponent"},"pokemon":[{"side":"p1","ident":"p1: Fezandipiti","details":"Fezandipiti, L100","condition":"100/100","active":true,"stats":{"hp":380,"atk":176,"def":262,"spa":176,"spd":262,"spe":260},"moves":["moonblast","roost"],"item":"Heavy-Duty Boots","ability":"Toxic Chain","teraType":"Water","terastallized":false},{"side":"p2","ident":"p2: Slowking","details":"Slowking, L100","condition":"100/100","active":true,"moves":["Scald","Future Sight"],"item":"Heavy-Duty Boots","ability":"Regenerator","teraType":"Fairy","terastallized":false},{"side":"p2","ident":"p2: Thundurus","details":"Thundurus, L100","condition":"100/100","active":false,"moves":["Volt Switch","Thunder Wave"],"item":"Heavy-Duty Boots","ability":"Prankster","teraType":"Steel","terastallized":false}],"field":{"weather":null,"terrain":null,"pseudoWeather":[],"yourSideConditions":["Stealth Rock"],"opponentSideConditions":[]}}
+`;
+  const rooms = new Map();
+
+  applyRawFrameToRoomMap(rooms, raw);
+
+  const snapshot = roomToSnapshot(rooms.get("battle-gen9uu-sso-restore-opponent"));
+  assert.equal(snapshot?.opponentSide?.active?.species, "Slowking");
+  assert.deepEqual(
+    snapshot?.opponentSide?.team?.map((mon) => mon?.species).sort(),
+    ["Slowking", "Thundurus"]
+  );
+  assert.equal(snapshot?.field?.yourSideConditions?.[0], "Stealth Rock");
+});
+
+test("merging a reduced room snapshot preserves known opponent team state", () => {
+  const fullRaw = `
+>battle-gen9uu-merge-room
+|init|battle
+|player|p1|You
+|player|p2|Opponent
+|tier|[Gen 9] UU
+|switch|p1a: Fezandipiti|Fezandipiti, L100|100/100
+|switch|p2a: Slowking|Slowking, L100|100/100
+|poke|p2|Thundurus, L100
+|turn|5
+|request|{"side":{"id":"p1","name":"You","pokemon":[{"ident":"p1: Fezandipiti","details":"Fezandipiti, L100","condition":"100/100","active":true,"stats":{"spe":260},"moves":["Moonblast"]}]},"active":[{"moves":[{"move":"Moonblast","id":"moonblast","pp":15}]}]}
+`;
+  const reducedRaw = `
+>battle-gen9uu-merge-room
+|request|{"side":{"id":"p1","name":"You","pokemon":[{"ident":"p1: Fezandipiti","details":"Fezandipiti, L100","condition":"100/100","active":true,"stats":{"spe":260},"moves":["Moonblast"]}]},"active":[{"moves":[{"move":"Moonblast","id":"moonblast","pp":15}]}]}
+|sso-state|{"playerSide":"p1","pokemon":[{"side":"p1","ident":"p1: Fezandipiti","details":"Fezandipiti, L100","condition":"100/100","active":true,"stats":{"spe":260},"moves":["moonblast"]}]}
+`;
+  const rooms = new Map();
+  applyRawFrameToRoomMap(rooms, fullRaw);
+  const previousRoom = rooms.get("battle-gen9uu-merge-room");
+  const snapshotRooms = new Map();
+  applyRawFrameToRoomMap(snapshotRooms, reducedRaw);
+  const reducedRoom = snapshotRooms.get("battle-gen9uu-merge-room");
+
+  const merged = mergeRoomState(previousRoom, reducedRoom);
+  const snapshot = roomToSnapshot(merged);
+
+  assert.deepEqual(
+    snapshot?.opponentSide?.team?.map((mon) => mon?.species).sort(),
+    ["Slowking", "Thundurus"]
+  );
+  assert.equal(snapshot?.opponentSide?.active?.species, "Slowking");
+});
+
+test("parser preserves stacked side conditions and clears them from supplemental field state", () => {
+  const raw = `
+>battle-gen9uu-side-conditions
+|init|battle
+|player|p1|You
+|player|p2|Opponent
+|tier|[Gen 9] UU
+|switch|p1a: Forretress|Forretress, L100|100/100
+|switch|p2a: Hippowdon|Hippowdon, L100|100/100
+|-sidestart|p1: You|Spikes
+|-sidestart|p1: You|Spikes
+|-sidestart|p1: You|Stealth Rock
+|request|{"side":{"id":"p1","name":"You","pokemon":[{"ident":"p1: Forretress","details":"Forretress, L100","condition":"100/100","active":true,"stats":{"spe":96},"moves":["Rapid Spin"]}]},"active":[{"moves":[{"move":"Rapid Spin","id":"rapidspin","pp":64}]}]}
+|sso-state|{"playerSide":"p1","pokemon":[{"side":"p1","ident":"p1: Forretress","details":"Forretress, L100","condition":"100/100","active":true,"stats":{"spe":96},"moves":["rapidspin"]}],"field":{"weather":null,"terrain":null,"pseudoWeather":[],"yourSideConditions":["Spikes","Spikes","Stealth Rock"],"opponentSideConditions":[]}}
+`;
+  const rooms = new Map();
+  applyRawFrameToRoomMap(rooms, raw);
+  let snapshot = roomToSnapshot(rooms.get("battle-gen9uu-side-conditions"));
+  assert.deepEqual(snapshot?.field?.yourSideConditions, ["Spikes", "Spikes", "Stealth Rock"]);
+
+  const clearedRaw = `
+>battle-gen9uu-side-conditions
+|request|{"side":{"id":"p1","name":"You","pokemon":[{"ident":"p1: Forretress","details":"Forretress, L100","condition":"100/100","active":true,"stats":{"spe":96},"moves":["Rapid Spin"]}]},"active":[{"moves":[{"move":"Rapid Spin","id":"rapidspin","pp":63}]}]}
+|sso-state|{"playerSide":"p1","pokemon":[{"side":"p1","ident":"p1: Forretress","details":"Forretress, L100","condition":"100/100","active":true,"stats":{"spe":96},"moves":["rapidspin"]}],"field":{"weather":null,"terrain":null,"pseudoWeather":[],"yourSideConditions":[],"opponentSideConditions":[]}}
+`;
+  const nextRooms = new Map(rooms);
+  const reducedRooms = new Map();
+  applyRawFrameToRoomMap(reducedRooms, clearedRaw);
+  const merged = mergeRoomState(
+    nextRooms.get("battle-gen9uu-side-conditions"),
+    reducedRooms.get("battle-gen9uu-side-conditions")
+  );
+  snapshot = roomToSnapshot(merged);
+  assert.deepEqual(snapshot?.field?.yourSideConditions, []);
 });
 
 test("parser logs sourced HP changes so noisy damage windows can be filtered", () => {

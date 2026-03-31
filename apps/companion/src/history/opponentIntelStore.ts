@@ -776,6 +776,20 @@ function activePokemonBySpeciesOrName(side: BattleSnapshot["yourSide"] | BattleS
   return side.team.find((pokemon) => namesForPokemon(pokemon).some((candidate) => normalizeName(candidate) === normalizeName(name))) ?? null;
 }
 
+function summarizeSideConditions(sideConditions: string[]) {
+  const ordered: string[] = [];
+  const counts = new Map<string, number>();
+  for (const value of sideConditions) {
+    if (typeof value !== "string" || !value.trim()) continue;
+    if (!counts.has(value)) ordered.push(value);
+    counts.set(value, (counts.get(value) ?? 0) + 1);
+  }
+  return ordered.map((value) => {
+    const count = counts.get(value) ?? 0;
+    return count > 1 ? `${value} x${count}` : value;
+  });
+}
+
 function cloneFieldSnapshot(field: BattleSnapshot["field"] | null | undefined) {
   if (!field) return null;
   return {
@@ -1923,7 +1937,13 @@ export async function buildLocalIntelSnapshot(snapshot: BattleSnapshot): Promise
     }
   >();
 
-  for (const pokemon of snapshot.opponentSide.team) {
+  const observedOpponentTeam = snapshot.opponentSide.team.length > 0
+    ? snapshot.opponentSide.team
+    : snapshot.opponentSide.active
+      ? [snapshot.opponentSide.active]
+      : [];
+
+  for (const pokemon of observedOpponentTeam) {
     const speciesName = speciesNameFromSnapshot(pokemon);
     if (!speciesName) continue;
     const speciesKey = normalizeName(speciesName);
@@ -2197,8 +2217,8 @@ export async function buildLocalIntelSnapshot(snapshot: BattleSnapshot): Promise
     selfActionRecommendation,
     speedPreview,
     hazardSummary: [
-      snapshot.field.yourSideConditions.length > 0 ? `Your side: ${snapshot.field.yourSideConditions.join(", ")}` : null,
-      snapshot.field.opponentSideConditions.length > 0 ? `Opponent side: ${snapshot.field.opponentSideConditions.join(", ")}` : null
+      snapshot.field.yourSideConditions.length > 0 ? `Your side: ${summarizeSideConditions(snapshot.field.yourSideConditions).join(", ")}` : null,
+      snapshot.field.opponentSideConditions.length > 0 ? `Opponent side: ${summarizeSideConditions(snapshot.field.opponentSideConditions).join(", ")}` : null
     ].filter(Boolean).join(" | ") || undefined,
     survivalCaveats: [
       ...new Set(

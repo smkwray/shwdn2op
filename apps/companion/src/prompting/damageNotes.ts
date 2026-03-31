@@ -6,6 +6,7 @@ import type {
   BattleSnapshot,
   DamageAssumptionBand,
   DamagePreview,
+  InteractionHint,
   OpponentPosteriorPreview,
   ObservedRangeSummary,
   PokemonSnapshot,
@@ -37,6 +38,22 @@ type Range = {
 };
 
 type StatusOutcome = Pick<DamageAssumptionBand, "label" | "outcome" | "detail">;
+
+const MOVE_TYPE_IMMUNITY_ABILITY_LABELS: Record<string, string[]> = {
+  ground: ["Levitate"],
+  fire: ["Flash Fire"],
+  water: ["Water Absorb", "Dry Skin", "Storm Drain"],
+  electric: ["Volt Absorb", "Lightning Rod", "Motor Drive"],
+  grass: ["Sap Sipper"]
+};
+
+const STATUS_IMMUNITY_ABILITY_LABELS: Record<string, string[]> = {
+  par: ["Limber"],
+  brn: ["Water Veil", "Water Bubble"],
+  slp: ["Insomnia", "Vital Spirit", "Sweet Veil"],
+  psn: ["Immunity", "Pastel Veil"],
+  tox: ["Immunity", "Pastel Veil"]
+};
 function generationFromFormat(format: string): number {
   const match = String(format ?? "").match(/\[Gen\s*(\d+)\]/i);
   const parsed = Number.parseInt(match?.[1] ?? "9", 10);
@@ -476,6 +493,94 @@ function buildStatusOutcomeBand(params: {
   return makeStatusBand({ label: "status", outcome: "status", detail: "non-damaging status move" });
 }
 
+function dedupeInteractionHints(hints: InteractionHint[]) {
+  const seen = new Set<string>();
+  return hints.filter((hint) => {
+    const key = `${hint.certainty}|${hint.label}|${hint.detail}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function buildPossibleAbilityInteractionHints(params: {
+  genNum: number;
+  snapshot: BattleSnapshot;
+  attackerMon: PokemonSnapshot;
+  defenderMon: PokemonSnapshot;
+  moveName: string;
+  likelyDefenderAbilities?: string[] | undefined;
+}): InteractionHint[] {
+  if (params.defenderMon.ability) return [];
+
+  const gen = dataGen(params.genNum);
+  const move = lookupMoveData(gen, params.moveName);
+  if (!move) return [];
+
+  const likelyAbilities = [...new Set((params.likelyDefenderAbilities ?? []).filter(Boolean))];
+  if (likelyAbilities.length === 0) return [];
+
+  const byNormalized = new Map(likelyAbilities.map((ability) => [normalizeName(ability), ability]));
+  const hints: InteractionHint[] = [];
+
+  const moveTypeCandidates = move.type ? (MOVE_TYPE_IMMUNITY_ABILITY_LABELS[normalizeName(move.type)] ?? []) : [];
+  for (const candidate of moveTypeCandidates) {
+    const label = byNormalized.get(normalizeName(candidate));
+    if (!label) continue;
+    hints.push({
+      label,
+      detail: `${label} would make ${params.moveName} do 0.`,
+      certainty: "possible"
+    });
+  }
+
+  const statusCandidates = move.status ? (STATUS_IMMUNITY_ABILITY_LABELS[normalizeName(move.status)] ?? []) : [];
+  for (const candidate of statusCandidates) {
+    const label = byNormalized.get(normalizeName(candidate));
+    if (!label) continue;
+    hints.push({
+      label,
+      detail: `${label} would block ${params.moveName}.`,
+      certainty: "possible"
+    });
+  }
+
+  if (move.category === "Status") {
+    for (const candidate of ["Good as Gold", "Comatose"]) {
+      const label = byNormalized.get(normalizeName(candidate));
+      if (!label) continue;
+      hints.push({
+        label,
+        detail: `${label} would block ${params.moveName}.`,
+        certainty: "possible"
+      });
+    }
+    if ((move.status || normalizeName(move.name) === "yawn")) {
+      for (const candidate of ["Purifying Salt"]) {
+        const label = byNormalized.get(normalizeName(candidate));
+        if (!label) continue;
+        hints.push({
+          label,
+          detail: `${label} would block ${params.moveName}.`,
+          certainty: "possible"
+        });
+      }
+      if (/sun/i.test(params.snapshot.field.weather ?? "")) {
+        const label = byNormalized.get(normalizeName("Leaf Guard"));
+        if (label) {
+          hints.push({
+            label,
+            detail: `${label} would block ${params.moveName} in sun.`,
+            certainty: "possible"
+          });
+        }
+      }
+    }
+  }
+
+  return dedupeInteractionHints(hints);
+}
+
 function bracketFromResult(result: ReturnType<typeof calculate>, defender: Pokemon): Range | null {
   const maxHp = defender.maxHP();
   if (!Number.isFinite(maxHp) || maxHp <= 0) return null;
@@ -832,7 +937,15 @@ export function buildDamagePreview(snapshot: BattleSnapshot, options: DamageOpti
       const posteriorAbilities = posteriorConsensusValues(defenderPosterior, "ability");
       const survivalCaveats = buildSurvivalCaveats(opponentActive, {
         likelyItems: posteriorItems.length > 0 ? posteriorItems : options.likelyDefenderItems,
-        likelyAbilities: posteriorAbilities.length > 0 ? posteriorAbilities : options.likelyDefenderAbilities
+      likelyAbilities: posteriorAbilities.length > 0 ? posteriorAbilities : options.likelyDefenderAbilities
+      });
+      const interactionHints = buildPossibleAbilityInteractionHints({
+        genNum,
+        snapshot,
+        attackerMon: yourActive,
+        defenderMon: opponentActive,
+        moveName: action.moveName ?? action.label,
+        likelyDefenderAbilities: posteriorAbilities.length > 0 ? posteriorAbilities : options.likelyDefenderAbilities
       });
       const observedRange = options.observedPlayerDamageResolver?.(
         action.moveName ?? action.label,
@@ -854,6 +967,7 @@ export function buildDamagePreview(snapshot: BattleSnapshot, options: DamageOpti
         observedRange,
         likelyBandSource,
         survivalCaveats,
+        interactionHints,
         summary: buildDamageSummary(action.label, narrowed.bands, survivalCaveats)
       };
     })
@@ -895,6 +1009,14 @@ export function buildThreatPreview(
         opponentActive,
         yourActive
       ) ?? options.observedThreats?.[`${candidate.name}|${yourActive.species ?? yourActive.displayName ?? "Your active"}`];
+      const currentInteractionHints = buildPossibleAbilityInteractionHints({
+        genNum,
+        snapshot,
+        attackerMon: opponentActive,
+        defenderMon: yourActive,
+        moveName: candidate.name,
+        likelyDefenderAbilities: options.likelyDefenderAbilities
+      });
       const narrowedCurrent = usePosterior
         ? { bands: currentBands, likelyBandSource: "posterior" as const }
         : applyObservedLikelyBand(currentBands, currentObservedRange, yourActive.hpPercent ?? null);
@@ -906,6 +1028,7 @@ export function buildThreatPreview(
         bands: narrowedCurrent.bands,
         observedRange: currentObservedRange,
         likelyBandSource: currentBandSource,
+        interactionHints: currentInteractionHints,
         summary: buildDamageSummary(`${candidate.name} into ${yourActive.species ?? yourActive.displayName ?? "your active"}`, narrowedCurrent.bands, [])
       };
       const switchTargets: ThreatTargetPreview[] = snapshot.yourSide.team
@@ -925,6 +1048,14 @@ export function buildThreatPreview(
             opponentActive,
             pokemon
           ) ?? options.observedThreats?.[`${candidate.name}|${pokemon.species ?? pokemon.displayName ?? "Switch target"}`];
+          const interactionHints = buildPossibleAbilityInteractionHints({
+            genNum,
+            snapshot,
+            attackerMon: opponentActive,
+            defenderMon: pokemon,
+            moveName: candidate.name,
+            likelyDefenderAbilities: options.likelyDefenderAbilities
+          });
           const narrowed = usePosterior
             ? { bands, likelyBandSource: "posterior" as const }
             : applyObservedLikelyBand(bands, observedRange, pokemon.hpPercent ?? null);
@@ -936,6 +1067,7 @@ export function buildThreatPreview(
             bands: narrowed.bands,
             observedRange,
             likelyBandSource: bandSource,
+            interactionHints,
             summary: buildDamageSummary(`${candidate.name} into ${pokemon.species ?? pokemon.displayName ?? "switch target"}`, narrowed.bands, [])
           };
         });

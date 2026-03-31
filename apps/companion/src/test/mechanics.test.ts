@@ -2165,6 +2165,108 @@ test("status move previews surface immune outcomes for Tera typing and defensive
   assert.match(purifyingSaltPreview[0]?.bands[0]?.detail ?? "", /purifying salt/i);
 });
 
+test("damage and status previews surface possible hidden-ability immunity hints", () => {
+  const waterSnapshot = makeSnapshot({
+    yourSide: {
+      slot: "p1",
+      name: "You",
+      active: makePokemon({
+        ident: "p1a: Greninja",
+        species: "Greninja",
+        displayName: "Greninja",
+        active: true,
+        knownMoves: ["Hydro Pump"],
+        stats: { hp: 289, atk: 226, def: 170, spa: 305, spd: 178, spe: 377 },
+        types: ["Water", "Dark"]
+      }),
+      team: [makePokemon({
+        ident: "p1a: Greninja",
+        species: "Greninja",
+        displayName: "Greninja",
+        active: true,
+        knownMoves: ["Hydro Pump"],
+        stats: { hp: 289, atk: 226, def: 170, spa: 305, spd: 178, spe: 377 },
+        types: ["Water", "Dark"]
+      })]
+    },
+    opponentSide: {
+      slot: "p2",
+      name: "Opponent",
+      active: makePokemon({
+        ident: "p2a: Vaporeon",
+        species: "Vaporeon",
+        displayName: "Vaporeon",
+        active: true,
+        stats: { hp: 464, atk: 166, def: 240, spa: 256, spd: 226, spe: 166 },
+        types: ["Water"]
+      }),
+      team: [makePokemon({
+        ident: "p2a: Vaporeon",
+        species: "Vaporeon",
+        displayName: "Vaporeon",
+        active: true,
+        stats: { hp: 464, atk: 166, def: 240, spa: 256, spd: 226, spe: 166 },
+        types: ["Water"]
+      })]
+    },
+    legalActions: [{ id: "move:hydropump", kind: "move", label: "Hydro Pump", moveName: "Hydro Pump" }]
+  });
+  const waterPreview = buildDamagePreview(waterSnapshot, { likelyDefenderAbilities: ["Water Absorb"] });
+  assert.equal(waterPreview[0]?.bands[0]?.outcome, undefined);
+  assert.equal(waterPreview[0]?.interactionHints[0]?.label, "Water Absorb");
+  assert.match(waterPreview[0]?.interactionHints[0]?.detail ?? "", /Hydro Pump.*0/i);
+
+  const waveSnapshot = makeSnapshot({
+    yourSide: {
+      slot: "p1",
+      name: "You",
+      active: makePokemon({
+        ident: "p1a: Pawmot",
+        species: "Pawmot",
+        displayName: "Pawmot",
+        active: true,
+        knownMoves: ["Thunder Wave"],
+        stats: { hp: 281, atk: 339, def: 176, spa: 176, spd: 176, spe: 339 },
+        types: ["Electric", "Fighting"]
+      }),
+      team: [makePokemon({
+        ident: "p1a: Pawmot",
+        species: "Pawmot",
+        displayName: "Pawmot",
+        active: true,
+        knownMoves: ["Thunder Wave"],
+        stats: { hp: 281, atk: 339, def: 176, spa: 176, spd: 176, spe: 339 },
+        types: ["Electric", "Fighting"]
+      })]
+    },
+    opponentSide: {
+      slot: "p2",
+      name: "Opponent",
+      active: makePokemon({
+        ident: "p2a: Dudunsparce",
+        species: "Dudunsparce",
+        displayName: "Dudunsparce",
+        active: true,
+        stats: { hp: 414, atk: 236, def: 216, spa: 206, spd: 216, spe: 176 },
+        types: ["Normal"]
+      }),
+      team: [makePokemon({
+        ident: "p2a: Dudunsparce",
+        species: "Dudunsparce",
+        displayName: "Dudunsparce",
+        active: true,
+        stats: { hp: 414, atk: 236, def: 216, spa: 206, spd: 216, spe: 176 },
+        types: ["Normal"]
+      })]
+    },
+    legalActions: [{ id: "move:thunderwave", kind: "move", label: "Thunder Wave", moveName: "Thunder Wave" }]
+  });
+  const wavePreview = buildDamagePreview(waveSnapshot, { likelyDefenderAbilities: ["Limber"] });
+  assert.equal(wavePreview[0]?.bands[0]?.outcome, "status");
+  assert.equal(wavePreview[0]?.interactionHints[0]?.label, "Limber");
+  assert.match(wavePreview[0]?.interactionHints[0]?.detail ?? "", /block Thunder Wave/i);
+});
+
 test("opponent threat preview preserves blocked status outcomes", () => {
   const snapshot = makeSnapshot({
     yourSide: {
@@ -3873,6 +3975,7 @@ test("self recommender values hazard removal when multiple reserves are taxed", 
   assert.ok(
     (recommendation?.rankedActions[0]?.scoreBreakdown ?? []).some((entry) => entry.key === "hazard" && entry.value > 0)
   );
+  assert.equal(intel.hazardSummary, "Your side: Stealth Rock, Spikes x2");
 });
 
 test("self recommender prefers an immunity switch when staying gets punished", async () => {
