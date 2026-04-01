@@ -15,6 +15,21 @@
       <section class="toggle-group">
         <h2>Windows & Panels</h2>
 
+        <div class="field">
+          <span>Panel layout</span>
+          <div class="mode-toggle" role="radiogroup" aria-label="Panel layout mode">
+            <label class="mode-option">
+              <input id="panelLayoutClassic" name="panelLayout" type="radio" value="classic" />
+              <span>Classic</span>
+            </label>
+            <label class="mode-option">
+              <input id="panelLayoutSidebar" name="panelLayout" type="radio" value="sidebar" />
+              <span>Sidebar</span>
+            </label>
+          </div>
+          <div class="field-note" id="panelLayoutHelp">Independent floating panels you can drag and resize.</div>
+        </div>
+
         <label class="checkbox">
           <input id="showOverlay" type="checkbox" />
           <span>Show Ask a Friend panel</span>

@@ -20,6 +20,9 @@ const compareProviderEl = document.getElementById("compareProvider");
 const compareCodexModelEl = document.getElementById("compareCodexModel");
 const compareClaudeModelEl = document.getElementById("compareClaudeModel");
 const compareGeminiModelEl = document.getElementById("compareGeminiModel");
+const panelLayoutClassicEl = document.getElementById("panelLayoutClassic");
+const panelLayoutSidebarEl = document.getElementById("panelLayoutSidebar");
+const panelLayoutHelpEl = document.getElementById("panelLayoutHelp");
 const showOverlayEl = document.getElementById("showOverlay");
 const autoDownloadReplayEl = document.getElementById("autoDownloadReplay");
 const showLocalIntelPanelEl = document.getElementById("showLocalIntelPanel");
@@ -140,6 +143,7 @@ function buildSettingsPayload() {
     showDamagePanel: showDamagePanelEl.checked,
     showMechanicsPanel: showMechanicsPanelEl.checked,
     showDebugPanel: showDebugPanelEl.checked,
+    panelLayout: panelLayoutSidebarEl.checked ? "sidebar" : "classic",
     showAskFriendCard: true,
     showMoveSuggestions: true
   };
@@ -147,6 +151,14 @@ function buildSettingsPayload() {
 
 function selectedAnalysisMode() {
   return analysisModeStrategicEl.checked ? "strategic" : "tactical";
+}
+
+function refreshPanelLayoutUi() {
+  if (panelLayoutSidebarEl.checked) {
+    panelLayoutHelpEl.textContent = "All panels in a single tabbed sidebar.";
+  } else {
+    panelLayoutHelpEl.textContent = "Independent floating panels you can drag and resize.";
+  }
 }
 
 function refreshAnalysisModeUi() {
@@ -171,6 +183,10 @@ async function loadSettings() {
   compareCodexModelEl.value = settings.compareCodexModel || DEFAULT_SETTINGS.compareCodexModel;
   compareClaudeModelEl.value = settings.compareClaudeModel || DEFAULT_SETTINGS.compareClaudeModel;
   compareGeminiModelEl.value = settings.compareGeminiModel || DEFAULT_SETTINGS.compareGeminiModel;
+  const panelLayout = settings.panelLayout || "classic";
+  panelLayoutClassicEl.checked = panelLayout !== "sidebar";
+  panelLayoutSidebarEl.checked = panelLayout === "sidebar";
+  refreshPanelLayoutUi();
   showOverlayEl.checked = Boolean(settings.showOverlay);
   autoDownloadReplayEl.checked = Boolean(settings.autoDownloadReplay);
   showLocalIntelPanelEl.checked = Boolean(settings.showLocalIntelPanel);
@@ -306,6 +322,10 @@ compareProviderEl.addEventListener("change", autoSaveSettings);
 compareCodexModelEl.addEventListener("change", autoSaveSettings);
 compareClaudeModelEl.addEventListener("change", autoSaveSettings);
 compareGeminiModelEl.addEventListener("change", autoSaveSettings);
+panelLayoutClassicEl.addEventListener("change", refreshPanelLayoutUi);
+panelLayoutSidebarEl.addEventListener("change", refreshPanelLayoutUi);
+panelLayoutClassicEl.addEventListener("change", autoSaveSettings);
+panelLayoutSidebarEl.addEventListener("change", autoSaveSettings);
 showOverlayEl.addEventListener("change", autoSaveSettings);
 showLocalIntelPanelEl.addEventListener("change", autoSaveSettings);
 showOpponentActionPanelEl.addEventListener("change", autoSaveSettings);

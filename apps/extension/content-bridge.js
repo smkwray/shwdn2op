@@ -1,6 +1,6 @@
 const BRAND_NAME = "shwdn2op";
 const SOURCE = "showdnass";
-const CONTENT_BRIDGE_VERSION = "2026-03-31-bridge-1";
+const CONTENT_BRIDGE_VERSION = "2026-03-31-bridge-2";
 const OVERLAY_ID = "showdnass-overlay";
 const OVERLAY_POSITION_KEY = "showdnass.overlay-position";
 const OVERLAY_COLLAPSED_KEY = "showdnass.overlay-collapsed";
@@ -8,6 +8,23 @@ const OVERLAY_WIDTH_KEY = "showdnass.overlay-width";
 const OVERLAY_HEIGHT_KEY = "showdnass.overlay-height";
 const PANEL_STORAGE_PREFIX = "showdnass.panel";
 const PANEL_STACK_BASE_Z = 10000;
+
+const SIDEBAR_ID = "showdnass-sidebar";
+const SIDEBAR_POSITION_KEY = "showdnass.sidebar-position";
+const SIDEBAR_WIDTH_KEY = "showdnass.sidebar-width";
+const SIDEBAR_HEIGHT_KEY = "showdnass.sidebar-height";
+const SIDEBAR_COLLAPSED_KEY = "showdnass.sidebar-collapsed";
+const SIDEBAR_ACTIVE_TAB_KEY = "showdnass.sidebar-active-tab";
+const SIDEBAR_TAB_LABELS = {
+  intel: "Intel",
+  opponentAction: "Threat",
+  selfAction: "Line",
+  damage: "Dmg",
+  mechanics: "Mech",
+  debug: "Debug"
+};
+const GROUP_STORAGE_PREFIX = "showdnass.group";
+const GROUP_DOM_PREFIX = "showdnass-group-";
 
 const LEGACY_INTEL_PANEL_POSITION_KEY = "showdown-second-opinion.intel-position";
 const LEGACY_INTEL_PANEL_VISIBLE_KEY = "showdown-second-opinion.intel-visible";
@@ -68,6 +85,8 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
   let overlayProviderModelOptions = { ...OVERLAY_DEFAULT_OPTIONS };
   let overlayHealth = null;
   let topStackZ = 10008;
+  let sidebarActiveTab = loadStringSetting(SIDEBAR_ACTIVE_TAB_KEY, "intel");
+  let sidebarCollapsed = loadBooleanSetting(SIDEBAR_COLLAPSED_KEY, false);
 
   function panelVisibleKey(panelKey) {
     return `${PANEL_STORAGE_PREFIX}.${panelKey}.visible`;
@@ -79,6 +98,14 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
 
   function panelCollapsedKey(panelKey) {
     return `${PANEL_STORAGE_PREFIX}.${panelKey}.collapsed`;
+  }
+
+  function panelDockedKey(panelKey) {
+    return `${PANEL_STORAGE_PREFIX}.${panelKey}.docked`;
+  }
+
+  function panelGroupKey(panelKey) {
+    return `${PANEL_STORAGE_PREFIX}.${panelKey}.group`;
   }
 
   function panelWidthKey(panelKey) {
@@ -95,7 +122,7 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
 
   function getPanelState(panelKey) {
     if (!panelState[panelKey]) {
-      panelState[panelKey] = { visible: false, collapsed: false };
+      panelState[panelKey] = { visible: false, collapsed: false, docked: true, group: null };
     }
     return panelState[panelKey];
   }
@@ -114,6 +141,23 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
   function saveBooleanSetting(key, value) {
     try {
       window.localStorage.setItem(key, value ? "true" : "false");
+    } catch {
+      // Ignore storage failures.
+    }
+  }
+
+  function loadStringSetting(key, fallback) {
+    try {
+      const value = window.localStorage.getItem(key);
+      return typeof value === "string" ? value : fallback;
+    } catch {
+      return fallback;
+    }
+  }
+
+  function saveStringSetting(key, value) {
+    try {
+      window.localStorage.setItem(key, String(value));
     } catch {
       // Ignore storage failures.
     }
@@ -183,7 +227,9 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
         legacyVisibleKey ? loadBooleanSetting(legacyVisibleKey, false) : false
       );
       const collapsed = loadBooleanSetting(panelCollapsedKey(panelKey), false);
-      nextState[panelKey] = { visible, collapsed };
+      const docked = loadBooleanSetting(panelDockedKey(panelKey), true);
+      const group = loadStringSetting(panelGroupKey(panelKey), null) || null;
+      nextState[panelKey] = { visible, collapsed, docked, group };
     }
     return nextState;
   }
@@ -300,11 +346,10 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
   function syncWindowVisibility() {
     if (!overlayVisible) {
       hideOverlayOnly();
-      for (const def of PANEL_DEFS) {
-        const panel = document.getElementById(def.id);
-        if (panel) {
-          panel.style.display = "none";
-        }
+      hideAllClassicPanels();
+      hideSidebar();
+      for (const el of document.querySelectorAll(`[id^="${GROUP_DOM_PREFIX}"]`)) {
+        el.style.display = "none";
       }
       return;
     }
@@ -315,7 +360,7 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
     } else {
       document.getElementById(OVERLAY_ID)?.remove();
     }
-    renderPanels();
+    renderPanelLayout();
   }
 
   function applyOverlaySettings(settings) {
@@ -328,7 +373,7 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
     } else if (overlayVisible && !document.getElementById(OVERLAY_ID)) {
       void renderOverlay(latestOverlayPayload ?? buildPlaceholderOverlayPayload());
     }
-    renderPanels();
+    renderPanelLayout();
   }
 
   async function persistPanelVisibilitySetting(panelKey, visible) {
@@ -679,6 +724,15 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
     return hints[0]?.label ?? "";
   }
 
+  function switchCandidatesForPrediction(prediction) {
+    if (Array.isArray(prediction?.topSwitchTargets) && prediction.topSwitchTargets.length > 0) {
+      return prediction.topSwitchTargets;
+    }
+    return Array.isArray(prediction?.topActions)
+      ? prediction.topActions.filter((candidate) => candidate?.actionClass === "switch")
+      : [];
+  }
+
   function renderSwitchDamagePeek(summaryLabel, rows) {
     if (!Array.isArray(rows) || rows.length === 0) return "";
     return `
@@ -699,11 +753,12 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
 
   function collectSwitchInRowsForMove(prediction, moveName) {
     const normalizedMove = String(moveName ?? "").trim().toLowerCase();
-    if (!normalizedMove || !Array.isArray(prediction?.topActions)) return [];
+    const switchCandidates = switchCandidatesForPrediction(prediction);
+    if (!normalizedMove || switchCandidates.length === 0) return [];
     const seen = new Set();
     const rows = [];
-    for (const candidate of prediction.topActions) {
-      if (candidate?.actionClass !== "switch" || !candidate?.switchTargetSpecies || !Array.isArray(candidate?.switchTargetPlayerPreview)) continue;
+    for (const candidate of switchCandidates) {
+      if (!candidate?.switchTargetSpecies || !Array.isArray(candidate?.switchTargetPlayerPreview)) continue;
       const preview = candidate.switchTargetPlayerPreview.find((entry) => String(entry?.moveName ?? "").trim().toLowerCase() === normalizedMove);
       if (!preview) continue;
       const key = String(candidate.switchTargetSpecies).trim().toLowerCase();
@@ -716,6 +771,39 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
       });
     }
     return rows;
+  }
+
+  function activeOpponentIntelEntry(localIntel, snapshot) {
+    const activeSpecies = snapshot?.opponentSide?.active?.species ?? snapshot?.opponentSide?.active?.displayName;
+    const entries = Array.isArray(localIntel?.opponents) ? localIntel.opponents : [];
+    return entries.find((entry) => normalizeName(entry?.species ?? entry?.displayName) === normalizeName(activeSpecies)) ?? entries[0] ?? null;
+  }
+
+  function renderBoardSummaryStrip(localIntel) {
+    const snapshot = latestOverlayPayload?.snapshot ?? null;
+    if (!localIntel || !snapshot) return "";
+
+    const chips = [];
+    if (localIntel.hazardSummary) {
+      chips.push(renderCompactChip("board", localIntel.hazardSummary, "warn", localIntel.hazardSummary));
+    }
+
+    const activeEntry = activeOpponentIntelEntry(localIntel, snapshot);
+    const opponentTeraUsed = Array.isArray(snapshot?.opponentSide?.team) && snapshot.opponentSide.team.some((pokemon) => pokemon?.terastallized);
+    const likelyTera = Array.isArray(activeEntry?.likelyTeraTypes) ? activeEntry.likelyTeraTypes : [];
+    if (opponentTeraUsed) {
+      chips.push(renderCompactChip("tera", "opponent spent", "neutral", "Opponent Terastallized already."));
+    } else if (likelyTera.length > 0) {
+      const topTera = likelyTera[0]?.name ?? "unknown";
+      chips.push(renderCompactChip("tera", `opponent live (${topTera})`, "warn", `Opponent still has Tera available; top local hint: ${topTera}.`));
+    }
+
+    for (const caveat of (localIntel.survivalCaveats ?? []).slice(0, 3)) {
+      chips.push(renderCompactChip("caveat", caveat, "danger", caveat));
+    }
+
+    if (chips.length === 0) return "";
+    return `<div style="margin-top:8px;display:flex;flex-wrap:wrap;gap:6px">${chips.join("")}</div>`;
   }
 
   function collectThreatSwitchRows(threatEntry) {
@@ -858,6 +946,13 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
     return latestLocalIntelPayload?.localIntel ?? null;
   }
 
+  function normalizeName(value) {
+    return String(value ?? "")
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "");
+  }
+
   function escapeHtml(value) {
     return String(value ?? "")
       .replace(/&/g, "&amp;")
@@ -965,6 +1060,7 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
     const classScores = prediction.classScores ?? null;
 
     return `
+      ${renderBoardSummaryStrip(localIntel)}
       <div style="margin-top:8px;display:flex;flex-wrap:wrap;gap:6px">
         <span style="display:inline-flex;align-items:center;gap:6px;padding:3px 8px;border-radius:999px;border:1px solid rgba(255,255,255,0.08);${predictionClassChipStyle(prediction.topActionClass)};font-size:11px;line-height:1.2;white-space:nowrap">
           <strong style="font-weight:600">class</strong>
@@ -1055,6 +1151,7 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
 
     const rankedActions = Array.isArray(recommendation.rankedActions) ? recommendation.rankedActions : [];
     return `
+      ${renderBoardSummaryStrip(localIntel)}
       <div style="margin-top:8px;display:flex;flex-wrap:wrap;gap:6px">
         <span style="display:inline-flex;align-items:center;gap:6px;padding:3px 8px;border-radius:999px;border:1px solid rgba(255,255,255,0.08);background:rgba(94,210,255,0.16);border-color:rgba(94,210,255,0.28);font-size:11px;line-height:1.2;white-space:nowrap">
           <strong style="font-weight:600">top</strong>
@@ -1505,8 +1602,9 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
           <div data-overlay-drag-handle style="display:flex;align-items:center;justify-content:space-between;gap:8px;cursor:move">
             <div style="font-size:12px;font-weight:700;letter-spacing:.04em;opacity:.92">${def.title}</div>
             <div style="display:flex;align-items:center;gap:6px">
+              ${overlaySettings.panelLayout === "sidebar" ? `<button id="${def.id}-dock-c" title="Dock to sidebar" style="appearance:none;border:none;background:rgba(255,255,255,0.08);color:#fff;padding:6px 8px;border-radius:8px;font:inherit;cursor:pointer;font-size:11px">\u21A9</button>` : ""}
               <button id="${def.id}-expand" title="Expand" style="appearance:none;border:none;background:rgba(255,255,255,0.08);color:#fff;padding:6px 8px;border-radius:8px;font:inherit;cursor:pointer">+</button>
-              <button id="${def.id}-hide" title="Close" style="appearance:none;border:none;background:rgba(255,255,255,0.08);color:#fff;padding:6px 8px;border-radius:8px;font:inherit;cursor:pointer">×</button>
+              <button id="${def.id}-hide" title="Close" style="appearance:none;border:none;background:rgba(255,255,255,0.08);color:#fff;padding:6px 8px;border-radius:8px;font:inherit;cursor:pointer">\u00d7</button>
             </div>
           </div>
           <div data-overlay-resize-handle title="Resize width" style="position:absolute;top:6px;right:-4px;width:10px;height:28px;cursor:ew-resize;opacity:.28;background:linear-gradient(180deg, rgba(255,255,255,.18), rgba(255,255,255,.05));border-radius:999px"></div>
@@ -1519,6 +1617,9 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
       panel.style.overflow = "hidden";
       installPanelDrag(panel, (element, left, top) => {
         applyPanelPosition(element, panelKey, left, top, true);
+      });
+      panel.querySelector(`#${def.id}-dock-c`)?.addEventListener("click", () => {
+        setPanelDocked(panelKey, true);
       });
       panel.querySelector(`#${def.id}-expand`)?.addEventListener("click", () => {
         setPanelCollapsed(panelKey, false);
@@ -1545,11 +1646,12 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
           <div style="font-size:15px;font-weight:700;margin-top:2px">${def.title}</div>
         </div>
         <div style="display:flex;align-items:center;gap:8px">
-          <button id="${def.id}-collapse" style="appearance:none;border:none;background:rgba(255,255,255,0.08);color:#fff;padding:8px 10px;border-radius:8px;font:inherit;cursor:pointer">−</button>
-          <button id="${def.id}-hide" title="Close" style="appearance:none;border:none;background:rgba(255,255,255,0.08);color:#fff;padding:8px 10px;border-radius:8px;font:inherit;cursor:pointer">×</button>
+          ${overlaySettings.panelLayout === "sidebar" ? `<button id="${def.id}-dock" title="Dock to sidebar" style="appearance:none;border:none;background:rgba(255,255,255,0.08);color:#fff;padding:8px 10px;border-radius:8px;font:inherit;cursor:pointer;font-size:13px">\u21A9</button><button id="${def.id}-group" title="Group with panel" style="appearance:none;border:none;background:rgba(255,255,255,0.08);color:#fff;padding:8px 10px;border-radius:8px;font:inherit;cursor:pointer;font-size:13px">\u229E</button>` : ""}
+          <button id="${def.id}-collapse" style="appearance:none;border:none;background:rgba(255,255,255,0.08);color:#fff;padding:8px 10px;border-radius:8px;font:inherit;cursor:pointer">\u2212</button>
+          <button id="${def.id}-hide" title="Close" style="appearance:none;border:none;background:rgba(255,255,255,0.08);color:#fff;padding:8px 10px;border-radius:8px;font:inherit;cursor:pointer">\u00d7</button>
         </div>
       </div>
-      <div style="margin-top:8px;font-size:12px;opacity:.68">Turn ${latestLocalIntelPayload?.turn ?? "?"}${latestLocalIntelPayload?.status ? ` · ${formatTabStatusLabel(latestLocalIntelPayload.status)}` : ""}</div>
+      <div style="margin-top:8px;font-size:12px;opacity:.68">Turn ${latestLocalIntelPayload?.turn ?? "?"}${latestLocalIntelPayload?.status ? ` \u00b7 ${formatTabStatusLabel(latestLocalIntelPayload.status)}` : ""}</div>
       ${renderPanelBody(panelKey)}
       <div data-overlay-resize-handle title="Resize width" style="position:absolute;top:10px;right:-4px;width:10px;height:calc(100% - 20px);cursor:ew-resize;opacity:.22;background:linear-gradient(180deg, rgba(255,255,255,.18), rgba(255,255,255,.05));border-radius:999px"></div>
       <div data-overlay-resize-handle-y title="Resize height" style="position:absolute;left:10px;right:10px;bottom:-4px;height:10px;cursor:ns-resize;opacity:.22;background:linear-gradient(90deg, rgba(255,255,255,.05), rgba(255,255,255,.18), rgba(255,255,255,.05));border-radius:999px"></div>
@@ -1561,6 +1663,12 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
     installHorizontalResize(panel, () => panelWidthKey(panelKey), def.width);
     installVerticalResize(panel, () => panelHeightKey(panelKey), 420);
 
+    panel.querySelector(`#${def.id}-dock`)?.addEventListener("click", () => {
+      setPanelDocked(panelKey, true);
+    });
+    panel.querySelector(`#${def.id}-group`)?.addEventListener("click", () => {
+      showGroupPickList(panelKey, panel.querySelector(`#${def.id}-group`));
+    });
     panel.querySelector(`#${def.id}-hide`)?.addEventListener("click", () => {
       setPanelVisible(panelKey, false);
     });
@@ -1574,6 +1682,618 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
       panel.querySelector(`#${OVERLAY_ID}-debug-download`)?.addEventListener("click", () => {
         downloadDebugBundle();
       });
+    }
+  }
+
+  // ── Sidebar mode ──────────────────────────────────────────────
+
+  function defaultSidebarPosition() {
+    const overlay = document.getElementById(OVERLAY_ID);
+    if (overlay) {
+      const rect = overlay.getBoundingClientRect();
+      return { left: rect.right + 12, top: rect.top };
+    }
+    return { left: 464, top: 12 };
+  }
+
+  function ensureSidebarStyles() {
+    if (document.getElementById("showdnass-sidebar-styles")) return;
+    const style = document.createElement("style");
+    style.id = "showdnass-sidebar-styles";
+    style.textContent = `
+      #showdnass-sidebar [data-sidebar-tab]:hover {
+        background: rgba(255,255,255,0.10) !important;
+      }
+      #showdnass-sidebar [data-sidebar-tab][data-active="true"] {
+        border-bottom: 2px solid #5b7cff !important;
+        color: #fff !important;
+        opacity: 1 !important;
+      }
+      #showdnass-sidebar [data-sidebar-content] {
+        flex: 1;
+        overflow-y: auto;
+        overflow-x: hidden;
+        padding: 10px 14px;
+      }
+    `;
+    document.head.appendChild(style);
+  }
+
+  function ensureSidebar() {
+    let sidebar = document.getElementById(SIDEBAR_ID);
+    if (sidebar) return sidebar;
+
+    sidebar = document.createElement("div");
+    sidebar.id = SIDEBAR_ID;
+    sidebar.style.cssText = [
+      "position: fixed",
+      "top: 12px",
+      "right: 12px",
+      "z-index: 10006",
+      "width: 400px",
+      "max-width: calc(100vw - 24px)",
+      "max-height: calc(100vh - 24px)",
+      "overflow: hidden",
+      "background: rgba(10, 10, 12, 0.98)",
+      "color: #fff",
+      "border: 1px solid rgba(255,255,255,0.1)",
+      "border-radius: 12px",
+      "box-shadow: 0 10px 30px rgba(0,0,0,0.35)",
+      "font: 13px/1.4 system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+      "display: flex",
+      "flex-direction: column"
+    ].join(";");
+
+    const savedWidth = loadWidthSetting(SIDEBAR_WIDTH_KEY);
+    sidebar.style.width = `${clampResizableWidth(savedWidth, 400)}px`;
+    const savedHeight = loadHeightSetting(SIDEBAR_HEIGHT_KEY);
+    sidebar.style.height = savedHeight
+      ? `${clampResizableHeight(savedHeight, 520)}px`
+      : "calc(100vh - 24px)";
+
+    sidebar.tabIndex = 0;
+    sidebar.style.outline = "none";
+    document.documentElement.appendChild(sidebar);
+    bringToFront(sidebar);
+    sidebar.addEventListener("pointerdown", () => {
+      bringToFront(sidebar);
+      sidebar.focus();
+    });
+
+    const savedPosition = loadPositionSetting(SIDEBAR_POSITION_KEY);
+    if (savedPosition) {
+      const clamped = clampPanelPosition(sidebar, savedPosition.left, savedPosition.top);
+      sidebar.style.left = `${clamped.left}px`;
+      sidebar.style.top = `${clamped.top}px`;
+      sidebar.style.right = "auto";
+    } else {
+      const pos = defaultSidebarPosition();
+      const clamped = clampPanelPosition(sidebar, pos.left, pos.top);
+      sidebar.style.left = `${clamped.left}px`;
+      sidebar.style.top = `${clamped.top}px`;
+      sidebar.style.right = "auto";
+    }
+
+    ensureSidebarStyles();
+    return sidebar;
+  }
+
+  function resolveActiveTab() {
+    const visibleKeys = PANEL_DEFS
+      .filter(def => { const s = getPanelState(def.key); return s.visible && s.docked; })
+      .map(def => def.key);
+    if (visibleKeys.length === 0) return null;
+    if (visibleKeys.includes(sidebarActiveTab)) return sidebarActiveTab;
+    sidebarActiveTab = visibleKeys[0];
+    saveStringSetting(SIDEBAR_ACTIVE_TAB_KEY, sidebarActiveTab);
+    return sidebarActiveTab;
+  }
+
+  function wireSidebarContentListeners(sidebar, panelKey) {
+    if (panelKey === "debug") {
+      sidebar.querySelector(`#${OVERLAY_ID}-debug-copy`)?.addEventListener("click", () => {
+        void copyDebugBundle();
+      });
+      sidebar.querySelector(`#${OVERLAY_ID}-debug-download`)?.addEventListener("click", () => {
+        downloadDebugBundle();
+      });
+    }
+  }
+
+  function renderSidebar() {
+    const sidebar = ensureSidebar();
+    sidebar.style.display = "flex";
+    const activeTab = resolveActiveTab();
+
+    if (sidebarCollapsed) {
+      sidebar.innerHTML = `
+        <div data-overlay-drag-handle style="display:flex;align-items:center;justify-content:space-between;gap:8px;cursor:move;padding:8px 10px">
+          <div style="font-size:12px;font-weight:700;letter-spacing:.04em;opacity:.92">${BRAND_NAME}</div>
+          <div style="display:flex;align-items:center;gap:6px">
+            <button id="${SIDEBAR_ID}-expand" title="Expand" style="appearance:none;border:none;background:rgba(255,255,255,0.08);color:#fff;padding:6px 8px;border-radius:8px;font:inherit;cursor:pointer">+</button>
+            <button id="${SIDEBAR_ID}-hide" title="Close" style="appearance:none;border:none;background:rgba(255,255,255,0.08);color:#fff;padding:6px 8px;border-radius:8px;font:inherit;cursor:pointer">×</button>
+          </div>
+        </div>
+      `;
+      sidebar.style.height = "auto";
+      sidebar.style.maxHeight = "40px";
+      sidebar.style.overflow = "hidden";
+
+      installPanelDrag(sidebar, (el, left, top) => {
+        const clamped = clampPanelPosition(el, left, top);
+        el.style.left = `${clamped.left}px`;
+        el.style.top = `${clamped.top}px`;
+        el.style.right = "auto";
+        savePositionSetting(SIDEBAR_POSITION_KEY, clamped.left, clamped.top);
+      });
+
+      sidebar.querySelector(`#${SIDEBAR_ID}-expand`)?.addEventListener("click", () => {
+        sidebarCollapsed = false;
+        saveBooleanSetting(SIDEBAR_COLLAPSED_KEY, false);
+        renderSidebar();
+      });
+      sidebar.querySelector(`#${SIDEBAR_ID}-hide`)?.addEventListener("click", () => {
+        sidebar.style.display = "none";
+      });
+      return;
+    }
+
+    // Expanded state — only show docked+visible panels as tabs
+    const visibleTabs = PANEL_DEFS.filter(def => {
+      const s = getPanelState(def.key);
+      return s.visible && s.docked;
+    });
+
+    const tabStripHtml = visibleTabs.map((def, idx) => {
+      const isActive = def.key === activeTab;
+      const label = SIDEBAR_TAB_LABELS[def.key] || def.title;
+      const num = idx + 1;
+      return `<button data-sidebar-tab data-tab-key="${def.key}" data-active="${isActive}"
+        style="appearance:none;border:none;border-bottom:2px solid transparent;background:none;color:#fff;opacity:${isActive ? "1" : ".6"};padding:8px 10px;font:inherit;font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap;display:flex;align-items:center;gap:4px"
+      ><span style="font-size:10px;opacity:.5;font-weight:400">${num}</span>${label}<span data-undock-key="${def.key}" title="Pop out" style="font-size:10px;opacity:.35;cursor:pointer;margin-left:2px">\u29C9</span></button>`;
+    }).join("");
+
+    const contentHtml = activeTab
+      ? renderPanelBody(activeTab)
+      : '<div style="padding:20px;opacity:.6">Enable panels in the popup to see them here.</div>';
+
+    const turnLabel = latestLocalIntelPayload?.turn ?? "?";
+    const statusLabel = latestLocalIntelPayload?.status
+      ? ` · ${formatTabStatusLabel(latestLocalIntelPayload.status)}`
+      : "";
+
+    sidebar.style.height = loadHeightSetting(SIDEBAR_HEIGHT_KEY)
+      ? `${clampResizableHeight(loadHeightSetting(SIDEBAR_HEIGHT_KEY), 520)}px`
+      : "calc(100vh - 24px)";
+    sidebar.style.maxHeight = "calc(100vh - 24px)";
+    sidebar.style.overflow = "hidden";
+
+    sidebar.innerHTML = `
+      <div data-overlay-drag-handle style="display:flex;justify-content:space-between;align-items:center;gap:8px;cursor:move;padding:10px 14px 0">
+        <div>
+          <div style="font-size:12px;opacity:.7">${BRAND_NAME}</div>
+          <div style="font-size:11px;opacity:.55;margin-top:2px">Turn ${turnLabel}${statusLabel}</div>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px">
+          <button id="${SIDEBAR_ID}-collapse" style="appearance:none;border:none;background:rgba(255,255,255,0.08);color:#fff;padding:6px 8px;border-radius:8px;font:inherit;cursor:pointer">\u2212</button>
+          <button id="${SIDEBAR_ID}-hide" title="Close" style="appearance:none;border:none;background:rgba(255,255,255,0.08);color:#fff;padding:6px 8px;border-radius:8px;font:inherit;cursor:pointer">\u00d7</button>
+        </div>
+      </div>
+      <div style="display:flex;border-bottom:1px solid rgba(255,255,255,0.08);margin-top:6px;padding:0 10px;overflow-x:auto">
+        ${tabStripHtml}
+      </div>
+      <div data-sidebar-content>
+        ${contentHtml}
+      </div>
+      <div data-overlay-resize-handle title="Resize width" style="position:absolute;top:10px;right:-4px;width:10px;height:calc(100% - 20px);cursor:ew-resize;opacity:.22;background:linear-gradient(180deg, rgba(255,255,255,.18), rgba(255,255,255,.05));border-radius:999px"></div>
+      <div data-overlay-resize-handle-y title="Resize height" style="position:absolute;left:10px;right:10px;bottom:-4px;height:10px;cursor:ns-resize;opacity:.22;background:linear-gradient(90deg, rgba(255,255,255,.05), rgba(255,255,255,.18), rgba(255,255,255,.05));border-radius:999px"></div>
+    `;
+
+    // Wire event listeners
+    installPanelDrag(sidebar, (el, left, top) => {
+      const clamped = clampPanelPosition(el, left, top);
+      el.style.left = `${clamped.left}px`;
+      el.style.top = `${clamped.top}px`;
+      el.style.right = "auto";
+      savePositionSetting(SIDEBAR_POSITION_KEY, clamped.left, clamped.top);
+    });
+    installHorizontalResize(sidebar, () => SIDEBAR_WIDTH_KEY, 400);
+    installVerticalResize(sidebar, () => SIDEBAR_HEIGHT_KEY, 520);
+
+    sidebar.querySelector(`#${SIDEBAR_ID}-collapse`)?.addEventListener("click", () => {
+      sidebarCollapsed = true;
+      saveBooleanSetting(SIDEBAR_COLLAPSED_KEY, true);
+      renderSidebar();
+    });
+    sidebar.querySelector(`#${SIDEBAR_ID}-hide`)?.addEventListener("click", () => {
+      sidebar.style.display = "none";
+    });
+
+    // Tab click listeners
+    for (const btn of sidebar.querySelectorAll("[data-sidebar-tab]")) {
+      btn.addEventListener("click", (e) => {
+        // If undock icon was clicked, undock instead of switching
+        if (e.target.closest("[data-undock-key]")) return;
+        const key = btn.dataset.tabKey;
+        if (key === sidebarActiveTab) return;
+        switchSidebarTab(sidebar, key);
+      });
+    }
+
+    // Undock click listeners
+    for (const icon of sidebar.querySelectorAll("[data-undock-key]")) {
+      icon.addEventListener("click", (e) => {
+        e.stopPropagation();
+        setPanelDocked(icon.dataset.undockKey, false);
+      });
+    }
+
+    // Keyboard: number keys switch tabs when sidebar is focused
+    sidebar.addEventListener("keydown", (e) => {
+      const num = parseInt(e.key, 10);
+      if (num >= 1 && num <= visibleTabs.length) {
+        e.preventDefault();
+        e.stopPropagation();
+        const targetDef = visibleTabs[num - 1];
+        if (targetDef) switchSidebarTab(sidebar, targetDef.key);
+      }
+      if (e.key === "Escape") {
+        sidebar.blur();
+      }
+    });
+
+    wireSidebarContentListeners(sidebar, activeTab);
+  }
+
+  function switchSidebarTab(sidebar, key) {
+    sidebarActiveTab = key;
+    saveStringSetting(SIDEBAR_ACTIVE_TAB_KEY, key);
+    for (const tab of sidebar.querySelectorAll("[data-sidebar-tab]")) {
+      tab.dataset.active = String(tab.dataset.tabKey === key);
+      tab.style.opacity = tab.dataset.tabKey === key ? "1" : ".6";
+    }
+    const contentArea = sidebar.querySelector("[data-sidebar-content]");
+    if (contentArea) {
+      contentArea.innerHTML = renderPanelBody(key);
+      wireSidebarContentListeners(sidebar, key);
+    }
+  }
+
+  // ── Layout branching ─────────────────────────────────────────
+
+  function hideAllClassicPanels() {
+    for (const def of PANEL_DEFS) {
+      const panel = document.getElementById(def.id);
+      if (panel) panel.style.display = "none";
+    }
+  }
+
+  function hideSidebar() {
+    const sidebar = document.getElementById(SIDEBAR_ID);
+    if (sidebar) sidebar.style.display = "none";
+  }
+
+  function showGroupPickList(panelKey, anchorEl) {
+    // Remove any existing pick list
+    document.getElementById("showdnass-group-picklist")?.remove();
+
+    // Collect targets: other undocked visible panels or existing groups
+    const targets = [];
+    const seenGroups = new Set();
+    for (const def of PANEL_DEFS) {
+      if (def.key === panelKey) continue;
+      const s = getPanelState(def.key);
+      if (!s.visible || s.docked) continue;
+      if (s.group) {
+        if (seenGroups.has(s.group)) continue;
+        seenGroups.add(s.group);
+        const members = getVisibleGroupMembers(s.group);
+        const label = members.map(k => SIDEBAR_TAB_LABELS[k] || k).join(" + ");
+        targets.push({ type: "group", groupId: s.group, label: `Group: ${label}` });
+      } else {
+        const label = SIDEBAR_TAB_LABELS[def.key] || def.title;
+        targets.push({ type: "panel", key: def.key, label });
+      }
+    }
+
+    if (targets.length === 0) return;
+
+    const list = document.createElement("div");
+    list.id = "showdnass-group-picklist";
+    list.style.cssText = [
+      "position: fixed",
+      "z-index: 99999",
+      "background: rgba(20, 20, 24, 0.98)",
+      "border: 1px solid rgba(255,255,255,0.15)",
+      "border-radius: 8px",
+      "box-shadow: 0 8px 24px rgba(0,0,0,0.4)",
+      "padding: 4px",
+      "font: 12px/1.4 system-ui, -apple-system, sans-serif",
+      "color: #fff",
+      "min-width: 140px"
+    ].join(";");
+
+    for (const target of targets) {
+      const row = document.createElement("div");
+      row.textContent = target.label;
+      row.style.cssText = "padding:8px 12px;cursor:pointer;border-radius:6px;white-space:nowrap";
+      row.addEventListener("mouseenter", () => { row.style.background = "rgba(255,255,255,0.1)"; });
+      row.addEventListener("mouseleave", () => { row.style.background = "none"; });
+      row.addEventListener("click", () => {
+        list.remove();
+        if (target.type === "group") {
+          setPanelGroup(panelKey, target.groupId);
+        } else {
+          // Create new group with the target panel as host
+          setPanelGroup(panelKey, target.key);
+        }
+      });
+      list.appendChild(row);
+    }
+
+    document.documentElement.appendChild(list);
+
+    // Position near the anchor button
+    if (anchorEl) {
+      const rect = anchorEl.getBoundingClientRect();
+      list.style.left = `${rect.left}px`;
+      list.style.top = `${rect.bottom + 4}px`;
+    }
+
+    // Dismiss on click outside
+    const dismiss = (e) => {
+      if (!list.contains(e.target)) {
+        list.remove();
+        document.removeEventListener("pointerdown", dismiss, true);
+      }
+    };
+    setTimeout(() => document.addEventListener("pointerdown", dismiss, true), 0);
+  }
+
+  function ensureGroupContainer(groupId) {
+    const domId = GROUP_DOM_PREFIX + groupId;
+    let container = document.getElementById(domId);
+    if (container) return container;
+
+    container = document.createElement("div");
+    container.id = domId;
+    container.tabIndex = 0;
+    container.style.cssText = [
+      "position: fixed",
+      "top: 80px",
+      "right: 12px",
+      "z-index: 10006",
+      "width: 380px",
+      "max-width: calc(100vw - 24px)",
+      "max-height: calc(100vh - 24px)",
+      "overflow: hidden",
+      "background: rgba(10, 10, 12, 0.98)",
+      "color: #fff",
+      "border: 1px solid rgba(255,255,255,0.12)",
+      "border-radius: 12px",
+      "box-shadow: 0 10px 30px rgba(0,0,0,0.35)",
+      "font: 13px/1.4 system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+      "display: flex",
+      "flex-direction: column",
+      "outline: none"
+    ].join(";");
+
+    const savedWidth = loadWidthSetting(groupWidthKey(groupId));
+    if (savedWidth) container.style.width = `${clampResizableWidth(savedWidth, 380)}px`;
+    const savedHeight = loadHeightSetting(groupHeightKey(groupId));
+    if (savedHeight) container.style.height = `${clampResizableHeight(savedHeight, 300)}px`;
+
+    document.documentElement.appendChild(container);
+    bringToFront(container);
+    container.addEventListener("pointerdown", () => {
+      bringToFront(container);
+      container.focus();
+    });
+
+    const savedPosition = loadPositionSetting(groupPositionKey(groupId));
+    if (savedPosition) {
+      const clamped = clampPanelPosition(container, savedPosition.left, savedPosition.top);
+      container.style.left = `${clamped.left}px`;
+      container.style.top = `${clamped.top}px`;
+      container.style.right = "auto";
+    } else {
+      // Place near center-ish
+      const left = Math.max(12, window.innerWidth / 2 - 190);
+      const clamped = clampPanelPosition(container, left, 80);
+      container.style.left = `${clamped.left}px`;
+      container.style.top = `${clamped.top}px`;
+      container.style.right = "auto";
+    }
+
+    ensureSidebarStyles();
+    return container;
+  }
+
+  function renderPanelGroup(groupId) {
+    const memberKeys = getVisibleGroupMembers(groupId);
+    if (memberKeys.length === 0) return;
+
+    const container = ensureGroupContainer(groupId);
+    container.style.display = "flex";
+
+    const collapsed = loadBooleanSetting(groupCollapsedKey(groupId), false);
+
+    if (collapsed) {
+      const firstDef = getPanelDef(memberKeys[0]);
+      const title = memberKeys.map(k => SIDEBAR_TAB_LABELS[k] || k).join(" + ");
+      container.innerHTML = `
+        <div data-overlay-drag-handle style="display:flex;align-items:center;justify-content:space-between;gap:8px;cursor:move;padding:8px 10px">
+          <div style="font-size:12px;font-weight:700;letter-spacing:.04em;opacity:.92">${title}</div>
+          <div style="display:flex;align-items:center;gap:6px">
+            <button data-group-expand title="Expand" style="appearance:none;border:none;background:rgba(255,255,255,0.08);color:#fff;padding:6px 8px;border-radius:8px;font:inherit;cursor:pointer">+</button>
+          </div>
+        </div>
+      `;
+      container.style.height = "auto";
+      container.style.maxHeight = "40px";
+      container.style.overflow = "hidden";
+
+      installPanelDrag(container, (el, left, top) => {
+        const clamped = clampPanelPosition(el, left, top);
+        el.style.left = `${clamped.left}px`;
+        el.style.top = `${clamped.top}px`;
+        el.style.right = "auto";
+        savePositionSetting(groupPositionKey(groupId), clamped.left, clamped.top);
+      });
+      container.querySelector("[data-group-expand]")?.addEventListener("click", () => {
+        saveBooleanSetting(groupCollapsedKey(groupId), false);
+        renderPanelGroup(groupId);
+      });
+      return;
+    }
+
+    // Resolve active tab for this group
+    let activeKey = loadStringSetting(groupActiveTabKey(groupId), memberKeys[0]);
+    if (!memberKeys.includes(activeKey)) activeKey = memberKeys[0];
+
+    const tabStripHtml = memberKeys.map((key, idx) => {
+      const isActive = key === activeKey;
+      const label = SIDEBAR_TAB_LABELS[key] || key;
+      const num = idx + 1;
+      return `<button data-sidebar-tab data-tab-key="${key}" data-active="${isActive}"
+        style="appearance:none;border:none;border-bottom:2px solid transparent;background:none;color:#fff;opacity:${isActive ? "1" : ".6"};padding:8px 10px;font:inherit;font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap;display:flex;align-items:center;gap:4px"
+      ><span style="font-size:10px;opacity:.5;font-weight:400">${num}</span>${label}<span data-eject-key="${key}" title="Pop out" style="font-size:10px;opacity:.35;cursor:pointer;margin-left:2px">\u29C9</span></button>`;
+    }).join("");
+
+    const contentHtml = renderPanelBody(activeKey);
+
+    container.style.height = loadHeightSetting(groupHeightKey(groupId))
+      ? `${clampResizableHeight(loadHeightSetting(groupHeightKey(groupId)), 300)}px`
+      : "auto";
+    container.style.maxHeight = "calc(100vh - 24px)";
+    container.style.overflow = "hidden";
+
+    container.innerHTML = `
+      <div data-overlay-drag-handle style="display:flex;justify-content:space-between;align-items:center;gap:8px;cursor:move;padding:8px 10px 0">
+        <div style="font-size:11px;opacity:.55">${BRAND_NAME}</div>
+        <div style="display:flex;align-items:center;gap:6px">
+          <button data-group-collapse title="Collapse" style="appearance:none;border:none;background:rgba(255,255,255,0.08);color:#fff;padding:6px 8px;border-radius:8px;font:inherit;cursor:pointer">\u2212</button>
+        </div>
+      </div>
+      <div style="display:flex;border-bottom:1px solid rgba(255,255,255,0.08);margin-top:4px;padding:0 8px;overflow-x:auto">
+        ${tabStripHtml}
+      </div>
+      <div data-sidebar-content>
+        ${contentHtml}
+      </div>
+      <div data-overlay-resize-handle title="Resize width" style="position:absolute;top:10px;right:-4px;width:10px;height:calc(100% - 20px);cursor:ew-resize;opacity:.22;background:linear-gradient(180deg, rgba(255,255,255,.18), rgba(255,255,255,.05));border-radius:999px"></div>
+      <div data-overlay-resize-handle-y title="Resize height" style="position:absolute;left:10px;right:10px;bottom:-4px;height:10px;cursor:ns-resize;opacity:.22;background:linear-gradient(90deg, rgba(255,255,255,.05), rgba(255,255,255,.18), rgba(255,255,255,.05));border-radius:999px"></div>
+    `;
+
+    installPanelDrag(container, (el, left, top) => {
+      const clamped = clampPanelPosition(el, left, top);
+      el.style.left = `${clamped.left}px`;
+      el.style.top = `${clamped.top}px`;
+      el.style.right = "auto";
+      savePositionSetting(groupPositionKey(groupId), clamped.left, clamped.top);
+    });
+    installHorizontalResize(container, () => groupWidthKey(groupId), 380);
+    installVerticalResize(container, () => groupHeightKey(groupId), 300);
+
+    container.querySelector("[data-group-collapse]")?.addEventListener("click", () => {
+      saveBooleanSetting(groupCollapsedKey(groupId), true);
+      renderPanelGroup(groupId);
+    });
+
+    // Tab click listeners
+    for (const btn of container.querySelectorAll("[data-sidebar-tab]")) {
+      btn.addEventListener("click", (e) => {
+        if (e.target.closest("[data-eject-key]")) return;
+        const key = btn.dataset.tabKey;
+        if (key === activeKey) return;
+        switchGroupTab(container, groupId, key);
+      });
+    }
+
+    // Eject (pop out) listeners
+    for (const icon of container.querySelectorAll("[data-eject-key]")) {
+      icon.addEventListener("click", (e) => {
+        e.stopPropagation();
+        setPanelGroup(icon.dataset.ejectKey, null);
+      });
+    }
+
+    // Number key switching
+    container.addEventListener("keydown", (e) => {
+      const num = parseInt(e.key, 10);
+      if (num >= 1 && num <= memberKeys.length) {
+        e.preventDefault();
+        e.stopPropagation();
+        switchGroupTab(container, groupId, memberKeys[num - 1]);
+      }
+      if (e.key === "Escape") container.blur();
+    });
+
+    wireSidebarContentListeners(container, activeKey);
+  }
+
+  function switchGroupTab(container, groupId, key) {
+    saveStringSetting(groupActiveTabKey(groupId), key);
+    for (const tab of container.querySelectorAll("[data-sidebar-tab]")) {
+      tab.dataset.active = String(tab.dataset.tabKey === key);
+      tab.style.opacity = tab.dataset.tabKey === key ? "1" : ".6";
+    }
+    const contentArea = container.querySelector("[data-sidebar-content]");
+    if (contentArea) {
+      contentArea.innerHTML = renderPanelBody(key);
+      wireSidebarContentListeners(container, key);
+    }
+  }
+
+  function renderPanelLayout() {
+    if (overlaySettings.panelLayout === "sidebar") {
+      const activeGroups = new Set();
+
+      for (const def of PANEL_DEFS) {
+        const state = getPanelState(def.key);
+        const panel = document.getElementById(def.id);
+        if (state.visible && !state.docked && !state.group) {
+          // Undocked + visible + standalone → render as classic floating panel
+          renderPanel(def.key);
+          const p = ensurePanel(def.key);
+          if (p) {
+            p.style.display = "block";
+            const savedPos = loadPanelPosition(def.key);
+            if (savedPos) {
+              applyPanelPosition(p, def.key, savedPos.left, savedPos.top, false);
+            } else {
+              const next = defaultPanelPosition(def.key);
+              applyPanelPosition(p, def.key, next.left, next.top, false);
+            }
+          }
+        } else if (state.visible && !state.docked && state.group) {
+          // Undocked + visible + in group → hide classic panel, track group
+          if (panel) panel.style.display = "none";
+          activeGroups.add(state.group);
+        } else if (panel) {
+          panel.style.display = "none";
+        }
+      }
+
+      // Render each active group as a tabbed container
+      for (const groupId of activeGroups) {
+        renderPanelGroup(groupId);
+      }
+
+      // Hide stale group containers
+      for (const el of document.querySelectorAll(`[id^="${GROUP_DOM_PREFIX}"]`)) {
+        const gid = el.id.slice(GROUP_DOM_PREFIX.length);
+        if (!activeGroups.has(gid)) el.remove();
+      }
+
+      renderSidebar();
+    } else {
+      hideSidebar();
+      // Also hide any group containers
+      for (const el of document.querySelectorAll(`[id^="${GROUP_DOM_PREFIX}"]`)) {
+        el.remove();
+      }
+      renderPanels();
     }
   }
 
@@ -1600,17 +2320,95 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
 
   function setPanelVisible(panelKey, visible) {
     const state = getPanelState(panelKey);
+    if (!visible && state.group) {
+      const oldGroup = state.group;
+      clearPanelGroup(panelKey);
+      dissolveIfSingle(oldGroup);
+    }
     state.visible = visible;
     saveBooleanSetting(panelVisibleKey(panelKey), visible);
     void persistPanelVisibilitySetting(panelKey, visible);
-    renderPanels();
+    renderPanelLayout();
   }
 
   function setPanelCollapsed(panelKey, collapsed) {
     const state = getPanelState(panelKey);
     state.collapsed = collapsed;
     saveBooleanSetting(panelCollapsedKey(panelKey), collapsed);
-    renderPanels();
+    renderPanelLayout();
+  }
+
+  function setPanelDocked(panelKey, docked) {
+    const state = getPanelState(panelKey);
+    if (docked) clearPanelGroup(panelKey);
+    state.docked = docked;
+    saveBooleanSetting(panelDockedKey(panelKey), docked);
+    renderPanelLayout();
+  }
+
+  function clearPanelGroup(panelKey) {
+    const state = getPanelState(panelKey);
+    state.group = null;
+    saveStringSetting(panelGroupKey(panelKey), "");
+  }
+
+  function getVisibleGroupMembers(groupId) {
+    return PANEL_DEFS
+      .filter(def => {
+        const s = getPanelState(def.key);
+        return s.visible && !s.docked && s.group === groupId;
+      })
+      .map(def => def.key);
+  }
+
+  function groupActiveTabKey(groupId) {
+    return `${GROUP_STORAGE_PREFIX}.${groupId}.active-tab`;
+  }
+  function groupPositionKey(groupId) {
+    return `${GROUP_STORAGE_PREFIX}.${groupId}.position`;
+  }
+  function groupWidthKey(groupId) {
+    return `${GROUP_STORAGE_PREFIX}.${groupId}.width`;
+  }
+  function groupHeightKey(groupId) {
+    return `${GROUP_STORAGE_PREFIX}.${groupId}.height`;
+  }
+  function groupCollapsedKey(groupId) {
+    return `${GROUP_STORAGE_PREFIX}.${groupId}.collapsed`;
+  }
+
+  function setPanelGroup(panelKey, groupId) {
+    const state = getPanelState(panelKey);
+    const oldGroup = state.group;
+
+    if (groupId) {
+      // Joining a group — ensure the target also has the group set
+      const targetState = getPanelState(groupId);
+      if (!targetState.group) {
+        targetState.group = groupId;
+        saveStringSetting(panelGroupKey(groupId), groupId);
+      }
+      state.group = targetState.group;
+      saveStringSetting(panelGroupKey(panelKey), state.group);
+    } else {
+      clearPanelGroup(panelKey);
+    }
+
+    // Dissolve old group if only 1 member left
+    if (oldGroup) dissolveIfSingle(oldGroup);
+
+    renderPanelLayout();
+  }
+
+  function dissolveIfSingle(groupId) {
+    const members = getVisibleGroupMembers(groupId);
+    if (members.length <= 1) {
+      for (const key of members) {
+        clearPanelGroup(key);
+      }
+      const container = document.getElementById(GROUP_DOM_PREFIX + groupId);
+      if (container) container.remove();
+    }
   }
 
   async function saveOverlaySettingsFromControls(overlay) {
@@ -1757,7 +2555,7 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
         void persistOverlayVisibilitySetting(false);
         document.getElementById(OVERLAY_ID)?.remove();
       });
-      renderPanels();
+      renderPanelLayout();
       return;
     }
     const listHtml = ranked
@@ -1845,7 +2643,7 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
       document.getElementById(OVERLAY_ID)?.remove();
     });
 
-    renderPanels();
+    renderPanelLayout();
   }
 
   function handleWindowMessage(event) {
@@ -1905,7 +2703,7 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
     if (message.type === "refresh-overlay-config") {
       void refreshOverlayConfig().then(async () => {
         if (overlayVisible) syncWindowVisibility();
-        else renderPanels();
+        else renderPanelLayout();
         sendResponse({ ok: true });
       });
       return true;
@@ -1926,7 +2724,7 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
     }
     if (message.type === "update-local-intel") {
       latestLocalIntelPayload = message.payload ?? latestLocalIntelPayload;
-      renderPanels();
+      renderPanelLayout();
     }
     if (message.type === "clear-analysis-overlay") {
       document.getElementById(OVERLAY_ID)?.remove();

@@ -255,6 +255,7 @@ export interface OpponentActionPrediction {
   topActionClass: OpponentActionClass;
   confidenceTier: "low" | "medium" | "high";
   topActions: OpponentActionCandidate[];
+  topSwitchTargets?: OpponentActionCandidate[] | undefined;
   reasons: string[];
   riskFlags: string[];
   classScores?: OpponentActionClassScores | undefined;

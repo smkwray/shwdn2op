@@ -778,6 +778,15 @@ function confidenceTier(params: {
   return "low" as const;
 }
 
+function topSwitchTargets(switchCandidates: OpponentActionCandidate[]) {
+  if (!Array.isArray(switchCandidates) || switchCandidates.length === 0) return [];
+  const leaderScore = Number(switchCandidates[0]?.score ?? 0);
+  return switchCandidates.filter((candidate, index) => (
+    index < 4
+    || Number(candidate.score ?? 0) >= leaderScore - 10
+  ));
+}
+
 export function buildOpponentActionPrediction(params: {
   snapshot: BattleSnapshot;
   activeOpponentEntry?: OpponentIntelEntry | undefined;
@@ -839,6 +848,7 @@ export function buildOpponentActionPrediction(params: {
   const allCandidates = [...attackCandidates, ...switchCandidates, ...statusCandidates]
     .sort((a, b) => b.score - a.score || a.label.localeCompare(b.label))
     .slice(0, 4);
+  const rankedSwitchTargets = topSwitchTargets(switchCandidates);
 
   const reasons = uniqueStrings([
     ...(allCandidates[0]?.reasons ?? []),
@@ -865,6 +875,7 @@ export function buildOpponentActionPrediction(params: {
     topActionClass: topClass,
     confidenceTier: confidence,
     topActions: allCandidates,
+    topSwitchTargets: rankedSwitchTargets,
     reasons,
     riskFlags,
     classScores

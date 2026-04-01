@@ -206,9 +206,15 @@ function revealedItemName(pokemon: PokemonSnapshot | null | undefined): string |
 function liveLikelyHeldItems(
   format: string,
   pokemon: PokemonSnapshot | null | undefined,
-  likelyItems: LikelihoodEntry[] | undefined
+  likelyItems: LikelihoodEntry[] | undefined,
+  recentLog?: string[] | undefined
 ) {
-  return filterLiveLikelyHeldItemNames(format, pokemon, likelyItems?.map((entry) => entry.name) ?? []);
+  return filterLiveLikelyHeldItemNames(
+    format,
+    pokemon,
+    likelyItems?.map((entry) => entry.name) ?? [],
+    { recentLog }
+  );
 }
 
 function uniqueStrings(values: Array<string | null | undefined>) {
@@ -2074,7 +2080,8 @@ export async function buildLocalIntelSnapshot(snapshot: BattleSnapshot): Promise
         curatedRecord: curatedFormatRecord.items,
         curatedSamples: curatedFormatRecord.teamCount,
         exclude: merged.revealedItem ? [merged.revealedItem] : []
-      })
+      }),
+      { recentLog: snapshot.recentLog }
     );
     const likelyAbilities = summarizeEntries(
       {
@@ -2221,7 +2228,7 @@ export async function buildLocalIntelSnapshot(snapshot: BattleSnapshot): Promise
   const threatMoves = pickThreatMoves(activeOpponentEntry);
   const opponentThreatPreview = buildThreatPreview(snapshot, {
     moveCandidates: threatMoves,
-    likelyAttackerItems: liveLikelyHeldItems(snapshot.format, snapshot.opponentSide.active, activeOpponentEntry?.likelyItems),
+    likelyAttackerItems: liveLikelyHeldItems(snapshot.format, snapshot.opponentSide.active, activeOpponentEntry?.likelyItems, snapshot.recentLog),
     likelyAttackerAbilities: activeOpponentEntry?.likelyAbilities.map((entry) => entry.name) ?? [],
     attackerPosterior: activeOpponentEntry?.posterior,
     observedThreats: opponentObservedThreats,
@@ -2246,7 +2253,7 @@ export async function buildLocalIntelSnapshot(snapshot: BattleSnapshot): Promise
     }))
   }));
   const playerDamagePreview = buildDamagePreview(snapshot, {
-    likelyDefenderItems: liveLikelyHeldItems(snapshot.format, snapshot.opponentSide.active, activeOpponentEntry?.likelyItems),
+    likelyDefenderItems: liveLikelyHeldItems(snapshot.format, snapshot.opponentSide.active, activeOpponentEntry?.likelyItems, snapshot.recentLog),
     likelyDefenderAbilities: activeOpponentEntry?.likelyAbilities.map((entry) => entry.name) ?? [],
     defenderPosterior: activeOpponentEntry?.posterior,
     observedPlayerDamage: playerObservedDamage,

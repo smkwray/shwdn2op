@@ -116,19 +116,38 @@ function weightedOpponentLeads(
   const previewCandidates = snapshot.opponentSide.team.filter((pokemon) => !pokemon.fainted && pokemon.revealed);
   if (previewCandidates.length === 0) return [];
   const predictedCandidates = (opponentLeadPrediction?.topCandidates ?? [])
-    .map((candidate) => {
-      const pokemon = previewCandidates.find((entry) => normalizeName(entry.species ?? entry.displayName) === normalizeName(candidate.species));
-      return pokemon ? { pokemon, rawScore: Math.max(1, Number(candidate.score) || 0) } : null;
-    })
-    .filter((candidate): candidate is { pokemon: PokemonSnapshot; rawScore: number } => Boolean(candidate));
+    .map((candidate) => previewCandidates.find((entry) => normalizeName(entry.species ?? entry.displayName) === normalizeName(candidate.species)) ?? null)
+    .filter((candidate): candidate is PokemonSnapshot => Boolean(candidate))
+    .map((candidate, index, list) => ({
+      pokemon: candidate,
+      rawScore: Math.max(1, list.length - index)
+    }));
+  const rankedKeys = new Set(predictedCandidates.map((candidate) => normalizeName(candidate.pokemon.species ?? candidate.pokemon.displayName)));
+  const residualWeight = opponentLeadPrediction?.confidenceTier === "high"
+    ? 1
+    : opponentLeadPrediction?.confidenceTier === "medium"
+      ? 2
+      : 3;
+  const omittedCandidates = previewCandidates
+    .filter((pokemon) => !rankedKeys.has(normalizeName(pokemon.species ?? pokemon.displayName)))
+    .map((pokemon) => ({ pokemon, rawScore: residualWeight }));
   const weighted = predictedCandidates.length > 0
-    ? predictedCandidates
+    ? [...predictedCandidates, ...omittedCandidates]
     : previewCandidates.map((pokemon) => ({ pokemon, rawScore: 1 }));
   const total = weighted.reduce((sum, candidate) => sum + candidate.rawScore, 0) || 1;
   return weighted.map((candidate) => ({
     pokemon: candidate.pokemon,
     weight: candidate.rawScore / total
   }));
+}
+
+function capConfidenceByOpponentRead(
+  confidence: "low" | "medium" | "high",
+  opponentConfidence: "low" | "medium" | "high" | undefined
+) {
+  if (opponentConfidence === "low") return "low" as const;
+  if (opponentConfidence === "medium" && confidence === "high") return "medium" as const;
+  return confidence;
 }
 
 function bestDamageSignal(
@@ -312,16 +331,17 @@ export function buildPlayerLeadRecommendation(params: {
   const top = scored[0];
   const runnerUp = scored[1];
   const gap = (top?.score ?? 0) - (runnerUp?.score ?? 0);
-  const confidence = !top || top.score < 24
+  const baseConfidence = !top || top.score < 24
     ? "low"
     : top.score >= 38 && gap >= 8
       ? "high"
       : top.score >= 28 && gap >= 4
         ? "medium"
         : "low";
+  const confidence = capConfidenceByOpponentRead(baseConfidence, params.opponentLeadPrediction?.confidenceTier);
 
   const summaryParts = [
-    `Best starter ${top?.species ?? "unknown"}`,
+    `${params.opponentLeadPrediction?.confidenceTier === "low" ? "Lean starter" : "Best starter"} ${top?.species ?? "unknown"}`,
     `confidence ${confidence}`
   ];
   if (top?.reasons?.[0]) {

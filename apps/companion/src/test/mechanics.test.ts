@@ -20,6 +20,7 @@ const { buildDamagePreview, buildThreatPreview } = await import("../prompting/da
 const { buildAnalysisPrompt } = await import("../prompting/analysisPrompt.js");
 const { buildGeminiPrompt } = await import("../providers/geminiProvider.js");
 const { buildSelfActionRecommendation, selectReplyAwareSearchActionIds, weightedOpponentReplies } = await import("../prediction/selfActionRecommender.js");
+const { buildPlayerLeadRecommendation } = await import("../prediction/playerLeadPredictor.js");
 
 async function loadExampleJson(relativePath: string) {
   return JSON.parse(await fs.readFile(path.resolve(repoRoot, relativePath), "utf8"));
@@ -2326,6 +2327,88 @@ test("damage and status previews surface possible hidden-ability immunity hints"
   assert.notEqual(balloonPreview[0]?.bands[0]?.outcome, "immune");
   assert.equal(balloonPreview[0]?.interactionHints[0]?.label, "Air Balloon");
   assert.match(balloonPreview[0]?.interactionHints[0]?.detail ?? "", /Headlong Rush.*0/i);
+
+  const thousandArrowsSnapshot: BattleSnapshot = {
+    ...balloonSnapshot,
+    yourSide: {
+      ...balloonSnapshot.yourSide,
+      active: makePokemon({
+        ident: "p1a: Zygarde-balloon-exception",
+        species: "Zygarde-10%",
+        displayName: "Zygarde-10%",
+        active: true,
+        knownMoves: ["Thousand Arrows"],
+        stats: { hp: 289, atk: 299, def: 226, spa: 136, spd: 226, spe: 361 },
+        types: ["Dragon", "Ground"]
+      }),
+      team: [makePokemon({
+        ident: "p1a: Zygarde-balloon-exception",
+        species: "Zygarde-10%",
+        displayName: "Zygarde-10%",
+        active: true,
+        knownMoves: ["Thousand Arrows"],
+        stats: { hp: 289, atk: 299, def: 226, spa: 136, spd: 226, spe: 361 },
+        types: ["Dragon", "Ground"]
+      })]
+    },
+    legalActions: [{ id: "move:thousandarrows", kind: "move", label: "Thousand Arrows", moveName: "Thousand Arrows" }]
+  };
+  const thousandArrowsPreview = buildDamagePreview(thousandArrowsSnapshot, { likelyDefenderItems: ["Air Balloon"] });
+  assert.notEqual(thousandArrowsPreview[0]?.bands[0]?.outcome, "immune");
+  assert.equal(thousandArrowsPreview[0]?.interactionHints.length, 0);
+});
+
+test("Mold Breaker suppresses possible ability nullifier hints", () => {
+  const snapshot = makeSnapshot({
+    yourSide: {
+      slot: "p1",
+      name: "You",
+      active: makePokemon({
+        ident: "p1a: Excadrill-mold-breaker",
+        species: "Excadrill",
+        displayName: "Excadrill",
+        active: true,
+        ability: "Mold Breaker",
+        knownMoves: ["Earthquake"],
+        stats: { hp: 361, atk: 369, def: 156, spa: 126, spd: 166, spe: 302 },
+        types: ["Ground", "Steel"]
+      }),
+      team: [makePokemon({
+        ident: "p1a: Excadrill-mold-breaker",
+        species: "Excadrill",
+        displayName: "Excadrill",
+        active: true,
+        ability: "Mold Breaker",
+        knownMoves: ["Earthquake"],
+        stats: { hp: 361, atk: 369, def: 156, spa: 126, spd: 166, spe: 302 },
+        types: ["Ground", "Steel"]
+      })]
+    },
+    opponentSide: {
+      slot: "p2",
+      name: "Opponent",
+      active: makePokemon({
+        ident: "p2a: Rotom-Wash-hidden-levitate",
+        species: "Rotom-Wash",
+        displayName: "Rotom-Wash",
+        active: true,
+        stats: { hp: 304, atk: 166, def: 344, spa: 309, spd: 344, spe: 298 },
+        types: ["Electric", "Water"]
+      }),
+      team: [makePokemon({
+        ident: "p2a: Rotom-Wash-hidden-levitate",
+        species: "Rotom-Wash",
+        displayName: "Rotom-Wash",
+        active: true,
+        stats: { hp: 304, atk: 166, def: 344, spa: 309, spd: 344, spe: 298 },
+        types: ["Electric", "Water"]
+      })]
+    },
+    legalActions: [{ id: "move:earthquake", kind: "move", label: "Earthquake", moveName: "Earthquake" }]
+  });
+
+  const preview = buildDamagePreview(snapshot, { likelyDefenderAbilities: ["Levitate"] });
+  assert.equal(preview[0]?.interactionHints.length, 0);
 });
 
 test("opponent threat preview preserves blocked status outcomes", () => {
@@ -3923,6 +4006,181 @@ test("preview intel predicts an opponent lead from team context and local lead h
   assert.match(intel.playerLeadRecommendation?.summary ?? "", /Best starter Hydreigon/i);
 });
 
+test("player lead summary softens to a lean when the opponent lead read is low confidence", async () => {
+  const yourLeadA = makePokemon({
+    ident: "p1: Hydreigon-preview-lean",
+    species: "Hydreigon",
+    displayName: "Hydreigon",
+    active: false,
+    revealed: true,
+    knownMoves: ["U-turn", "Dark Pulse"],
+    stats: { hp: 324, atk: 309, def: 216, spa: 349, spd: 216, spe: 324 },
+    types: ["Dark", "Dragon"]
+  });
+  const yourLeadB = makePokemon({
+    ident: "p1: Scizor-preview-lean",
+    species: "Scizor",
+    displayName: "Scizor",
+    active: false,
+    revealed: true,
+    knownMoves: ["Bullet Punch", "U-turn"],
+    stats: { hp: 344, atk: 394, def: 236, spa: 146, spd: 196, spe: 166 },
+    types: ["Bug", "Steel"]
+  });
+  const yourLeadC = makePokemon({
+    ident: "p1: Rotom-Heat-preview-lean",
+    species: "Rotom-Heat",
+    displayName: "Rotom-Heat",
+    active: false,
+    revealed: true,
+    knownMoves: ["Volt Switch", "Overheat"],
+    stats: { hp: 304, atk: 149, def: 250, spa: 339, spd: 250, spe: 298 },
+    types: ["Electric", "Fire"]
+  });
+
+  const opponentPreview = [
+    makePokemon({ ident: "p2: Donphan-preview-lean", species: "Donphan", displayName: "Donphan", active: false, revealed: true, knownMoves: [], stats: { hp: 384, atk: 372, def: 276, spa: 140, spd: 156, spe: 176 }, types: ["Ground"] }),
+    makePokemon({ ident: "p2: Slowking-preview-lean", species: "Slowking", displayName: "Slowking", active: false, revealed: true, knownMoves: [], stats: { hp: 394, atk: 166, def: 196, spa: 236, spd: 316, spe: 96 }, types: ["Water", "Psychic"] }),
+    makePokemon({ ident: "p2: Skarmory-preview-lean", species: "Skarmory", displayName: "Skarmory", active: false, revealed: true, knownMoves: [], stats: { hp: 334, atk: 176, def: 416, spa: 136, spd: 176, spe: 176 }, types: ["Steel", "Flying"] }),
+    makePokemon({ ident: "p2: Mienshao-preview-lean", species: "Mienshao", displayName: "Mienshao", active: false, revealed: true, knownMoves: [], stats: { hp: 271, atk: 339, def: 156, spa: 226, spd: 156, spe: 339 }, types: ["Fighting"] }),
+    makePokemon({ ident: "p2: Rotom-Wash-preview-lean", species: "Rotom-Wash", displayName: "Rotom-Wash", active: false, revealed: true, knownMoves: [], stats: { hp: 304, atk: 166, def: 344, spa: 309, spd: 344, spe: 298 }, types: ["Electric", "Water"] }),
+    makePokemon({ ident: "p2: Salamence-preview-lean", species: "Salamence", displayName: "Salamence", active: false, revealed: true, knownMoves: [], stats: { hp: 331, atk: 369, def: 196, spa: 256, spd: 196, spe: 328 }, types: ["Dragon", "Flying"] })
+  ];
+
+  const preview = makeSnapshot({
+    roomId: "battle-lead-preview-lean",
+    turn: 0,
+    phase: "preview",
+    yourSide: {
+      slot: "p1",
+      name: "You",
+      active: null,
+      team: [yourLeadA, yourLeadB, yourLeadC]
+    },
+    opponentSide: {
+      slot: "p2",
+      name: "Opponent",
+      active: null,
+      team: opponentPreview
+    },
+    legalActions: [],
+    recentLog: []
+  });
+
+  const recommendation = buildPlayerLeadRecommendation({
+    snapshot: preview,
+    opponentLeadPrediction: {
+      confidenceTier: "low",
+      topLeadSpecies: "Donphan",
+      topCandidates: [
+        { species: "Donphan", score: 54, reasons: ["one plausible lead among many"], riskFlags: [] },
+        { species: "Slowking", score: 51, reasons: ["another plausible lead"], riskFlags: [] },
+        { species: "Skarmory", score: 49, reasons: ["another plausible lead"], riskFlags: [] },
+        { species: "Mienshao", score: 47, reasons: ["another plausible lead"], riskFlags: [] }
+      ],
+      reasons: ["preview read is thin"],
+      riskFlags: ["multiple omitted leads remain plausible"]
+    }
+  });
+
+  assert.equal(recommendation?.confidenceTier, "low");
+  assert.match(recommendation?.summary ?? "", /Lean starter/i);
+});
+
+test("omitted preview leads still influence lead ordering under a thin opponent read", () => {
+  const hydreigon = makePokemon({
+    ident: "p1: Hydreigon-preview-order",
+    species: "Hydreigon",
+    displayName: "Hydreigon",
+    active: false,
+    revealed: true,
+    knownMoves: ["Flamethrower", "Dark Pulse"],
+    stats: { hp: 324, atk: 245, def: 216, spa: 349, spd: 216, spe: 324 },
+    types: ["Dark", "Dragon"]
+  });
+  const rotomWash = makePokemon({
+    ident: "p1: Rotom-Wash-preview-order",
+    species: "Rotom-Wash",
+    displayName: "Rotom-Wash",
+    active: false,
+    revealed: true,
+    knownMoves: ["Thunderbolt", "Hydro Pump"],
+    stats: { hp: 304, atk: 166, def: 250, spa: 339, spd: 250, spe: 298 },
+    types: ["Electric", "Water"]
+  });
+  const breloom = makePokemon({
+    ident: "p1: Breloom-preview-order",
+    species: "Breloom",
+    displayName: "Breloom",
+    active: false,
+    revealed: true,
+    knownMoves: ["Mach Punch", "Bullet Seed"],
+    stats: { hp: 261, atk: 359, def: 196, spa: 140, spd: 156, spe: 262 },
+    types: ["Grass", "Fighting"]
+  });
+
+  const preview = makeSnapshot({
+    roomId: "battle-lead-preview-ordering",
+    turn: 0,
+    phase: "preview",
+    yourSide: {
+      slot: "p1",
+      name: "You",
+      active: null,
+      team: [hydreigon, rotomWash, breloom]
+    },
+    opponentSide: {
+      slot: "p2",
+      name: "Opponent",
+      active: null,
+      team: [
+        makePokemon({ ident: "p2: Skarmory-preview-order", species: "Skarmory", displayName: "Skarmory", active: false, revealed: true, knownMoves: ["Brave Bird"], stats: { hp: 334, atk: 176, def: 416, spa: 136, spd: 176, spe: 176 }, types: ["Steel", "Flying"] }),
+        makePokemon({ ident: "p2: Forretress-preview-order", species: "Forretress", displayName: "Forretress", active: false, revealed: true, knownMoves: ["Gyro Ball"], stats: { hp: 354, atk: 216, def: 416, spa: 136, spd: 226, spe: 96 }, types: ["Bug", "Steel"] }),
+        makePokemon({ ident: "p2: Gastrodon-preview-order", species: "Gastrodon", displayName: "Gastrodon", active: false, revealed: true, knownMoves: ["Earth Power"], stats: { hp: 426, atk: 180, def: 240, spa: 283, spd: 224, spe: 136 }, types: ["Water", "Ground"] }),
+        makePokemon({ ident: "p2: Quagsire-preview-order", species: "Quagsire", displayName: "Quagsire", active: false, revealed: true, knownMoves: ["Earthquake"], stats: { hp: 394, atk: 206, def: 226, spa: 149, spd: 206, spe: 96 }, types: ["Water", "Ground"] }),
+        makePokemon({ ident: "p2: Primarina-preview-order", species: "Primarina", displayName: "Primarina", active: false, revealed: true, knownMoves: ["Moonblast"], stats: { hp: 364, atk: 168, def: 186, spa: 361, spd: 266, spe: 156 }, types: ["Water", "Fairy"] })
+      ]
+    },
+    legalActions: [],
+    recentLog: []
+  });
+
+  const predictedSubset = {
+    topLeadSpecies: "Skarmory",
+    topCandidates: [
+      { species: "Skarmory", score: 80, reasons: [], riskFlags: [] },
+      { species: "Forretress", score: 78, reasons: [], riskFlags: [] }
+    ],
+    reasons: [],
+    riskFlags: []
+  };
+
+  const highConfidence = buildPlayerLeadRecommendation({
+    snapshot: preview,
+    opponentLeadPrediction: {
+      confidenceTier: "high",
+      ...predictedSubset
+    }
+  });
+  const lowConfidence = buildPlayerLeadRecommendation({
+    snapshot: preview,
+    opponentLeadPrediction: {
+      confidenceTier: "low",
+      ...predictedSubset
+    }
+  });
+
+  const highHydreigonIndex = (highConfidence?.topCandidates ?? []).findIndex((candidate) => candidate.species === "Hydreigon");
+  const highBreloomIndex = (highConfidence?.topCandidates ?? []).findIndex((candidate) => candidate.species === "Breloom");
+  const lowHydreigonIndex = (lowConfidence?.topCandidates ?? []).findIndex((candidate) => candidate.species === "Hydreigon");
+  const lowBreloomIndex = (lowConfidence?.topCandidates ?? []).findIndex((candidate) => candidate.species === "Breloom");
+
+  assert.ok(highHydreigonIndex >= 0 && highBreloomIndex >= 0);
+  assert.ok(lowHydreigonIndex >= 0 && lowBreloomIndex >= 0);
+  assert.ok(highHydreigonIndex < highBreloomIndex);
+  assert.ok(lowBreloomIndex < lowHydreigonIndex);
+});
+
 test("prediction history records what the opponent actually did after a stored prediction", async () => {
   const yourToxapex = makePokemon({
     ident: "p1a: Toxapex-history",
@@ -4828,6 +5086,26 @@ test("reply-aware opponent search expands beyond three replies when the extra br
   assert.equal(replies[3]?.candidate.switchTargetSpecies, "Dragonite");
 });
 
+test("reply-aware opponent search includes dedicated switch targets even when topActions omits them", () => {
+  const replies = weightedOpponentReplies({
+    topActionClass: "stay_attack",
+    confidenceTier: "medium",
+    reasons: [],
+    riskFlags: [],
+    topActions: [
+      { type: "known_move", actionClass: "stay_attack", label: "Attack A", moveName: "Thunderbolt", score: 100, reasons: [], riskFlags: [] },
+      { type: "known_move", actionClass: "stay_attack", label: "Attack B", moveName: "Volt Switch", score: 94, reasons: [], riskFlags: [] },
+      { type: "known_status_or_setup", actionClass: "status_or_setup", label: "Calm Mind", moveName: "Calm Mind", score: 90, reasons: [], riskFlags: [] },
+      { type: "known_move", actionClass: "stay_attack", label: "Attack C", moveName: "Shadow Ball", score: 88, reasons: [], riskFlags: [] }
+    ],
+    topSwitchTargets: [
+      { type: "likely_switch", actionClass: "switch", label: "Switch Dragonite", switchTargetSpecies: "Dragonite", source: "revealed_switch", score: 86, reasons: [], riskFlags: [] }
+    ]
+  });
+
+  assert.ok(replies.some((reply) => reply.candidate.switchTargetSpecies === "Dragonite"));
+});
+
 test("reply-aware search now respects a weighted fourth opponent branch", () => {
   const yourGreatTusk = makePokemon({
     ident: "p1a: Great Tusk-fourth-reply",
@@ -5136,6 +5414,13 @@ test("speed preview keeps Choice Scarf as a separate item range and invalidates 
   const invalidatedSnapshot = {
     ...currentSnapshot,
     roomId: "battle-speed-item-invalidated",
+    recentLog: [
+      "Arcanine-Hisui entered the field.",
+      "Turn 5 started.",
+      "Arcanine-Hisui used Flare Blitz.",
+      "Turn 6 started.",
+      "Arcanine-Hisui used Head Smash."
+    ],
     opponentSide: {
       ...currentSnapshot.opponentSide,
       active: makePokemon({ ...arcanineHisui, knownMoves: ["Flare Blitz", "Head Smash"] }),
@@ -5149,7 +5434,17 @@ test("speed preview keeps Choice Scarf as a separate item range and invalidates 
 });
 
 test("live likely-item filtering drops stale choice assumptions after reveals, removal, or multiple distinct moves", () => {
-  const choiceLocked = makePokemon({
+  const noStintEvidence = makePokemon({
+    species: "Hydreigon",
+    displayName: "Hydreigon",
+    knownMoves: ["Dark Pulse", "Roost"]
+  });
+  const sameStintChoiceLocked = makePokemon({
+    species: "Hydreigon",
+    displayName: "Hydreigon",
+    knownMoves: ["Dark Pulse", "Roost"]
+  });
+  const crossStintReveal = makePokemon({
     species: "Hydreigon",
     displayName: "Hydreigon",
     knownMoves: ["Dark Pulse", "Roost"]
@@ -5168,8 +5463,33 @@ test("live likely-item filtering drops stale choice assumptions after reveals, r
   });
 
   assert.deepEqual(
-    filterLiveLikelyHeldItemNames("[Gen 9] UU", choiceLocked, ["Choice Specs", "Leftovers"]),
+    filterLiveLikelyHeldItemNames("[Gen 9] UU", noStintEvidence, ["Choice Specs", "Leftovers"]),
+    ["Choice Specs", "Leftovers"]
+  );
+  assert.deepEqual(
+    filterLiveLikelyHeldItemNames("[Gen 9] UU", sameStintChoiceLocked, ["Choice Specs", "Leftovers"], {
+      recentLog: [
+        "Hydreigon entered the field.",
+        "Turn 7 started.",
+        "Hydreigon used Dark Pulse.",
+        "Turn 8 started.",
+        "Hydreigon used Roost."
+      ]
+    }),
     ["Leftovers"]
+  );
+  assert.deepEqual(
+    filterLiveLikelyHeldItemNames("[Gen 9] UU", crossStintReveal, ["Choice Specs", "Leftovers"], {
+      recentLog: [
+        "Hydreigon entered the field.",
+        "Turn 5 started.",
+        "Hydreigon used Dark Pulse.",
+        "Hydreigon entered the field.",
+        "Turn 8 started.",
+        "Hydreigon used Roost."
+      ]
+    }),
+    ["Choice Specs", "Leftovers"]
   );
   assert.deepEqual(
     filterLiveLikelyHeldItemNames("[Gen 9] UU", removedItem, ["Choice Specs", "Leftovers"]),
@@ -5180,10 +5500,18 @@ test("live likely-item filtering drops stale choice assumptions after reveals, r
     []
   );
   assert.deepEqual(
-    filterLiveLikelyHeldItemEntries("[Gen 9] UU", choiceLocked, [
+    filterLiveLikelyHeldItemEntries("[Gen 9] UU", sameStintChoiceLocked, [
       { name: "Choice Specs", count: 8, share: 0.6, sampleCount: 10, confidenceTier: "strong" },
       { name: "Leftovers", count: 2, share: 0.2, sampleCount: 10, confidenceTier: "usable" }
-    ]).map((entry) => entry.name),
+    ], {
+      recentLog: [
+        "Hydreigon entered the field.",
+        "Turn 7 started.",
+        "Hydreigon used Dark Pulse.",
+        "Turn 8 started.",
+        "Hydreigon used Roost."
+      ]
+    }).map((entry) => entry.name),
     ["Leftovers"]
   );
 });

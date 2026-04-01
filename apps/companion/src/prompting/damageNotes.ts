@@ -360,12 +360,19 @@ function moveTypeImmunityAbilityOutcome(moveType: string | undefined, defenderAb
   return null;
 }
 
-function moveTypeImmunityItemOutcome(moveType: string | undefined, defenderItem: string | null | undefined): StatusOutcome | null {
-  const itemId = normalizeName(defenderItem);
-  const moveTypeId = normalizeName(moveType);
-  if (!itemId || !moveTypeId) return null;
+function airBalloonBlocksMove(move: ReturnType<typeof lookupMoveData>) {
+  if (!move) return false;
+  return normalizeName(move.type) === "ground" && normalizeName(move.name) !== "thousandarrows";
+}
 
-  if (itemId === "airballoon" && moveTypeId === "ground") {
+function moveTypeImmunityItemOutcome(
+  move: ReturnType<typeof lookupMoveData>,
+  defenderItem: string | null | undefined
+): StatusOutcome | null {
+  const itemId = normalizeName(defenderItem);
+  if (!itemId || !move) return null;
+
+  if (itemId === "airballoon" && airBalloonBlocksMove(move)) {
     return { label: "immune", outcome: "immune", detail: "Air Balloon blocks Ground-type moves until it is removed." };
   }
   return null;
@@ -548,7 +555,7 @@ function buildPossibleAbilityInteractionHints(params: {
   if (likelyAbilities.length === 0 && likelyItems.length === 0) return [];
   const hints: InteractionHint[] = [];
 
-  if (!params.defenderMon.ability && likelyAbilities.length > 0) {
+  if (!attackerIgnoresDefenderAbility(params.attackerMon) && !params.defenderMon.ability && likelyAbilities.length > 0) {
     const byNormalized = new Map(likelyAbilities.map((ability) => [normalizeName(ability), ability]));
     const moveTypeCandidates = move.type ? (MOVE_TYPE_IMMUNITY_ABILITY_LABELS[normalizeName(move.type)] ?? []) : [];
     for (const candidate of moveTypeCandidates) {
@@ -608,7 +615,9 @@ function buildPossibleAbilityInteractionHints(params: {
 
   if (!params.defenderMon.item && !params.defenderMon.removedItem && likelyItems.length > 0) {
     const byNormalized = new Map(likelyItems.map((item) => [normalizeName(item), item]));
-    const moveTypeCandidates = move.type ? (MOVE_TYPE_IMMUNITY_ITEM_LABELS[normalizeName(move.type)] ?? []) : [];
+    const moveTypeCandidates = airBalloonBlocksMove(move)
+      ? (move.type ? (MOVE_TYPE_IMMUNITY_ITEM_LABELS[normalizeName(move.type)] ?? []) : [])
+      : [];
     for (const candidate of moveTypeCandidates) {
       const label = byNormalized.get(normalizeName(candidate));
       if (!label) continue;
@@ -735,7 +744,7 @@ function buildDamagingImmunityBand(params: {
   const typeOutcome = targetedTypeImmunityOutcome(gen, move, defenderTypes);
   if (typeOutcome) return makeDamagingImmunityBand(typeOutcome);
 
-  const itemOutcome = moveTypeImmunityItemOutcome(move.type, resolvedItem);
+  const itemOutcome = moveTypeImmunityItemOutcome(move, resolvedItem);
   if (itemOutcome) return makeDamagingImmunityBand(itemOutcome);
 
   return null;
@@ -1015,7 +1024,9 @@ export function buildDamagePreview(snapshot: BattleSnapshot, options: DamageOpti
   const genNum = generationFromFormat(snapshot.format);
   const defenderPosterior = options.defenderPosterior;
   const usePosterior = posteriorConfidenceUsable(defenderPosterior);
-  const liveLikelyDefenderItems = filterLiveLikelyHeldItemNames(snapshot.format, opponentActive, options.likelyDefenderItems);
+  const liveLikelyDefenderItems = filterLiveLikelyHeldItemNames(snapshot.format, opponentActive, options.likelyDefenderItems, {
+    recentLog: snapshot.recentLog
+  });
   return snapshot.legalActions
     .filter((action) => action.kind === "move" && action.moveName)
     .map((action) => {
@@ -1034,7 +1045,8 @@ export function buildDamagePreview(snapshot: BattleSnapshot, options: DamageOpti
       const resolvedLikelyDefenderItems = filterLiveLikelyHeldItemNames(
         snapshot.format,
         opponentActive,
-        posteriorItems.length > 0 ? posteriorItems : liveLikelyDefenderItems
+        posteriorItems.length > 0 ? posteriorItems : liveLikelyDefenderItems,
+        { recentLog: snapshot.recentLog }
       );
       const survivalCaveats = buildSurvivalCaveats(opponentActive, {
         likelyItems: resolvedLikelyDefenderItems,
@@ -1090,7 +1102,9 @@ export function buildThreatPreview(
   const genNum = generationFromFormat(snapshot.format);
   const attackerPosterior = options.attackerPosterior;
   const usePosterior = posteriorConfidenceUsable(attackerPosterior);
-  const liveLikelyDefenderItems = filterLiveLikelyHeldItemNames(snapshot.format, yourActive, options.likelyDefenderItems);
+  const liveLikelyDefenderItems = filterLiveLikelyHeldItemNames(snapshot.format, yourActive, options.likelyDefenderItems, {
+    recentLog: snapshot.recentLog
+  });
 
   return options.moveCandidates
     .map((candidate) => {
@@ -1158,7 +1172,9 @@ export function buildThreatPreview(
             attackerMon: opponentActive,
             defenderMon: pokemon,
             moveName: candidate.name,
-            likelyDefenderItems: filterLiveLikelyHeldItemNames(snapshot.format, pokemon, options.likelyDefenderItems),
+            likelyDefenderItems: filterLiveLikelyHeldItemNames(snapshot.format, pokemon, options.likelyDefenderItems, {
+              recentLog: snapshot.recentLog
+            }),
             likelyDefenderAbilities: options.likelyDefenderAbilities
           });
           const narrowed = usePosterior

@@ -348,7 +348,17 @@ function scoreComponentsForOutput(components: ActionScoreComponent[]) {
 }
 
 export function weightedOpponentReplies(prediction: OpponentActionPrediction | undefined) {
-  const actions = prediction?.topActions ?? [];
+  const combined = [
+    ...(prediction?.topActions ?? []),
+    ...(prediction?.topSwitchTargets ?? [])
+  ];
+  const seen = new Set<string>();
+  const actions = combined.filter((candidate) => {
+    const key = `${candidate?.actionClass ?? "unknown"}|${candidate?.moveName ?? ""}|${candidate?.switchTargetSpecies ?? ""}|${candidate?.label ?? ""}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
   if (actions.length === 0) return [] as Array<{ candidate: OpponentActionPrediction["topActions"][number]; weight: number }>;
 
   const weighted = actions.map((candidate, index) => ({

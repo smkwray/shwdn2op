@@ -31,6 +31,7 @@ export const DEFAULT_SETTINGS = {
   compareGeminiModel: "gemini-2.5-flash",
   autoAnalyzeOnRequest: false,
   autoDownloadReplay: true,
+  panelLayout: "classic",
   showOverlay: true,
   showAskFriendCard: true,
   showMoveSuggestions: true,
