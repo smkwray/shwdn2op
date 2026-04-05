@@ -4,7 +4,17 @@ import path from "node:path";
 import type { ReplayPolicyCandidateFeature, ReplayPolicyExample } from "../apps/companion/src/ml/replayPolicyExample.js";
 import { DEFAULT_REPLAY_OUTPUT, readJsonl } from "./replay-common.js";
 
-type BucketName = "search_width" | "hidden_switch" | "preserve_sack" | "setup_hazard" | "other";
+type BucketName =
+  | "search_width"
+  | "hidden_switch"
+  | "preserve_sack"
+  | "setup_hazard"
+  | "wrong_item"
+  | "wrong_ability"
+  | "wrong_speed"
+  | "wrong_damage"
+  | "wrong_switch_target"
+  | "other";
 type RecurringPatternSummary = {
   signature: string;
   missCount: number;
@@ -16,6 +26,11 @@ type RecurringPatternSummary = {
   sampleReplayFiles: string[];
 };
 type BucketReadinessStatus = "broad_repeated_signal" | "mixed_signal_collect_more" | "thin_signal_do_not_tune";
+
+const ALL_BUCKET_NAMES: BucketName[] = [
+  "wrong_item", "wrong_ability", "wrong_speed", "wrong_damage", "wrong_switch_target",
+  "search_width", "hidden_switch", "preserve_sack", "setup_hazard", "other"
+];
 
 const SETUP_OR_HAZARD_MOVES = new Set([
   "agility",
@@ -74,6 +89,18 @@ function replayPatternSignature(example: ReplayPolicyExample, topCandidate: Repl
 
 function priorityScore(bucket: BucketName) {
   switch (bucket) {
+    // Mechanics buckets are highest priority — they point at deterministic layer errors
+    case "wrong_item":
+      return 8;
+    case "wrong_ability":
+      return 8;
+    case "wrong_speed":
+      return 7;
+    case "wrong_damage":
+      return 7;
+    case "wrong_switch_target":
+      return 6;
+    // Strategic buckets
     case "setup_hazard":
       return 5;
     case "preserve_sack":
@@ -121,6 +148,93 @@ function bucketForMiss(params: {
   const searchDelta = Math.abs(searchScore(topCandidate) - searchScore(labelCandidate));
 
   const candidates: Array<{ bucket: BucketName; reason: string }> = [];
+  const opponentActive = example.snapshot.opponentSide.active;
+  const allRiskFlags = [...(topCandidate?.riskFlags ?? []), ...(labelCandidate?.riskFlags ?? [])];
+  const allReasons = [...(topCandidate?.reasons ?? []), ...(labelCandidate?.reasons ?? [])];
+  const allText = [...allRiskFlags, ...allReasons].join(" ").toLowerCase();
+
+  // ---- Mechanics-specific buckets (P3) ----
+
+  // wrong_item: opponent item was revealed/removed and risk flags or reasons mention item
+  // interactions, or the label vs top diverge on an item-sensitive choice
+  if (
+    (opponentActive?.item || opponentActive?.removedItem)
+    && (
+      allText.includes("item") || allText.includes("choice") || allText.includes("scarf")
+      || allText.includes("boots") || allText.includes("orb") || allText.includes("balloon")
+      || allText.includes("sash") || allText.includes("vest")
+    )
+  ) {
+    candidates.push({
+      bucket: "wrong_item",
+      reason: `Opponent item ${opponentActive.item ?? opponentActive.removedItem} was revealed and item-related reasoning appeared in candidate text.`
+    });
+  }
+
+  // wrong_ability: opponent ability was revealed and risk flags mention ability interactions
+  if (
+    opponentActive?.ability
+    && (
+      allText.includes("ability") || allText.includes("immune") || allText.includes("absorb")
+      || allText.includes("levitate") || allText.includes("flash fire") || allText.includes("intimidate")
+      || allText.includes("mold breaker") || allText.includes("regenerator")
+    )
+  ) {
+    candidates.push({
+      bucket: "wrong_ability",
+      reason: `Opponent ability ${opponentActive.ability} was revealed and ability-related reasoning appeared in candidate text.`
+    });
+  }
+
+  // wrong_speed: speed relation in deterministic data appears to have been wrong
+  // Evidence: risk flags mention speed overlap, or the deterministic speedPreview
+  // relation disagrees with what the move order implies (if label went first but
+  // speed said slower, or vice versa)
+  {
+    const speedRelation = example.deterministic?.speedPreview?.activeRelation;
+    const speedMentioned = allText.includes("speed") || allText.includes("outspeed")
+      || allText.includes("faster") || allText.includes("slower") || allText.includes("priority");
+    const speedOverlap = speedRelation === "overlap" || speedRelation === "unknown";
+    if (speedMentioned && (speedOverlap || allRiskFlags.some((f) => /speed.*overlap/i.test(f)))) {
+      candidates.push({
+        bucket: "wrong_speed",
+        reason: `Speed was ${speedRelation ?? "unknown"} and speed-related reasoning appeared in candidate text.`
+      });
+    }
+  }
+
+  // wrong_damage: tactical score component differed significantly between label
+  // and top candidate, suggesting damage estimate was off
+  {
+    const topTactical = topCandidate?.scoreBreakdown?.find((e) => e.key === "tactical")?.value ?? 0;
+    const labelTactical = labelCandidate?.scoreBreakdown?.find((e) => e.key === "tactical")?.value ?? 0;
+    const tacticalDelta = Math.abs(topTactical - labelTactical);
+    const bothMoves = topCandidate?.kind === "move" && example.label.kind === "move";
+    if (bothMoves && tacticalDelta >= 15) {
+      candidates.push({
+        bucket: "wrong_damage",
+        reason: `Large tactical score gap (${tacticalDelta.toFixed(1)}) between top move and label move suggests damage assumptions differed.`
+      });
+    }
+  }
+
+  // wrong_switch_target: label was a switch and top was also a switch but to a
+  // different target, or label was a switch but top was a move (and the target
+  // appears in risk flags as penalized)
+  if (
+    example.label.kind === "switch"
+    && topCandidate?.kind === "switch"
+    && example.label.switchTargetSpecies
+    && topCandidate.switchTargetSpecies
+    && normalizeName(example.label.switchTargetSpecies) !== normalizeName(topCandidate.switchTargetSpecies)
+  ) {
+    candidates.push({
+      bucket: "wrong_switch_target",
+      reason: `Both label and top are switches but to different targets: label=${example.label.switchTargetSpecies}, top=${topCandidate.switchTargetSpecies}.`
+    });
+  }
+
+  // ---- Strategic buckets (existing) ----
 
   if (SETUP_OR_HAZARD_MOVES.has(labelMove) || SETUP_OR_HAZARD_MOVES.has(topMove)) {
     candidates.push({
@@ -254,7 +368,7 @@ async function main() {
     }));
 
   const bucketDiversity = Object.fromEntries(
-    (["search_width", "hidden_switch", "preserve_sack", "setup_hazard", "other"] as BucketName[]).map((bucket) => {
+    ALL_BUCKET_NAMES.map((bucket) => {
       const entries = byBucket.get(bucket) ?? [];
       const replayCounts = new Map<string, number>();
       for (const entry of entries) {
@@ -272,7 +386,7 @@ async function main() {
   );
 
   const recurringPatternsByBucket = Object.fromEntries(
-    (["search_width", "hidden_switch", "preserve_sack", "setup_hazard", "other"] as BucketName[]).map((bucket) => {
+    ALL_BUCKET_NAMES.map((bucket) => {
       const entries = byBucket.get(bucket) ?? [];
       const byPattern = new Map<string, {
         signature: string;
@@ -315,7 +429,7 @@ async function main() {
   ) as Record<BucketName, RecurringPatternSummary[]>;
 
   const stablePatternsByBucket = Object.fromEntries(
-    (["search_width", "hidden_switch", "preserve_sack", "setup_hazard", "other"] as BucketName[]).map((bucket) => [
+    ALL_BUCKET_NAMES.map((bucket) => [
       bucket,
       recurringPatternsByBucket[bucket]
         .filter((entry) => entry.distinctReplayCount >= 2)
@@ -324,9 +438,9 @@ async function main() {
   ) as Record<BucketName, RecurringPatternSummary[]>;
 
   const tuningReadinessByBucket = Object.fromEntries(
-    (["search_width", "hidden_switch", "preserve_sack", "setup_hazard", "other"] as BucketName[]).map((bucket) => {
-      const diversity = bucketDiversity[bucket];
-      const stablePatterns = stablePatternsByBucket[bucket];
+    ALL_BUCKET_NAMES.map((bucket) => {
+      const diversity = bucketDiversity[bucket] ?? { missCount: 0, distinctReplayCount: 0, topReplayCount: 0, topReplayShare: 0 };
+      const stablePatterns = stablePatternsByBucket[bucket] ?? [];
       const crossReplayMissCount = stablePatterns.reduce((sum, entry) => sum + entry.missCount, 0);
       const crossReplayCoverageShare = diversity.missCount > 0
         ? Number((crossReplayMissCount / diversity.missCount).toFixed(3))
@@ -387,7 +501,7 @@ async function main() {
     },
     missCount: bucketed.length,
     bucketCounts: Object.fromEntries(
-      (["search_width", "hidden_switch", "preserve_sack", "setup_hazard", "other"] as BucketName[]).map((bucket) => [
+      ALL_BUCKET_NAMES.map((bucket) => [
         bucket,
         byBucket.get(bucket)?.length ?? 0
       ])
@@ -397,7 +511,7 @@ async function main() {
     recurringPatternsByBucket,
     stablePatternsByBucket,
     topExamplesByBucket: Object.fromEntries(
-      (["search_width", "hidden_switch", "preserve_sack", "setup_hazard", "other"] as BucketName[]).map((bucket) => [
+      ALL_BUCKET_NAMES.map((bucket) => [
         bucket,
         [...(byBucket.get(bucket) ?? [])]
           .sort((a, b) => (a.rank ?? 99) - (b.rank ?? 99) || (b.scoreGap ?? 0) - (a.scoreGap ?? 0))
@@ -407,6 +521,7 @@ async function main() {
     notes: [
       "Buckets are heuristic and intended for deterministic tuning triage, not for formal labeling.",
       "A miss can carry multiple tags; `primaryBucket` is the highest-priority heuristic match.",
+      "Mechanics buckets (wrong_item, wrong_ability, wrong_speed, wrong_damage, wrong_switch_target) are prioritized over strategic buckets because they point at deterministic layer errors.",
       "Prefer tuning only when a miss pattern repeats across multiple replay files, not from raw single-battle counts.",
       "Use `tuningReadinessByBucket` and `stablePatternsByBucket` before changing weights; high raw miss count alone is not enough.",
       "If a bucket remains `mixed_signal_collect_more` or `thin_signal_do_not_tune`, bias toward collecting more replay history instead of forcing a heuristic change."

@@ -21,6 +21,7 @@ import {
 } from "./externalCuratedStore.js";
 import type {
   BattleSnapshot,
+  InferenceEvent,
   LikelihoodEntry,
   LocalIntelSnapshot,
   OpponentIntelEntry,
@@ -30,6 +31,14 @@ import type {
   SwitchSpeedMatchup
 } from "../types.js";
 import { filterLiveLikelyHeldItemEntries, filterLiveLikelyHeldItemNames } from "../mechanics/liveLikelyItems.js";
+import { parseInferenceEvents } from "../mechanics/inferenceEvents.js";
+import {
+  FIELD_SPEED_ABILITY_RULES,
+  speedStageMultiplier,
+  paralysisSpeedMultiplier,
+  matchingFieldSpeedAbilityRule,
+  type FieldSpeedAbilityRule
+} from "../mechanics/speed.js";
 import { buildDamagePreview, buildThreatPreview } from "../prompting/damageNotes.js";
 import { buildOpponentActionPrediction } from "../prediction/opponentActionPredictor.js";
 import { buildOpponentLeadPrediction } from "../prediction/opponentLeadPredictor.js";
@@ -135,21 +144,6 @@ const gens = new Generations(Dex as any);
 const MIN_HISTORY_SPEED_BOUND_SAMPLES = 2;
 const CURATED_PRIOR_CONFIDENCE_WEIGHT = 0.35;
 const LEARNSET_FALLBACK_CACHE = new Map<string, Promise<string[]>>();
-type FieldSpeedAbilityRule = {
-  abilityId: string;
-  label: string;
-  multiplier: number;
-  weather?: RegExp | undefined;
-  terrain?: RegExp | undefined;
-};
-
-const FIELD_SPEED_ABILITY_RULES: readonly FieldSpeedAbilityRule[] = [
-  { abilityId: "chlorophyll", label: "Chlorophyll", multiplier: 2, weather: /sun/i },
-  { abilityId: "sandrush", label: "Sand Rush", multiplier: 2, weather: /sand/i },
-  { abilityId: "slushrush", label: "Slush Rush", multiplier: 2, weather: /snow|hail/i },
-  { abilityId: "swiftswim", label: "Swift Swim", multiplier: 2, weather: /rain/i },
-  { abilityId: "surgesurfer", label: "Surge Surfer", multiplier: 2, terrain: /electric/i }
-] as const;
 const LOW_SIGNAL_FALLBACK_MOVE_IDS = new Set([
   "attract",
   "celebrate",
@@ -207,13 +201,14 @@ function liveLikelyHeldItems(
   format: string,
   pokemon: PokemonSnapshot | null | undefined,
   likelyItems: LikelihoodEntry[] | undefined,
-  recentLog?: string[] | undefined
+  recentLog?: string[] | undefined,
+  inferenceEvents?: InferenceEvent[] | undefined
 ) {
   return filterLiveLikelyHeldItemNames(
     format,
     pokemon,
     likelyItems?.map((entry) => entry.name) ?? [],
-    { recentLog }
+    { recentLog, inferenceEvents }
   );
 }
 
@@ -255,21 +250,6 @@ function lookupSpecies(gen: ReturnType<Generations["get"]>, speciesName: string 
     if (normalizeName(species.name) === normalized) return species;
   }
   return undefined;
-}
-
-function matchingFieldSpeedAbilityRule(
-  abilityId: string | null | undefined,
-  field: BattleSnapshot["field"]
-) {
-  const normalized = normalizedAbilityId(abilityId);
-  if (!normalized) return null;
-  const weather = String(field.weather ?? "");
-  const terrain = String(field.terrain ?? "");
-  return FIELD_SPEED_ABILITY_RULES.find((rule) =>
-    rule.abilityId === normalized
-    && (!rule.weather || rule.weather.test(weather))
-    && (!rule.terrain || rule.terrain.test(terrain))
-  ) ?? null;
 }
 
 function possibleFieldSpeedAbilityRules(
@@ -1534,18 +1514,6 @@ function narrowRangeWithCurrentObservation(
   };
 }
 
-function speedStageMultiplier(stage: number) {
-  if (!Number.isFinite(stage)) return 1;
-  stage = Math.max(-6, Math.min(6, Number(stage)));
-  if (stage === 0) return 1;
-  if (stage > 0) return (2 + stage) / 2;
-  return 2 / (2 + Math.abs(stage));
-}
-
-function paralysisSpeedMultiplier(format: string) {
-  return generationFromFormat(format) >= 7 ? 0.5 : 0.25;
-}
-
 function effectiveSpeedRangeForPokemon(
   format: string,
   range: { min: number; max: number } | null,
@@ -1558,7 +1526,7 @@ function effectiveSpeedRangeForPokemon(
   const itemId = normalizedItemId(pokemon.item);
   const abilityId = normalizedAbilityId(pokemon.ability);
   if (pokemon.status === "par" && abilityId !== "quickfeet") {
-    multiplier *= paralysisSpeedMultiplier(format);
+    multiplier *= paralysisSpeedMultiplier(generationFromFormat(format));
   }
   if (pokemon.status && abilityId === "quickfeet") {
     multiplier *= 1.5;
@@ -2065,11 +2033,16 @@ export async function buildLocalIntelSnapshot(snapshot: BattleSnapshot): Promise
     mergedOpponents.set(speciesKey, merged);
   }
 
+  const allInferenceEvents = parseInferenceEvents(snapshot);
+
   const opponents: OpponentIntelEntry[] = await Promise.all([...mergedOpponents.entries()].map(async ([speciesKey, merged]) => {
     const speciesRecord = store.species[speciesKey];
     const formatRecord = normalizeFormatRecord(speciesRecord?.formats?.[snapshot.format]);
     const curatedFormatRecord = externalCuratedFormatRecord(store, speciesKey, snapshot.format);
     const confidenceSamples = effectivePriorConfidenceSamples(formatRecord.battlesSeen, curatedFormatRecord.teamCount);
+    const speciesInferenceEvents = allInferenceEvents.filter(
+      (e) => e.side === "opponent" && normalizeName(e.species) === speciesKey
+    );
     const revealedMoves = [...merged.revealedMoves];
     const likelyItems = filterLiveLikelyHeldItemEntries(
       snapshot.format,
@@ -2081,7 +2054,7 @@ export async function buildLocalIntelSnapshot(snapshot: BattleSnapshot): Promise
         curatedSamples: curatedFormatRecord.teamCount,
         exclude: merged.revealedItem ? [merged.revealedItem] : []
       }),
-      { recentLog: snapshot.recentLog }
+      { recentLog: snapshot.recentLog, inferenceEvents: speciesInferenceEvents }
     );
     const likelyAbilities = summarizeEntries(
       {
@@ -2115,7 +2088,8 @@ export async function buildLocalIntelSnapshot(snapshot: BattleSnapshot): Promise
         incomingDamage: battleSpecies.incomingDamage,
         outgoingDamage: battleSpecies.outgoingDamage,
         speedObservations: battleSpecies.speedObservations
-      }
+      },
+      inferenceEvents: speciesInferenceEvents
     });
     const likelyMovesFromHistory = revealedMoves.length >= 4
       ? []
@@ -2190,6 +2164,9 @@ export async function buildLocalIntelSnapshot(snapshot: BattleSnapshot): Promise
   const activeSpeciesKey = normalizeName(activeOpponentSpecies);
   const activeSpeciesRecord = activeSpeciesKey ? store.species[activeSpeciesKey] : undefined;
   const activeFormatRecord = normalizeFormatRecord(activeSpeciesRecord?.formats?.[snapshot.format]);
+  const activeOpponentInferenceEvents = allInferenceEvents.filter(
+    (e) => e.side === "opponent" && normalizeName(e.species) === activeSpeciesKey
+  );
   const activeFieldContext = fieldDamageContextKey(snapshot);
   const allowThreatAggregate = allowAggregateObservedRange(snapshot, snapshot.opponentSide.active, snapshot.yourSide.active);
   const allowPlayerAggregate = allowAggregateObservedRange(snapshot, snapshot.yourSide.active, snapshot.opponentSide.active);
@@ -2228,7 +2205,7 @@ export async function buildLocalIntelSnapshot(snapshot: BattleSnapshot): Promise
   const threatMoves = pickThreatMoves(activeOpponentEntry);
   const opponentThreatPreview = buildThreatPreview(snapshot, {
     moveCandidates: threatMoves,
-    likelyAttackerItems: liveLikelyHeldItems(snapshot.format, snapshot.opponentSide.active, activeOpponentEntry?.likelyItems, snapshot.recentLog),
+    likelyAttackerItems: liveLikelyHeldItems(snapshot.format, snapshot.opponentSide.active, activeOpponentEntry?.likelyItems, snapshot.recentLog, activeOpponentInferenceEvents),
     likelyAttackerAbilities: activeOpponentEntry?.likelyAbilities.map((entry) => entry.name) ?? [],
     attackerPosterior: activeOpponentEntry?.posterior,
     observedThreats: opponentObservedThreats,
@@ -2253,7 +2230,7 @@ export async function buildLocalIntelSnapshot(snapshot: BattleSnapshot): Promise
     }))
   }));
   const playerDamagePreview = buildDamagePreview(snapshot, {
-    likelyDefenderItems: liveLikelyHeldItems(snapshot.format, snapshot.opponentSide.active, activeOpponentEntry?.likelyItems, snapshot.recentLog),
+    likelyDefenderItems: liveLikelyHeldItems(snapshot.format, snapshot.opponentSide.active, activeOpponentEntry?.likelyItems, snapshot.recentLog, activeOpponentInferenceEvents),
     likelyDefenderAbilities: activeOpponentEntry?.likelyAbilities.map((entry) => entry.name) ?? [],
     defenderPosterior: activeOpponentEntry?.posterior,
     observedPlayerDamage: playerObservedDamage,

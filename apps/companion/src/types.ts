@@ -118,7 +118,7 @@ export interface InteractionHint {
   certainty: "known" | "possible";
 }
 
-export type PosteriorEvidenceKind = "priors" | "reveals" | "moves" | "speed" | "damage";
+export type PosteriorEvidenceKind = "priors" | "reveals" | "moves" | "speed" | "damage" | "inference";
 
 export interface PosteriorEvidence {
   kind: PosteriorEvidenceKind;
@@ -161,6 +161,123 @@ export interface OpponentPosteriorPreview {
   evidenceKinds: PosteriorEvidenceKind[];
   evidence: PosteriorEvidence[];
   usedFallback: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Inference events — observable battle phenomena that imply item/ability/stat
+// identity.  Emitted by the P2 event-driven evidence parser from recentLog.
+// Consumers: posterior (evidence weights), liveLikelyItems (filtering),
+// damage notes (interaction hints), intel store (per-species evidence).
+// ---------------------------------------------------------------------------
+
+export type InferenceEventSide = "opponent" | "player";
+
+interface InferenceEventBase {
+  side: InferenceEventSide;
+  /** Species name (display form, e.g. "Great Tusk"). */
+  species: string;
+  /** Turn the event was observed on. */
+  turn: number;
+}
+
+/** Mon took no entry-hazard damage despite hazards being active. */
+export interface HazardImmunityEvent extends InferenceEventBase {
+  kind: "hazard_immunity";
+  /** Which hazards were up (e.g. ["Stealth Rock", "Spikes"]). */
+  hazards: string[];
+}
+
+/** Mon healed a small amount at end of turn (not from a move). */
+export interface ResidualHealEvent extends InferenceEventBase {
+  kind: "residual_heal";
+  healPercent: number;
+  /** Source tag if identifiable from log text (e.g. "Leftovers"). */
+  source?: string | undefined;
+}
+
+/** Mon took self-damage after using an attacking move (~10% → Life Orb). */
+export interface AttackRecoilEvent extends InferenceEventBase {
+  kind: "attack_recoil";
+  recoilPercent: number;
+  moveName?: string | undefined;
+}
+
+/** Mon gained a status at end of turn from its own item (Flame/Toxic Orb). */
+export interface SelfInflictedStatusEvent extends InferenceEventBase {
+  kind: "self_inflicted_status";
+  status: string;
+}
+
+/** Attacker took contact-recoil damage from this mon (Rocky Helmet / Rough Skin / Iron Barbs). */
+export interface ContactRecoilEvent extends InferenceEventBase {
+  kind: "contact_recoil";
+  attackerSpecies: string;
+  recoilPercent: number;
+  /** Source tag if identifiable (e.g. "Rocky Helmet", "Rough Skin"). */
+  source?: string | undefined;
+}
+
+/** An item was consumed, destroyed, or popped (Air Balloon, Focus Sash, etc.). */
+export interface ItemConsumedEvent extends InferenceEventBase {
+  kind: "item_consumed";
+  itemName: string;
+  /** How it was consumed (e.g. "activated", "knocked_off", "popped", "used"). */
+  trigger?: string | undefined;
+}
+
+/** An ability was explicitly activated or revealed through a game mechanic. */
+export interface AbilityRevealEvent extends InferenceEventBase {
+  kind: "ability_reveal";
+  abilityName: string;
+  /** What triggered the reveal (e.g. "on_entry", "on_contact", "on_switch_out"). */
+  trigger?: string | undefined;
+}
+
+/** Mon healed when switching out (~33% → Regenerator). */
+export interface SwitchHealEvent extends InferenceEventBase {
+  kind: "switch_heal";
+  healPercent: number;
+}
+
+/** Mon was forced to switch after being hit (Eject Button / Eject Pack). */
+export interface ForcedSwitchEvent extends InferenceEventBase {
+  kind: "forced_switch";
+  itemName?: string | undefined;
+}
+
+export type InferenceEvent =
+  | HazardImmunityEvent
+  | ResidualHealEvent
+  | AttackRecoilEvent
+  | SelfInflictedStatusEvent
+  | ContactRecoilEvent
+  | ItemConsumedEvent
+  | AbilityRevealEvent
+  | SwitchHealEvent
+  | ForcedSwitchEvent;
+
+export type InferenceEventKind = InferenceEvent["kind"];
+
+// ---------------------------------------------------------------------------
+// Per-mon mechanics state — accumulated by the P2 evidence parser during a
+// battle.  Not persisted across sessions; rebuilt from log on each snapshot.
+// ---------------------------------------------------------------------------
+
+export interface MechanicsState {
+  species: string;
+  side: InferenceEventSide;
+  /** Whether this mon is currently on the field. */
+  active: boolean;
+  /** Turn the mon most recently entered the field (null if never seen active). */
+  entryTurn: number | null;
+  /** HP percent at the start of the current turn (for residual-change detection). */
+  hpPercentAtTurnStart: number | null;
+  /** Items confirmed consumed or removed this battle. */
+  consumedItems: string[];
+  /** Ability confirmed via explicit activation this battle. */
+  revealedAbility: string | null;
+  /** All inference events observed for this mon so far. */
+  events: InferenceEvent[];
 }
 
 export interface DamagePreview {

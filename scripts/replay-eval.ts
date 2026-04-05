@@ -28,6 +28,9 @@ function evaluateRows(rows: ReplayPolicyExample[]) {
   const byKnownMoveCount = new Map<string, { total: number; top1: number }>();
   const byGapBucket = new Map<string, { total: number; top1: number }>();
   const byConfidenceTier = new Map<string, { total: number; top1: number }>();
+  const byOpponentItemRevealed = new Map<string, { total: number; top1: number }>();
+  const byOpponentAbilityRevealed = new Map<string, { total: number; top1: number }>();
+  const bySpeedRelation = new Map<string, { total: number; top1: number }>();
   const worstMisses: Array<{
     replayFile: string;
     turn: number;
@@ -81,6 +84,26 @@ function evaluateRows(rows: ReplayPolicyExample[]) {
     if (rank === 0) confidenceCounts.top1 += 1;
     byConfidenceTier.set(confidenceTier, confidenceCounts);
 
+    // Mechanics-context breakdowns
+    const opponentActive = example.snapshot.opponentSide.active;
+    const itemKey = (opponentActive?.item || opponentActive?.removedItem) ? "revealed" : "unknown";
+    const itemCounts = byOpponentItemRevealed.get(itemKey) ?? { total: 0, top1: 0 };
+    itemCounts.total += 1;
+    if (rank === 0) itemCounts.top1 += 1;
+    byOpponentItemRevealed.set(itemKey, itemCounts);
+
+    const abilityKey = opponentActive?.ability ? "revealed" : "unknown";
+    const abilityCounts = byOpponentAbilityRevealed.get(abilityKey) ?? { total: 0, top1: 0 };
+    abilityCounts.total += 1;
+    if (rank === 0) abilityCounts.top1 += 1;
+    byOpponentAbilityRevealed.set(abilityKey, abilityCounts);
+
+    const speedKey = example.deterministic?.speedPreview?.activeRelation ?? "unknown";
+    const speedCounts = bySpeedRelation.get(speedKey) ?? { total: 0, top1: 0 };
+    speedCounts.total += 1;
+    if (rank === 0) speedCounts.top1 += 1;
+    bySpeedRelation.set(speedKey, speedCounts);
+
     if (rank !== 0) {
       worstMisses.push({
         replayFile: example.source.replayFile,
@@ -131,6 +154,33 @@ function evaluateRows(rows: ReplayPolicyExample[]) {
     ),
     bySelfConfidenceTier: Object.fromEntries(
       [...byConfidenceTier.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([key, value]) => [
+        key,
+        {
+          total: value.total,
+          top1Accuracy: safeDivide(value.top1, value.total)
+        }
+      ])
+    ),
+    byOpponentItemRevealed: Object.fromEntries(
+      [...byOpponentItemRevealed.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([key, value]) => [
+        key,
+        {
+          total: value.total,
+          top1Accuracy: safeDivide(value.top1, value.total)
+        }
+      ])
+    ),
+    byOpponentAbilityRevealed: Object.fromEntries(
+      [...byOpponentAbilityRevealed.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([key, value]) => [
+        key,
+        {
+          total: value.total,
+          top1Accuracy: safeDivide(value.top1, value.total)
+        }
+      ])
+    ),
+    bySpeedRelation: Object.fromEntries(
+      [...bySpeedRelation.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([key, value]) => [
         key,
         {
           total: value.total,

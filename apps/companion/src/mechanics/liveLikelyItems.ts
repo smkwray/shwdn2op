@@ -1,7 +1,7 @@
 import { Dex } from "@pkmn/dex";
 import { Generations } from "@pkmn/data";
 
-import type { LikelihoodEntry, PokemonSnapshot } from "../types.js";
+import type { InferenceEvent, LikelihoodEntry, PokemonSnapshot } from "../types.js";
 
 const gens = new Generations(Dex as any);
 
@@ -88,6 +88,7 @@ function revealedDistinctMoveCountInCurrentStint(pokemon: PokemonSnapshot | null
 
 type LiveLikelyItemContext = {
   recentLog?: string[] | undefined;
+  inferenceEvents?: InferenceEvent[] | undefined;
 };
 
 function itemStillLive(
@@ -112,6 +113,52 @@ function itemStillLive(
   if (itemId === "assaultvest") {
     const hasRevealedStatusMove = (pokemon.knownMoves ?? []).some((moveName) => lookupMove(format, moveName)?.category === "Status");
     if (hasRevealedStatusMove) return false;
+  }
+
+  // Inference-event-based filtering: if events prove a specific item, only
+  // that item survives.  If events prove hazard immunity with no other
+  // explanation, filter to items that explain it.
+  const events = context.inferenceEvents;
+  if (Array.isArray(events) && events.length > 0) {
+    const monEvents = events.filter((e) =>
+      normalizeName(e.species) === normalizeName(pokemon.species ?? pokemon.displayName)
+    );
+
+    // attack_recoil from Life Orb → item IS Life Orb
+    if (monEvents.some((e) => e.kind === "attack_recoil")) {
+      return itemId === "lifeorb";
+    }
+
+    // residual_heal with known source → item IS that source
+    const healEvent = monEvents.find((e) => e.kind === "residual_heal" && e.source);
+    if (healEvent && healEvent.kind === "residual_heal" && healEvent.source) {
+      return itemId === normalizeName(healEvent.source);
+    }
+
+    // contact_recoil from Rocky Helmet → item IS Rocky Helmet (only if item-sourced)
+    const contactEvent = monEvents.find(
+      (e) => e.kind === "contact_recoil" && e.source && normalizeName(e.source) === "rockyhelmet"
+    );
+    if (contactEvent) {
+      return itemId === "rockyhelmet";
+    }
+
+    // hazard_immunity → filter to items that explain no hazard damage
+    // (Heavy-Duty Boots; Safety Goggles for Toxic Spikes only)
+    if (monEvents.some((e) => e.kind === "hazard_immunity")) {
+      const hazardImmunityItems = new Set(["heavydutyboots"]);
+      // If only Toxic Spikes, Safety Goggles also explains it
+      const hazardEvents = monEvents.filter((e) => e.kind === "hazard_immunity") as Array<
+        Extract<InferenceEvent, { kind: "hazard_immunity" }>
+      >;
+      const allHazardsToxicSpikesOnly = hazardEvents.every(
+        (e) => e.hazards.length > 0 && e.hazards.every((h) => normalizeName(h) === "toxicspikes")
+      );
+      if (allHazardsToxicSpikesOnly) {
+        hazardImmunityItems.add("safetygoggles");
+      }
+      return hazardImmunityItems.has(itemId);
+    }
   }
 
   return true;

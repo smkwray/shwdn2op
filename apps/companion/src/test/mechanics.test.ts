@@ -21,6 +21,7 @@ const { buildAnalysisPrompt } = await import("../prompting/analysisPrompt.js");
 const { buildGeminiPrompt } = await import("../providers/geminiProvider.js");
 const { buildSelfActionRecommendation, selectReplyAwareSearchActionIds, weightedOpponentReplies } = await import("../prediction/selfActionRecommender.js");
 const { buildPlayerLeadRecommendation } = await import("../prediction/playerLeadPredictor.js");
+const { parseInferenceEvents } = await import("../mechanics/inferenceEvents.js");
 
 async function loadExampleJson(relativePath: string) {
   return JSON.parse(await fs.readFile(path.resolve(repoRoot, relativePath), "utf8"));
@@ -5748,6 +5749,160 @@ test("gemini prompt allows synthetic strategic ids when the snapshot is not acti
   assert.doesNotMatch(prompt, /^Use only action IDs from snapshot\.legalActions\.$/m);
 });
 
+test("speed preview widens for unrevealed Protosynthesis in Sun", async () => {
+  // Flutter Mane has Protosynthesis. In Sun, if speed is its highest stat,
+  // Protosynthesis gives 1.5× speed.  When the ability is unrevealed, the
+  // speed engine should widen the range as a possible confounder.
+  const base = makeSnapshot({
+    roomId: "battle-speed-protosynthesis",
+    yourSide: {
+      slot: "p1",
+      name: "You",
+      active: makePokemon({
+        ident: "p1a: Great Tusk",
+        species: "Great Tusk",
+        displayName: "Great Tusk",
+        active: true,
+        ability: "Protosynthesis",
+        stats: { hp: 390, atk: 369, def: 291, spa: 146, spd: 186, spe: 289 },
+        types: ["Ground", "Fighting"]
+      }),
+      team: [makePokemon({
+        ident: "p1a: Great Tusk",
+        species: "Great Tusk",
+        displayName: "Great Tusk",
+        active: true,
+        ability: "Protosynthesis",
+        stats: { hp: 390, atk: 369, def: 291, spa: 146, spd: 186, spe: 289 },
+        types: ["Ground", "Fighting"]
+      })]
+    },
+    opponentSide: {
+      slot: "p2",
+      name: "Opponent",
+      active: makePokemon({
+        ident: "p2a: Flutter Mane",
+        species: "Flutter Mane",
+        displayName: "Flutter Mane",
+        active: true,
+        stats: { hp: 248, atk: 146, def: 176, spa: 369, spd: 369, spe: 369 },
+        types: ["Ghost", "Fairy"]
+      }),
+      team: [makePokemon({
+        ident: "p2a: Flutter Mane",
+        species: "Flutter Mane",
+        displayName: "Flutter Mane",
+        active: true,
+        stats: { hp: 248, atk: 146, def: 176, spa: 369, spd: 369, spe: 369 },
+        types: ["Ghost", "Fairy"]
+      })]
+    },
+    field: {
+      weather: "Sun",
+      terrain: null,
+      pseudoWeather: [],
+      yourSideConditions: [],
+      opponentSideConditions: []
+    }
+  });
+
+  const intel = await buildLocalIntelSnapshot(base);
+  // Flutter Mane has Protosynthesis as its only ability, so in Sun the
+  // engine should flag it as a possible speed confounder.
+  assert.ok(
+    (intel.speedPreview?.confounders ?? []).some((c: string) => c.includes("Protosynthesis")),
+    "should flag Protosynthesis as a speed confounder in Sun"
+  );
+  // The widened max should be higher than the base range max alone.
+  const maxEffective = Number(intel.speedPreview?.effectiveRange?.max ?? 0);
+  // Flutter Mane 135 base Spe → 252+ = 405 max, ×1.5 Proto = 607
+  assert.ok(maxEffective >= 500, `expected widened range, got max ${maxEffective}`);
+
+  // Without Sun, Protosynthesis should not trigger the field-speed path.
+  const noSun = await buildLocalIntelSnapshot({
+    ...base,
+    field: { ...base.field, weather: null }
+  });
+  assert.ok(
+    !(noSun.speedPreview?.confounders ?? []).some((c: string) => c.includes("Protosynthesis")),
+    "should NOT flag Protosynthesis without Sun"
+  );
+});
+
+test("speed preview widens for unrevealed Quark Drive in Electric Terrain", async () => {
+  const base = makeSnapshot({
+    roomId: "battle-speed-quarkdrive",
+    yourSide: {
+      slot: "p1",
+      name: "You",
+      active: makePokemon({
+        ident: "p1a: Great Tusk",
+        species: "Great Tusk",
+        displayName: "Great Tusk",
+        active: true,
+        ability: "Protosynthesis",
+        stats: { hp: 390, atk: 369, def: 291, spa: 146, spd: 186, spe: 289 },
+        types: ["Ground", "Fighting"]
+      }),
+      team: [makePokemon({
+        ident: "p1a: Great Tusk",
+        species: "Great Tusk",
+        displayName: "Great Tusk",
+        active: true,
+        ability: "Protosynthesis",
+        stats: { hp: 390, atk: 369, def: 291, spa: 146, spd: 186, spe: 289 },
+        types: ["Ground", "Fighting"]
+      })]
+    },
+    opponentSide: {
+      slot: "p2",
+      name: "Opponent",
+      active: makePokemon({
+        ident: "p2a: Iron Valiant",
+        species: "Iron Valiant",
+        displayName: "Iron Valiant",
+        active: true,
+        stats: { hp: 303, atk: 317, def: 226, spa: 348, spd: 226, spe: 350 },
+        types: ["Fairy", "Fighting"]
+      }),
+      team: [makePokemon({
+        ident: "p2a: Iron Valiant",
+        species: "Iron Valiant",
+        displayName: "Iron Valiant",
+        active: true,
+        stats: { hp: 303, atk: 317, def: 226, spa: 348, spd: 226, spe: 350 },
+        types: ["Fairy", "Fighting"]
+      })]
+    },
+    field: {
+      weather: null,
+      terrain: "Electric Terrain",
+      pseudoWeather: [],
+      yourSideConditions: [],
+      opponentSideConditions: []
+    }
+  });
+
+  const intel = await buildLocalIntelSnapshot(base);
+  assert.ok(
+    (intel.speedPreview?.confounders ?? []).some((c: string) => c.includes("Quark Drive")),
+    "should flag Quark Drive as a speed confounder in Electric Terrain"
+  );
+  // Iron Valiant 116 base Spe → max range ×1.5 should push well above base
+  const maxEffective = Number(intel.speedPreview?.effectiveRange?.max ?? 0);
+  assert.ok(maxEffective >= 450, `expected widened range, got max ${maxEffective}`);
+
+  // Without Electric Terrain, Quark Drive should not trigger.
+  const noTerrain = await buildLocalIntelSnapshot({
+    ...base,
+    field: { ...base.field, terrain: null }
+  });
+  assert.ok(
+    !(noTerrain.speedPreview?.confounders ?? []).some((c: string) => c.includes("Quark Drive")),
+    "should NOT flag Quark Drive without Electric Terrain"
+  );
+});
+
 test("mock provider strategic mode emits strategic plan actions when no legal actions are present", async () => {
   const { MockProvider } = await import("../providers/mockProvider.js");
   const provider = new MockProvider();
@@ -5762,4 +5917,301 @@ test("mock provider strategic mode emits strategic plan actions when no legal ac
   assert.equal(result.topChoiceActionId, "special:plan-primary");
   assert.equal(result.rankedActions[0]?.actionId, "special:plan-primary");
   assert.match(result.summary, /preserve your highest-value piece/i);
+});
+
+// ---------------------------------------------------------------------------
+// P2: Inference event parser tests
+// ---------------------------------------------------------------------------
+
+test("inference parser emits attack_recoil from Life Orb HP-change log line", () => {
+  const snapshot = makeSnapshot({
+    recentLog: [
+      "Turn 5 started.",
+      "Noivern used Draco Meteor.",
+      "Noivern had HP change from Life Orb."
+    ]
+  });
+  const events = parseInferenceEvents(snapshot);
+  const recoil = events.filter((e) => e.kind === "attack_recoil");
+  assert.ok(recoil.length >= 1, "should emit at least one attack_recoil event");
+  assert.equal(recoil[0]!.species, "Noivern");
+  assert.equal(recoil[0]!.side, "opponent");
+  if (recoil[0]!.kind === "attack_recoil") {
+    assert.equal(recoil[0]!.moveName, "Draco Meteor");
+  }
+});
+
+test("inference parser emits residual_heal from Leftovers HP-change log line", () => {
+  const snapshot = makeSnapshot({
+    recentLog: [
+      "Turn 6 started.",
+      "Noivern had HP change from Leftovers."
+    ]
+  });
+  const events = parseInferenceEvents(snapshot);
+  const heals = events.filter((e) => e.kind === "residual_heal");
+  assert.ok(heals.length >= 1, "should emit at least one residual_heal event");
+  assert.equal(heals[0]!.species, "Noivern");
+  if (heals[0]!.kind === "residual_heal") {
+    assert.equal(heals[0]!.source, "Leftovers");
+  }
+});
+
+test("inference parser emits contact_recoil from Rocky Helmet attributed to defender", () => {
+  const snapshot = makeSnapshot({
+    recentLog: [
+      "Turn 4 started.",
+      "Scizor used Bullet Punch.",
+      "Scizor had HP change from Rocky Helmet."
+    ]
+  });
+  const events = parseInferenceEvents(snapshot);
+  const contact = events.filter((e) => e.kind === "contact_recoil");
+  assert.ok(contact.length >= 1, "should emit contact_recoil event");
+  // The Rocky Helmet belongs to the defender (opponent), not the attacker (player)
+  if (contact[0]!.kind === "contact_recoil") {
+    assert.equal(contact[0]!.side, "opponent");
+    assert.equal(contact[0]!.source, "Rocky Helmet");
+    assert.equal(contact[0]!.attackerSpecies, "Scizor");
+  }
+});
+
+test("inference parser emits switch_heal from Regenerator HP-change log line", () => {
+  const snapshot = makeSnapshot({
+    recentLog: [
+      "Turn 3 started.",
+      "Noivern had HP change from Regenerator."
+    ]
+  });
+  const events = parseInferenceEvents(snapshot);
+  const switchHeals = events.filter((e) => e.kind === "switch_heal");
+  assert.ok(switchHeals.length >= 1, "should emit switch_heal event");
+  assert.equal(switchHeals[0]!.species, "Noivern");
+});
+
+test("inference parser emits hazard_immunity when entry through hazards shows no damage", () => {
+  const snapshot = makeSnapshot({
+    field: {
+      weather: null,
+      terrain: null,
+      pseudoWeather: [],
+      yourSideConditions: [],
+      opponentSideConditions: ["Stealth Rock"]
+    },
+    recentLog: [
+      "Turn 7 started.",
+      "Noivern entered the field.",
+      "Turn 8 started."
+    ]
+  });
+  const events = parseInferenceEvents(snapshot);
+  const immunity = events.filter((e) => e.kind === "hazard_immunity");
+  assert.ok(immunity.length >= 1, "should emit hazard_immunity event");
+  assert.equal(immunity[0]!.species, "Noivern");
+  assert.equal(immunity[0]!.side, "opponent");
+  if (immunity[0]!.kind === "hazard_immunity") {
+    assert.deepEqual(immunity[0]!.hazards, ["Stealth Rock"]);
+  }
+});
+
+test("inference parser does NOT emit hazard_immunity when entry damage is logged", () => {
+  const snapshot = makeSnapshot({
+    field: {
+      weather: null,
+      terrain: null,
+      pseudoWeather: [],
+      yourSideConditions: [],
+      opponentSideConditions: ["Stealth Rock"]
+    },
+    recentLog: [
+      "Turn 7 started.",
+      "Noivern entered the field.",
+      "Noivern had HP change from Stealth Rock.",
+      "Turn 8 started."
+    ]
+  });
+  const events = parseInferenceEvents(snapshot);
+  const immunity = events.filter((e) => e.kind === "hazard_immunity");
+  assert.equal(immunity.length, 0, "should not emit hazard_immunity when damage is logged");
+});
+
+test("inference parser emits item_consumed from removedItem on opponent snapshot", () => {
+  const snapshot = makeSnapshot();
+  // Override opponent to have a removed item
+  const opponentWithRemoved = makePokemon({
+    ident: "p2a: Noivern",
+    species: "Noivern",
+    displayName: "Noivern",
+    active: true,
+    types: ["Flying", "Dragon"],
+    removedItem: "Air Balloon"
+  });
+  snapshot.opponentSide.active = opponentWithRemoved;
+  snapshot.opponentSide.team = [opponentWithRemoved];
+  const events = parseInferenceEvents(snapshot);
+  const consumed = events.filter((e) => e.kind === "item_consumed");
+  assert.ok(consumed.length >= 1, "should emit item_consumed event");
+  if (consumed[0]!.kind === "item_consumed") {
+    assert.equal(consumed[0]!.itemName, "Air Balloon");
+    assert.equal(consumed[0]!.side, "opponent");
+  }
+});
+
+test("inference parser emits ability_reveal from revealed ability on snapshot", () => {
+  const snapshot = makeSnapshot();
+  const opponentWithAbility = makePokemon({
+    ident: "p2a: Noivern",
+    species: "Noivern",
+    displayName: "Noivern",
+    active: true,
+    types: ["Flying", "Dragon"],
+    ability: "Infiltrator"
+  });
+  snapshot.opponentSide.active = opponentWithAbility;
+  snapshot.opponentSide.team = [opponentWithAbility];
+  const events = parseInferenceEvents(snapshot);
+  const reveals = events.filter((e) => e.kind === "ability_reveal" && e.species === "Noivern");
+  assert.ok(reveals.length >= 1, "should emit ability_reveal event");
+  if (reveals[0]!.kind === "ability_reveal") {
+    assert.equal(reveals[0]!.abilityName, "Infiltrator");
+  }
+});
+
+test("liveLikelyItems filters to Life Orb when attack_recoil inference event is present", () => {
+  const pokemon = makePokemon({
+    ident: "p2a: Noivern",
+    species: "Noivern",
+    displayName: "Noivern",
+    active: true,
+    types: ["Flying", "Dragon"],
+    item: null,
+    removedItem: null
+  });
+  const result = filterLiveLikelyHeldItemNames(
+    "[Gen 9] OU",
+    pokemon,
+    ["Life Orb", "Choice Specs", "Heavy-Duty Boots"],
+    {
+      inferenceEvents: [{
+        kind: "attack_recoil",
+        side: "opponent" as const,
+        species: "Noivern",
+        turn: 5,
+        recoilPercent: 10
+      }]
+    }
+  );
+  assert.deepEqual(result, ["Life Orb"]);
+});
+
+test("liveLikelyItems filters to Leftovers when residual_heal inference event is present", () => {
+  const pokemon = makePokemon({
+    ident: "p2a: Noivern",
+    species: "Noivern",
+    displayName: "Noivern",
+    active: true,
+    types: ["Flying", "Dragon"],
+    item: null,
+    removedItem: null
+  });
+  const result = filterLiveLikelyHeldItemNames(
+    "[Gen 9] OU",
+    pokemon,
+    ["Leftovers", "Choice Specs", "Heavy-Duty Boots"],
+    {
+      inferenceEvents: [{
+        kind: "residual_heal",
+        side: "opponent" as const,
+        species: "Noivern",
+        turn: 6,
+        healPercent: 6.25,
+        source: "Leftovers"
+      }]
+    }
+  );
+  assert.deepEqual(result, ["Leftovers"]);
+});
+
+test("liveLikelyItems filters to Heavy-Duty Boots when hazard_immunity inference event is present", () => {
+  const pokemon = makePokemon({
+    ident: "p2a: Noivern",
+    species: "Noivern",
+    displayName: "Noivern",
+    active: true,
+    types: ["Flying", "Dragon"],
+    item: null,
+    removedItem: null
+  });
+  const result = filterLiveLikelyHeldItemNames(
+    "[Gen 9] OU",
+    pokemon,
+    ["Heavy-Duty Boots", "Choice Specs", "Life Orb"],
+    {
+      inferenceEvents: [{
+        kind: "hazard_immunity",
+        side: "opponent" as const,
+        species: "Noivern",
+        turn: 7,
+        hazards: ["Stealth Rock"]
+      }]
+    }
+  );
+  assert.deepEqual(result, ["Heavy-Duty Boots"]);
+});
+
+test("posterior boosts Life Orb hypothesis when attack_recoil inference event is present", () => {
+  const opponent = makePokemon({
+    ident: "p2a: Noivern",
+    species: "Noivern",
+    displayName: "Noivern",
+    level: 100,
+    active: true,
+    types: ["Flying", "Dragon"],
+    knownMoves: ["Draco Meteor"]
+  });
+  const formatStats = {
+    observedBattlesSeen: 5,
+    curatedTeamCount: 0,
+    observedMoves: { "Draco Meteor": 3 },
+    observedItems: { "Life Orb": 2, "Choice Specs": 2, "Heavy-Duty Boots": 1 },
+    observedAbilities: { Infiltrator: 3, Frisk: 1, Telepathy: 1 },
+    observedTeraTypes: { Steel: 2, Fairy: 1 },
+    curatedMoves: {},
+    curatedItems: {},
+    curatedAbilities: {},
+    curatedTeraTypes: {}
+  };
+  const withoutEvents = buildOpponentPosterior({
+    format: "[Gen 9] OU",
+    opponent,
+    formatStats
+  });
+  const withEvents = buildOpponentPosterior({
+    format: "[Gen 9] OU",
+    opponent,
+    formatStats,
+    inferenceEvents: [{
+      kind: "attack_recoil",
+      side: "opponent" as const,
+      species: "Noivern",
+      turn: 5,
+      recoilPercent: 10
+    }]
+  });
+  assert.ok(withoutEvents, "posterior should produce results without events");
+  assert.ok(withEvents, "posterior should produce results with events");
+  // With the inference event, the top hypothesis should favor Life Orb
+  const topItemWithEvents = withEvents!.topHypotheses[0]?.item;
+  assert.equal(topItemWithEvents, "Life Orb", "top hypothesis should have Life Orb after attack_recoil event");
+  // Without the event, Life Orb may or may not be on top
+  // But the weight of the Life Orb hypothesis should be higher with the event
+  const lifeOrbWeightWith = withEvents!.topHypotheses
+    .filter((h) => h.item === "Life Orb")
+    .reduce((sum, h) => sum + h.weight, 0);
+  const lifeOrbWeightWithout = withoutEvents!.topHypotheses
+    .filter((h) => h.item === "Life Orb")
+    .reduce((sum, h) => sum + h.weight, 0);
+  assert.ok(lifeOrbWeightWith > lifeOrbWeightWithout, "Life Orb weight should increase with attack_recoil evidence");
+  // Evidence should include the inference kind
+  assert.ok(withEvents!.evidence.some((e) => e.kind === "inference"), "evidence should include inference kind");
 });

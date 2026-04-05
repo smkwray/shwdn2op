@@ -2,6 +2,7 @@ import { Dex } from "@pkmn/dex";
 import { Generations } from "@pkmn/data";
 
 import type { BattleSnapshot } from "../types.js";
+import { speedStageMultiplier, paralysisSpeedMultiplier } from "../mechanics/speed.js";
 import { buildDamageNotes } from "./damageNotes.js";
 
 const gens = new Generations(Dex as any);
@@ -88,16 +89,6 @@ function speedRangeForSpecies(
     max: estimateNonHpStat(spe, actualLevel, 252, 1.1),
     base: spe
   };
-}
-
-function speedStageMultiplier(stage: number) {
-  if (stage === 0) return 1;
-  if (stage > 0) return (2 + stage) / 2;
-  return 2 / (2 + Math.abs(stage));
-}
-
-function paralysisSpeedMultiplier(genNum: number) {
-  return genNum >= 7 ? 0.5 : 0.25;
 }
 
 function sideHasCondition(conditions: string[], pattern: RegExp) {

@@ -4,12 +4,19 @@ import { calculate, Field, Generations as CalcGenerations, Move, Pokemon, Side }
 
 import type {
   BattleSnapshot,
+  InferenceEvent,
   OpponentPosteriorPreview,
   PokemonSnapshot,
   PosteriorEvidence,
   PosteriorHypothesis,
   StatPosteriorBand
 } from "../types.js";
+
+import {
+  speedStageMultiplier,
+  paralysisSpeedMultiplier,
+  matchingFieldSpeedAbilityRule
+} from "../mechanics/speed.js";
 
 type StatArchetypeId = PosteriorHypothesis["statArchetype"];
 type StatId = "hp" | "atk" | "def" | "spa" | "spd" | "spe";
@@ -59,6 +66,7 @@ interface PosteriorBuildParams {
   formatStats: PosteriorFormatStats;
   battleSnapshot?: BattleSnapshot | undefined;
   battleEvidence?: PosteriorBattleSpeciesEvidence | undefined;
+  inferenceEvents?: InferenceEvent[] | undefined;
 }
 
 interface SkeletonCandidate {
@@ -100,21 +108,6 @@ const ARCHETYPES: ArchetypeConfig[] = [
   { id: "scarf_phys", nature: "Adamant", evs: { hp: 4, atk: 252, spe: 252 }, role: "physical" },
   { id: "scarf_spec", nature: "Modest", evs: { hp: 4, spa: 252, spe: 252 }, role: "special" }
 ];
-
-type FieldSpeedAbilityRule = {
-  abilityId: string;
-  multiplier: number;
-  weather?: RegExp | undefined;
-  terrain?: RegExp | undefined;
-};
-
-const FIELD_SPEED_ABILITY_RULES: readonly FieldSpeedAbilityRule[] = [
-  { abilityId: "chlorophyll", multiplier: 2, weather: /sun/i },
-  { abilityId: "sandrush", multiplier: 2, weather: /sand/i },
-  { abilityId: "slushrush", multiplier: 2, weather: /snow|hail/i },
-  { abilityId: "swiftswim", multiplier: 2, weather: /rain/i },
-  { abilityId: "surgesurfer", multiplier: 2, terrain: /electric/i }
-] as const;
 
 function generationFromFormat(format: string): number {
   const match = String(format ?? "").match(/\[Gen\s*(\d+)\]/i);
@@ -470,28 +463,6 @@ function moveCompatibilityScore(item: string | null, archetype: ArchetypeConfig,
   return 0;
 }
 
-function speedStageMultiplier(stage: number | null | undefined) {
-  if (!Number.isFinite(stage)) return 1;
-  const numeric = Math.max(-6, Math.min(6, Number(stage)));
-  if (numeric === 0) return 1;
-  if (numeric > 0) return (2 + numeric) / 2;
-  return 2 / (2 + Math.abs(numeric));
-}
-
-function paralysisSpeedMultiplier(format: string) {
-  return generationFromFormat(format) >= 7 ? 0.5 : 0.25;
-}
-
-function matchingFieldSpeedAbilityRule(abilityId: string, field: BattleSnapshot["field"] | undefined) {
-  if (!abilityId || !field) return null;
-  return FIELD_SPEED_ABILITY_RULES.find((rule) => {
-    if (rule.abilityId !== abilityId) return false;
-    if (rule.weather && !rule.weather.test(field.weather ?? "")) return false;
-    if (rule.terrain && !rule.terrain.test(field.terrain ?? "")) return false;
-    return true;
-  }) ?? null;
-}
-
 function effectiveSpeedForHypothesis(
   format: string,
   opponent: PokemonSnapshot,
@@ -501,7 +472,8 @@ function effectiveSpeedForHypothesis(
     includeCurrentBoardModifiers?: boolean | undefined;
   } = {}
 ) {
-  const gen = dataGen(generationFromFormat(format));
+  const genNum = generationFromFormat(format);
+  const gen = dataGen(genNum);
   const species = lookupSpecies(gen, opponent.species ?? opponent.displayName);
   if (!species) return null;
   const level = normalizedBattleLevel(format, opponent.level);
@@ -513,7 +485,7 @@ function effectiveSpeedForHypothesis(
   const abilityId = normalizeName(hypothesis.ability);
   speed = Math.floor(speed * speedStageMultiplier(opponent.boosts?.spe ?? 0));
   if (opponent.status === "par" && abilityId !== "quickfeet") {
-    speed = Math.floor(speed * paralysisSpeedMultiplier(format));
+    speed = Math.floor(speed * paralysisSpeedMultiplier(genNum));
   }
   if (opponent.status && abilityId === "quickfeet") {
     speed = Math.floor(speed * 1.5);
@@ -575,6 +547,77 @@ function damageObservationLogScore(
   return Math.log(0.03);
 }
 
+function inferenceEventLogScore(hypothesis: PosteriorHypothesis, events: InferenceEvent[]): number {
+  let logScore = 0;
+  const hypothesisItemId = normalizeName(hypothesis.item);
+  const hypothesisAbilityId = normalizeName(hypothesis.ability);
+
+  for (const event of events) {
+    switch (event.kind) {
+      case "attack_recoil": {
+        // Life Orb confirmed — strong boost if hypothesis item matches, strong penalty otherwise
+        if (hypothesisItemId === "lifeorb") logScore += Math.log(0.97);
+        else logScore += Math.log(0.03);
+        break;
+      }
+      case "residual_heal": {
+        if (event.source) {
+          const sourceId = normalizeName(event.source);
+          if (hypothesisItemId === sourceId) logScore += Math.log(0.97);
+          else logScore += Math.log(0.05);
+        }
+        break;
+      }
+      case "contact_recoil": {
+        if (event.source && normalizeName(event.source) === "rockyhelmet") {
+          if (hypothesisItemId === "rockyhelmet") logScore += Math.log(0.97);
+          else logScore += Math.log(0.05);
+        }
+        // Rough Skin / Iron Barbs → ability evidence
+        if (event.source && normalizeName(event.source) !== "rockyhelmet") {
+          const sourceAbilityId = normalizeName(event.source);
+          if (hypothesisAbilityId === sourceAbilityId) logScore += Math.log(0.97);
+          else logScore += Math.log(0.1);
+        }
+        break;
+      }
+      case "hazard_immunity": {
+        // Heavy-Duty Boots explains hazard immunity
+        if (hypothesisItemId === "heavydutyboots") logScore += Math.log(0.9);
+        // Magic Guard ability also explains it
+        else if (hypothesisAbilityId === "magicguard") logScore += Math.log(0.85);
+        // Penalty for hypotheses that can't explain it (moderate — could be type immunity)
+        else logScore += Math.log(0.3);
+        break;
+      }
+      case "ability_reveal": {
+        const eventAbilityId = normalizeName(event.abilityName);
+        if (hypothesisAbilityId === eventAbilityId) logScore += Math.log(0.97);
+        else logScore += Math.log(0.03);
+        break;
+      }
+      case "item_consumed": {
+        // Item was consumed — hypothesis with that item gets a boost,
+        // and hypothesis should have null item going forward (handled by candidateItems)
+        const eventItemId = normalizeName(event.itemName);
+        if (hypothesisItemId === eventItemId) logScore += Math.log(0.95);
+        else if (!hypothesis.item) logScore += Math.log(0.5);
+        else logScore += Math.log(0.1);
+        break;
+      }
+      case "switch_heal": {
+        // Regenerator confirmed
+        if (hypothesisAbilityId === "regenerator") logScore += Math.log(0.97);
+        else logScore += Math.log(0.03);
+        break;
+      }
+      default:
+        break;
+    }
+  }
+  return logScore;
+}
+
 function weightedPercentile(values: Array<{ value: number; weight: number }>, percentile: number) {
   const filtered = values.filter((entry) => Number.isFinite(entry.value) && entry.weight > 0).sort((a, b) => a.value - b.value);
   if (filtered.length === 0) return 0;
@@ -633,6 +676,7 @@ function buildEvidenceSummary(params: {
   opponent: PokemonSnapshot;
   battleEvidence?: PosteriorBattleSpeciesEvidence | undefined;
   formatStats: PosteriorFormatStats;
+  inferenceEvents?: InferenceEvent[] | undefined;
 }) {
   const evidence: PosteriorEvidence[] = [];
   if (params.formatStats.observedBattlesSeen > 0 || (params.formatStats.curatedTeamCount ?? 0) > 0) {
@@ -678,6 +722,13 @@ function buildEvidenceSummary(params: {
     evidence.push({
       kind: "damage",
       label: `Clean damage observations: ${damageObservationCount}`
+    });
+  }
+  if (params.inferenceEvents && params.inferenceEvents.length > 0) {
+    const kinds = [...new Set(params.inferenceEvents.map((e) => e.kind))];
+    evidence.push({
+      kind: "inference",
+      label: `Inference events: ${params.inferenceEvents.length} (${kinds.join(", ")})`
     });
   }
   return evidence;
@@ -763,6 +814,9 @@ export function buildOpponentPosterior(params: PosteriorBuildParams): OpponentPo
       }
       for (const observation of params.battleEvidence?.outgoingDamage ?? []) {
         logScore += damageObservationLogScore(params.format, params.opponent, hypothesis, observation);
+      }
+      if (params.inferenceEvents && params.inferenceEvents.length > 0) {
+        logScore += inferenceEventLogScore(hypothesis, params.inferenceEvents);
       }
       hypothesis.effectiveSpeed = effectiveSpeedForHypothesis(params.format, params.opponent, hypothesis, {
         battleSnapshot: params.battleSnapshot,
