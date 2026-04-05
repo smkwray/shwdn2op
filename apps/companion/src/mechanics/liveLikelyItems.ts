@@ -86,6 +86,55 @@ function revealedDistinctMoveCountInCurrentStint(pokemon: PokemonSnapshot | null
   return revealedMoves.size;
 }
 
+/**
+ * Check if a specific hazard's damage can be explained by the mon's types or
+ * known ability, meaning item-based immunity (Boots) is NOT the only
+ * explanation.
+ *
+ * - Stealth Rock: damages all types (amount varies), only Magic Guard prevents
+ * - Spikes: only affects grounded mons — Flying type or Levitate makes immune
+ * - Toxic Spikes: only affects grounded mons, Poison type absorbs, Steel
+ *   type is immune to poison, Flying/Levitate makes immune
+ */
+function hazardExplainedByTypesOrAbility(
+  hazard: string,
+  monTypes: string[],
+  knownAbility: string | null | undefined
+): boolean {
+  const hId = normalizeName(hazard);
+  const types = new Set(monTypes.map((t) => normalizeName(t)));
+  const abilityId = normalizeName(knownAbility);
+
+  // Magic Guard prevents all hazard damage
+  if (abilityId === "magicguard") return true;
+
+  if (hId === "stealthrock") {
+    // SR damages all types — only Magic Guard (checked above) or Boots prevents
+    return false;
+  }
+
+  if (hId === "spikes") {
+    // Flying type or Levitate → non-grounded, immune to Spikes
+    if (types.has("flying")) return true;
+    if (abilityId === "levitate") return true;
+    return false;
+  }
+
+  if (hId === "toxicspikes") {
+    // Flying type or Levitate → non-grounded, immune
+    if (types.has("flying")) return true;
+    if (abilityId === "levitate") return true;
+    // Poison type absorbs Toxic Spikes (no damage)
+    if (types.has("poison")) return true;
+    // Steel type is immune to poison status
+    if (types.has("steel")) return true;
+    return false;
+  }
+
+  // Unknown hazard — can't explain
+  return false;
+}
+
 type LiveLikelyItemContext = {
   recentLog?: string[] | undefined;
   inferenceEvents?: InferenceEvent[] | undefined;
@@ -143,14 +192,24 @@ function itemStillLive(
       return itemId === "rockyhelmet";
     }
 
-    // hazard_immunity → filter to items that explain no hazard damage
-    // (Heavy-Duty Boots; Safety Goggles for Toxic Spikes only)
+    // hazard_immunity → filter to items that explain no hazard damage,
+    // BUT only when the mon's types/ability don't already explain it.
     if (monEvents.some((e) => e.kind === "hazard_immunity")) {
-      const hazardImmunityItems = new Set(["heavydutyboots"]);
-      // If only Toxic Spikes, Safety Goggles also explains it
       const hazardEvents = monEvents.filter((e) => e.kind === "hazard_immunity") as Array<
         Extract<InferenceEvent, { kind: "hazard_immunity" }>
       >;
+
+      // Check if types/ability already explain ALL hazard immunities.
+      // If so, no item evidence — don't filter.
+      const typesExplainAll = hazardEvents.every((e) =>
+        e.hazards.every((h) => hazardExplainedByTypesOrAbility(h, e.monTypes, pokemon.ability))
+      );
+      if (typesExplainAll) {
+        return true; // no item conclusion from this evidence
+      }
+
+      // Some hazards can't be explained by type/ability → item needed
+      const hazardImmunityItems = new Set(["heavydutyboots"]);
       const allHazardsToxicSpikesOnly = hazardEvents.every(
         (e) => e.hazards.length > 0 && e.hazards.every((h) => normalizeName(h) === "toxicspikes")
       );

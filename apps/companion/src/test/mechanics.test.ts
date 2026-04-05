@@ -6011,6 +6011,7 @@ test("inference parser emits hazard_immunity when entry through hazards shows no
   assert.equal(immunity[0]!.side, "opponent");
   if (immunity[0]!.kind === "hazard_immunity") {
     assert.deepEqual(immunity[0]!.hazards, ["Stealth Rock"]);
+    assert.deepEqual(immunity[0]!.monTypes, ["Flying", "Dragon"]);
   }
 });
 
@@ -6152,11 +6153,99 @@ test("liveLikelyItems filters to Heavy-Duty Boots when hazard_immunity inference
         side: "opponent" as const,
         species: "Noivern",
         turn: 7,
-        hazards: ["Stealth Rock"]
+        hazards: ["Stealth Rock"],
+        monTypes: ["Flying", "Dragon"]
       }]
     }
   );
   assert.deepEqual(result, ["Heavy-Duty Boots"]);
+});
+
+test("liveLikelyItems does NOT filter when Flying type explains Spikes-only hazard immunity", () => {
+  const pokemon = makePokemon({
+    ident: "p2a: Noivern",
+    species: "Noivern",
+    displayName: "Noivern",
+    active: true,
+    types: ["Flying", "Dragon"],
+    item: null,
+    removedItem: null
+  });
+  const result = filterLiveLikelyHeldItemNames(
+    "[Gen 9] OU",
+    pokemon,
+    ["Heavy-Duty Boots", "Choice Specs", "Life Orb"],
+    {
+      inferenceEvents: [{
+        kind: "hazard_immunity",
+        side: "opponent" as const,
+        species: "Noivern",
+        turn: 7,
+        hazards: ["Spikes"],
+        monTypes: ["Flying", "Dragon"]
+      }]
+    }
+  );
+  // Flying is immune to Spikes — no item evidence, all items survive
+  assert.deepEqual(result, ["Heavy-Duty Boots", "Choice Specs", "Life Orb"]);
+});
+
+test("liveLikelyItems filters to Boots when SR+Spikes and only Spikes is type-explained", () => {
+  const pokemon = makePokemon({
+    ident: "p2a: Noivern",
+    species: "Noivern",
+    displayName: "Noivern",
+    active: true,
+    types: ["Flying", "Dragon"],
+    item: null,
+    removedItem: null
+  });
+  const result = filterLiveLikelyHeldItemNames(
+    "[Gen 9] OU",
+    pokemon,
+    ["Heavy-Duty Boots", "Choice Specs", "Life Orb"],
+    {
+      inferenceEvents: [{
+        kind: "hazard_immunity",
+        side: "opponent" as const,
+        species: "Noivern",
+        turn: 7,
+        hazards: ["Stealth Rock", "Spikes"],
+        monTypes: ["Flying", "Dragon"]
+      }]
+    }
+  );
+  // SR can't be explained by types → still need Boots
+  assert.deepEqual(result, ["Heavy-Duty Boots"]);
+});
+
+test("liveLikelyItems does NOT filter when Poison type explains Toxic Spikes immunity", () => {
+  const pokemon = makePokemon({
+    ident: "p2a: Toxapex",
+    species: "Toxapex",
+    displayName: "Toxapex",
+    active: true,
+    types: ["Poison", "Water"],
+    item: null,
+    removedItem: null
+  });
+  const result = filterLiveLikelyHeldItemNames(
+    "[Gen 9] OU",
+    pokemon,
+    ["Rocky Helmet", "Black Sludge", "Heavy-Duty Boots"],
+    {
+      inferenceEvents: [{
+        kind: "hazard_immunity",
+        side: "opponent" as const,
+        species: "Toxapex",
+        turn: 5,
+        hazards: ["Toxic Spikes"],
+        monTypes: ["Poison", "Water"]
+      }]
+    }
+  );
+  // Poison type absorbs Toxic Spikes — no item evidence
+  assert.deepEqual(result, ["Rocky Helmet", "Black Sludge", "Heavy-Duty Boots"]);
 });
 
 test("posterior boosts Life Orb hypothesis when attack_recoil inference event is present", () => {

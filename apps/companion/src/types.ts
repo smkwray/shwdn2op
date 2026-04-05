@@ -185,6 +185,8 @@ export interface HazardImmunityEvent extends InferenceEventBase {
   kind: "hazard_immunity";
   /** Which hazards were up (e.g. ["Stealth Rock", "Spikes"]). */
   hazards: string[];
+  /** The mon's known types at the time of entry (for disambiguation). */
+  monTypes: string[];
 }
 
 /** Mon healed a small amount at end of turn (not from a move). */

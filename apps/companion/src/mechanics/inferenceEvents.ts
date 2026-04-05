@@ -172,12 +172,36 @@ function parseHpChangeEvents(
   let lastMoveByActor: { actor: string; move: string } | null = null;
   let activeTurn = currentTurn;
 
+  // Track which mon is active on each side based on log entries, so contact
+  // recoil is attributed to whoever was defending at the time (not whoever
+  // happens to be active in the post-resolution snapshot).
+  const activeByLogContext: Record<InferenceEventSide, { pokemon: PokemonSnapshot; species: string } | null> = {
+    opponent: snapshot.opponentSide.active
+      ? { pokemon: snapshot.opponentSide.active, species: speciesDisplayName(snapshot.opponentSide.active) }
+      : null,
+    player: snapshot.yourSide.active
+      ? { pokemon: snapshot.yourSide.active, species: speciesDisplayName(snapshot.yourSide.active) }
+      : null
+  };
+
   for (const line of log) {
     const turnNum = extractTurnNumber(line);
     if (turnNum !== null) {
       activeTurn = turnNum;
       lastMoveByActor = null;
       continue;
+    }
+
+    // Update active-mon tracking when a mon enters the field
+    const enteredName = extractEnteredFieldName(line);
+    if (enteredName) {
+      const entryResolved = resolveMon(snapshot, enteredName);
+      if (entryResolved) {
+        activeByLogContext[entryResolved.side] = {
+          pokemon: entryResolved.pokemon,
+          species: speciesDisplayName(entryResolved.pokemon)
+        };
+      }
     }
 
     const usedMove = extractUsedMove(line);
@@ -224,14 +248,12 @@ function parseHpChangeEvents(
     if (CONTACT_RECOIL_SOURCES.has(sourceId)) {
       // For contact recoil, the actor who took damage is the ATTACKER,
       // but the source (Rocky Helmet/Rough Skin/Iron Barbs) belongs to
-      // the DEFENDER.  The event should be attributed to the defender.
-      // However, in recentLog the actor is the one who took recoil damage
-      // (the attacker).  We emit the event on the OTHER side.
+      // the DEFENDER.  We attribute the event to the defender using
+      // log-context tracking (not snapshot active, which may have changed
+      // if the defender fainted from the same hit).
       const defenderSide: InferenceEventSide = resolved.side === "opponent" ? "player" : "opponent";
-      const defenderActive = defenderSide === "opponent"
-        ? snapshot.opponentSide.active
-        : snapshot.yourSide.active;
-      const defenderSpecies = speciesDisplayName(defenderActive);
+      const defenderCtx = activeByLogContext[defenderSide];
+      const defenderSpecies = defenderCtx?.species;
       if (defenderSpecies) {
         events.push({
           kind: "contact_recoil",
@@ -267,12 +289,13 @@ function parseHpChangeEvents(
  * Detect entries through active hazards where no follow-up damage is logged.
  *
  * Logic: scan recentLog for "X entered the field."  If the entering side has
- * hazards (Stealth Rock, Spikes, Toxic Spikes, Sticky Web), check whether the
+ * HP-damaging hazards (Stealth Rock, Spikes, Toxic Spikes), check whether the
  * NEXT few lines contain an HP-change line for that same mon.  If not →
- * hazard_immunity event.
+ * hazard_immunity event.  Sticky Web is excluded — it lowers Speed, not HP.
  *
- * Flying/Levitate/type-based immunities to specific hazards are NOT filtered
- * here — consumers should decide whether it's item-based (Boots) or ability/type.
+ * The event includes the mon's types so consumers can disambiguate item-based
+ * immunity (Boots) from type-based immunity (Flying vs Spikes) or ability
+ * (Levitate, Magic Guard).
  */
 function parseHazardImmunityEvents(
   snapshot: BattleSnapshot,
@@ -330,7 +353,8 @@ function parseHazardImmunityEvents(
           side: resolved.side,
           species,
           turn: activeTurn,
-          hazards: relevantHazards
+          hazards: relevantHazards,
+          monTypes: resolved.pokemon.types ?? []
         });
       }
     }

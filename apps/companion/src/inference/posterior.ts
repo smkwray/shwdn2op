@@ -582,12 +582,34 @@ function inferenceEventLogScore(hypothesis: PosteriorHypothesis, events: Inferen
         break;
       }
       case "hazard_immunity": {
-        // Heavy-Duty Boots explains hazard immunity
-        if (hypothesisItemId === "heavydutyboots") logScore += Math.log(0.9);
-        // Magic Guard ability also explains it
-        else if (hypothesisAbilityId === "magicguard") logScore += Math.log(0.85);
-        // Penalty for hypotheses that can't explain it (moderate — could be type immunity)
-        else logScore += Math.log(0.3);
+        // Check if the mon's types/ability already explain immunity to ALL
+        // listed hazards.  If so, this is weak evidence — don't penalize.
+        const monTypes = new Set((event.monTypes ?? []).map((t) => normalizeName(t)));
+        const unexplainedByType = event.hazards.filter((h) => {
+          const hId = normalizeName(h);
+          // Stealth Rock damages all types
+          if (hId === "stealthrock") return true;
+          // Spikes/Toxic Spikes don't affect Flying
+          if (monTypes.has("flying")) return false;
+          // Toxic Spikes don't affect Poison or Steel
+          if (hId === "toxicspikes" && (monTypes.has("poison") || monTypes.has("steel"))) return false;
+          return true;
+        });
+
+        if (unexplainedByType.length === 0) {
+          // Types fully explain it — very mild evidence
+          logScore += Math.log(0.95);
+        } else if (hypothesisItemId === "heavydutyboots") {
+          logScore += Math.log(0.9);
+        } else if (hypothesisAbilityId === "magicguard") {
+          logScore += Math.log(0.85);
+        } else if (hypothesisAbilityId === "levitate" &&
+          unexplainedByType.every((h) => normalizeName(h) !== "stealthrock")) {
+          // Levitate explains ground-based hazards (Spikes/Toxic Spikes)
+          logScore += Math.log(0.85);
+        } else {
+          logScore += Math.log(0.3);
+        }
         break;
       }
       case "ability_reveal": {
