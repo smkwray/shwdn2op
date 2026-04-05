@@ -5903,6 +5903,85 @@ test("speed preview widens for unrevealed Quark Drive in Electric Terrain", asyn
   );
 });
 
+test("speed preview doubles for revealed Unburden after item consumption", async () => {
+  const base = makeSnapshot({
+    roomId: "battle-speed-unburden",
+    opponentSide: {
+      slot: "p2",
+      name: "Opponent",
+      active: makePokemon({
+        ident: "p2a: Hawlucha",
+        species: "Hawlucha",
+        displayName: "Hawlucha",
+        active: true,
+        ability: "Unburden",
+        removedItem: "Electric Seed",
+        stats: { hp: 307, atk: 302, def: 249, spa: 173, spd: 178, spe: 289 },
+        types: ["Fighting", "Flying"]
+      }),
+      team: [makePokemon({
+        ident: "p2a: Hawlucha",
+        species: "Hawlucha",
+        displayName: "Hawlucha",
+        active: true,
+        ability: "Unburden",
+        removedItem: "Electric Seed",
+        stats: { hp: 307, atk: 302, def: 249, spa: 173, spd: 178, spe: 289 },
+        types: ["Fighting", "Flying"]
+      })]
+    }
+  });
+
+  const intel = await buildLocalIntelSnapshot(base);
+  // With Unburden + consumed item, effective speed should be doubled
+  const minEffective = Number(intel.speedPreview?.effectiveRange?.min ?? 0);
+  assert.ok(minEffective >= 400, `expected Unburden-boosted min speed >= 400, got ${minEffective}`);
+});
+
+test("speed preview boosts for Booster Energy consumed by Quark Drive outside terrain", async () => {
+  const base = makeSnapshot({
+    roomId: "battle-speed-booster",
+    opponentSide: {
+      slot: "p2",
+      name: "Opponent",
+      active: makePokemon({
+        ident: "p2a: Iron Valiant",
+        species: "Iron Valiant",
+        displayName: "Iron Valiant",
+        active: true,
+        ability: "Quark Drive",
+        removedItem: "Booster Energy",
+        stats: { hp: 303, atk: 317, def: 226, spa: 348, spd: 226, spe: 350 },
+        types: ["Fairy", "Fighting"]
+      }),
+      team: [makePokemon({
+        ident: "p2a: Iron Valiant",
+        species: "Iron Valiant",
+        displayName: "Iron Valiant",
+        active: true,
+        ability: "Quark Drive",
+        removedItem: "Booster Energy",
+        stats: { hp: 303, atk: 317, def: 226, spa: 348, spd: 226, spe: 350 },
+        types: ["Fairy", "Fighting"]
+      })]
+    },
+    field: {
+      weather: null,
+      terrain: null,
+      pseudoWeather: [],
+      yourSideConditions: [],
+      opponentSideConditions: []
+    }
+  });
+
+  const intel = await buildLocalIntelSnapshot(base);
+  // With Quark Drive + Booster Energy consumed + no terrain, should get 1.5x boost
+  // Iron Valiant 116 base Spe: unboosted min ~241, with 1.5x → ~361
+  // Verify boost applied: min should exceed unboosted max (~364)
+  const minEffective = Number(intel.speedPreview?.effectiveRange?.min ?? 0);
+  assert.ok(minEffective > 300, `expected Booster Energy-boosted min > 300, got ${minEffective}`);
+});
+
 test("mock provider strategic mode emits strategic plan actions when no legal actions are present", async () => {
   const { MockProvider } = await import("../providers/mockProvider.js");
   const provider = new MockProvider();

@@ -15,7 +15,10 @@ import type {
 import {
   speedStageMultiplier,
   paralysisSpeedMultiplier,
-  matchingFieldSpeedAbilityRule
+  matchingFieldSpeedAbilityRule,
+  unburdenSpeedMultiplier,
+  boosterEnergySpeedMultiplier,
+  slowStartSpeedMultiplier
 } from "../mechanics/speed.js";
 
 type StatArchetypeId = PosteriorHypothesis["statArchetype"];
@@ -497,6 +500,13 @@ function effectiveSpeedForHypothesis(
   if (fieldSpeedRule) {
     speed = Math.floor(speed * fieldSpeedRule.multiplier);
   }
+  // Unburden: 2× after item consumption
+  const unburdenMul = unburdenSpeedMultiplier(abilityId, opponent.removedItem);
+  if (unburdenMul !== 1) speed = Math.floor(speed * unburdenMul);
+  // Booster Energy (non-field): 1.5× when Paradox ability consumed Booster Energy
+  const boosterMul = boosterEnergySpeedMultiplier(abilityId, opponent.removedItem, options.battleSnapshot?.field);
+  if (boosterMul !== 1) speed = Math.floor(speed * boosterMul);
+  // Slow Start: 0.5× for first 5 turns (turnsOnField not available here — skip)
   return speed;
 }
 

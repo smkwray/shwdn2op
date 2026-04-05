@@ -37,6 +37,8 @@ import {
   speedStageMultiplier,
   paralysisSpeedMultiplier,
   matchingFieldSpeedAbilityRule,
+  unburdenSpeedMultiplier,
+  boosterEnergySpeedMultiplier,
   type FieldSpeedAbilityRule
 } from "../mechanics/speed.js";
 import { buildDamagePreview, buildThreatPreview } from "../prompting/damageNotes.js";
@@ -1544,6 +1546,10 @@ function effectiveSpeedRangeForPokemon(
   if (revealedFieldSpeedAbility) {
     multiplier *= revealedFieldSpeedAbility.multiplier;
   }
+  // Unburden: 2× after item consumption (definite if ability is revealed)
+  multiplier *= unburdenSpeedMultiplier(abilityId, pokemon.removedItem);
+  // Booster Energy (non-field): 1.5× when Paradox ability consumed Booster Energy
+  multiplier *= boosterEnergySpeedMultiplier(abilityId, pokemon.removedItem, field);
   const possibleFieldSpeedMultiplier = possibleFieldSpeedAbilityRules(format, pokemon, field)
     .reduce((maxMultiplier, rule) => Math.max(maxMultiplier, rule.multiplier), 1);
   return {
