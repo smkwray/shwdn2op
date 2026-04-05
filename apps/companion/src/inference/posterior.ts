@@ -612,6 +612,13 @@ function inferenceEventLogScore(hypothesis: PosteriorHypothesis, events: Inferen
         }
         break;
       }
+      case "self_inflicted_status": {
+        // Flame Orb → brn, Toxic Orb → tox — deterministic item evidence
+        const orbItem = event.status === "brn" ? "flameorb" : event.status === "tox" ? "toxicorb" : null;
+        if (orbItem && hypothesisItemId === orbItem) logScore += Math.log(0.97);
+        else if (orbItem) logScore += Math.log(0.03);
+        break;
+      }
       case "ability_reveal": {
         const eventAbilityId = normalizeName(event.abilityName);
         if (hypothesisAbilityId === eventAbilityId) logScore += Math.log(0.97);
@@ -676,7 +683,11 @@ function candidateAbilities(opponent: PokemonSnapshot, format: string) {
 }
 
 function candidateItems(opponent: PokemonSnapshot, formatStats: PosteriorFormatStats) {
-  if (!opponent.item && opponent.removedItem) return [null];
+  // When an item has been consumed/removed, use the removed item as the
+  // candidate so the posterior can still score hypotheses about the mon's
+  // BUILD (ability, archetype, etc.).  Damage calc already skips the item
+  // when removedItem is set (line 359).
+  if (!opponent.item && opponent.removedItem) return [opponent.removedItem];
   if (opponent.item) return [opponent.item];
   return uniqueNames([
     ...combinedTopRecordNames([formatStats.observedItems, formatStats.curatedItems], 4),

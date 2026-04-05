@@ -6078,6 +6078,44 @@ test("inference parser emits ability_reveal from revealed ability on snapshot", 
   }
 });
 
+test("inference parser emits self_inflicted_status from Flame Orb status log line", () => {
+  const snapshot = makeSnapshot({
+    recentLog: [
+      "Turn 3 started.",
+      "Noivern gained status brn from Flame Orb."
+    ]
+  });
+  const events = parseInferenceEvents(snapshot);
+  const statusEvents = events.filter((e) => e.kind === "self_inflicted_status");
+  assert.ok(statusEvents.length >= 1, "should emit self_inflicted_status event");
+  assert.equal(statusEvents[0]!.species, "Noivern");
+  assert.equal(statusEvents[0]!.side, "opponent");
+  if (statusEvents[0]!.kind === "self_inflicted_status") {
+    assert.equal(statusEvents[0]!.status, "brn");
+  }
+});
+
+test("inference parser emits forced_switch from Eject Button removedItem", () => {
+  const snapshot = makeSnapshot();
+  const opponentWithEject = makePokemon({
+    ident: "p2a: Noivern",
+    species: "Noivern",
+    displayName: "Noivern",
+    active: true,
+    types: ["Flying", "Dragon"],
+    removedItem: "Eject Button"
+  });
+  snapshot.opponentSide.active = opponentWithEject;
+  snapshot.opponentSide.team = [opponentWithEject];
+  const events = parseInferenceEvents(snapshot);
+  const forced = events.filter((e) => e.kind === "forced_switch");
+  assert.ok(forced.length >= 1, "should emit forced_switch event");
+  assert.equal(forced[0]!.species, "Noivern");
+  if (forced[0]!.kind === "forced_switch") {
+    assert.equal(forced[0]!.itemName, "Eject Button");
+  }
+});
+
 test("liveLikelyItems filters to Life Orb when attack_recoil inference event is present", () => {
   const pokemon = makePokemon({
     ident: "p2a: Noivern",
@@ -6246,6 +6284,33 @@ test("liveLikelyItems does NOT filter when Poison type explains Toxic Spikes imm
   );
   // Poison type absorbs Toxic Spikes — no item evidence
   assert.deepEqual(result, ["Rocky Helmet", "Black Sludge", "Heavy-Duty Boots"]);
+});
+
+test("liveLikelyItems filters to Flame Orb when self_inflicted_status brn event is present", () => {
+  const pokemon = makePokemon({
+    ident: "p2a: Conkeldurr",
+    species: "Conkeldurr",
+    displayName: "Conkeldurr",
+    active: true,
+    types: ["Fighting"],
+    item: null,
+    removedItem: null
+  });
+  const result = filterLiveLikelyHeldItemNames(
+    "[Gen 9] OU",
+    pokemon,
+    ["Flame Orb", "Assault Vest", "Leftovers"],
+    {
+      inferenceEvents: [{
+        kind: "self_inflicted_status",
+        side: "opponent" as const,
+        species: "Conkeldurr",
+        turn: 3,
+        status: "brn"
+      }]
+    }
+  );
+  assert.deepEqual(result, ["Flame Orb"]);
 });
 
 test("posterior boosts Life Orb hypothesis when attack_recoil inference event is present", () => {

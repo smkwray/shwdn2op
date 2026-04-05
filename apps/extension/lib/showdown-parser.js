@@ -599,6 +599,12 @@ function handleLine(room, line) {
     case "-status": {
       const pokemon = ensurePokemon(room, args[0]);
       pokemon.status = args[1] ?? pokemon.status;
+      applyEffectSources(room, pokemon, args, 2);
+      const statusSourceLabel = hpChangeSourceLabel(args, 2);
+      if (statusSourceLabel) {
+        const parsedIdent = normalizeIdent(args[0]);
+        pushRecent(room.recentLog, `${parsedIdent.name ?? args[0]} gained status ${pokemon.status} from ${statusSourceLabel}.`);
+      }
       return;
     }
     case "-curestatus": {

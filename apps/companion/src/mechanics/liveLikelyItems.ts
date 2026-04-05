@@ -184,6 +184,13 @@ function itemStillLive(
       return itemId === normalizeName(healEvent.source);
     }
 
+    // self_inflicted_status → item IS the orb (Flame Orb for brn, Toxic Orb for tox)
+    const statusEvent = monEvents.find((e) => e.kind === "self_inflicted_status");
+    if (statusEvent && statusEvent.kind === "self_inflicted_status") {
+      const orbItem = statusEvent.status === "brn" ? "flameorb" : statusEvent.status === "tox" ? "toxicorb" : null;
+      if (orbItem) return itemId === orbItem;
+    }
+
     // contact_recoil from Rocky Helmet → item IS Rocky Helmet (only if item-sourced)
     const contactEvent = monEvents.find(
       (e) => e.kind === "contact_recoil" && e.source && normalizeName(e.source) === "rockyhelmet"

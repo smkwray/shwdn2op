@@ -61,6 +61,15 @@ function extractUsedMove(line: string): { actor: string; move: string } | null {
   return { actor: match[1]!.trim(), move: match[2]!.trim() };
 }
 
+/**
+ * Extract actor, status, and source from "X gained status Y from Z."
+ */
+function extractStatusSource(line: string): { actor: string; status: string; source: string } | null {
+  const match = line.match(/^(.+?) gained status (\w+) from (.+)\.$/);
+  if (!match) return null;
+  return { actor: match[1]!.trim(), status: match[2]!.trim(), source: match[3]!.trim() };
+}
+
 function extractTurnNumber(line: string): number | null {
   const match = line.match(/^Turn (\d+) started\.$/);
   return match ? Number(match[1]) : null;
@@ -126,6 +135,9 @@ const CONTACT_RECOIL_SOURCES = new Set(["rockyhelmet", "roughskin", "ironbarbs"]
 
 /** Sources that indicate healing on switch-out (ability). */
 const SWITCH_HEAL_SOURCES = new Set(["regenerator"]);
+
+/** Items that inflict a status on the holder at end of turn. */
+const SELF_STATUS_ITEM_SOURCES = new Set(["flameorb", "toxicorb"]);
 
 // ---------------------------------------------------------------------------
 // Core parser
@@ -207,6 +219,28 @@ function parseHpChangeEvents(
     const usedMove = extractUsedMove(line);
     if (usedMove) {
       lastMoveByActor = usedMove;
+      continue;
+    }
+
+    // Self-inflicted status from item (Flame Orb → brn, Toxic Orb → tox)
+    const statusSource = extractStatusSource(line);
+    if (statusSource) {
+      const statusSourceId = normalizeName(statusSource.source);
+      if (SELF_STATUS_ITEM_SOURCES.has(statusSourceId)) {
+        const resolved = resolveMon(snapshot, statusSource.actor);
+        if (resolved) {
+          const species = speciesDisplayName(resolved.pokemon);
+          if (species) {
+            events.push({
+              kind: "self_inflicted_status",
+              side: resolved.side,
+              species,
+              turn: activeTurn,
+              status: statusSource.status
+            });
+          }
+        }
+      }
       continue;
     }
 
@@ -389,6 +423,18 @@ function parseSnapshotItemConsumedEvents(
       itemName: pokemon.removedItem,
       trigger: "consumed"
     });
+
+    // Eject Button / Eject Pack → also emit forced_switch
+    const removedId = normalizeName(pokemon.removedItem);
+    if (removedId === "ejectbutton" || removedId === "ejectpack") {
+      events.push({
+        kind: "forced_switch",
+        side,
+        species,
+        turn: snapshot.turn,
+        itemName: pokemon.removedItem
+      });
+    }
   }
 }
 
