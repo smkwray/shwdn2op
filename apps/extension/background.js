@@ -697,6 +697,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       try {
         const response = await fetch(`${settings.companionUrl.replace(/\/$/, "")}/api/health`);
         const json = await response.json();
+        if (json?.repoRoot) {
+          await setSettings({ lastKnownRepoRoot: json.repoRoot });
+        }
         sendResponse({ ok: true, health: json });
       } catch (error) {
         sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });

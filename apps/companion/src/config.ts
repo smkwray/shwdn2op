@@ -18,6 +18,7 @@ function envBoolean(name: string, fallback: boolean): boolean {
 export const config = {
   host: env("COMPANION_HOST", "127.0.0.1"),
   port: Number.parseInt(env("COMPANION_PORT", "6127"), 10),
+  repoRoot,
   codexBin: env("CODEX_BIN", "codex"),
   claudeBin: env("CLAUDE_BIN", "claude"),
   geminiBin: env("GEMINI_BIN", "gemini"),

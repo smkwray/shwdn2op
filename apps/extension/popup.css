@@ -110,6 +110,23 @@ button.primary {
   border-color: #4361ee;
 }
 
+button.mini-btn {
+  padding: 4px 8px;
+  font-size: 10px;
+  background: #303743;
+  border-color: #434c5e;
+  color: #c6d1f7;
+}
+
+button.mini-btn:hover {
+  background: #434c5e;
+}
+
+button.mini-btn:active {
+  background: #4361ee;
+  color: #fff;
+}
+
 .mode-toggle {
   display: grid;
   grid-template-columns: 1fr 1fr;

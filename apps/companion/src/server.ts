@@ -29,6 +29,7 @@ export function buildServer() {
     return {
       ok: true,
       service: "showdnass-companion",
+      repoRoot: config.repoRoot,
       providerDefaults: {
         codex: config.defaultCodexModel,
         claude: config.defaultClaudeModel,

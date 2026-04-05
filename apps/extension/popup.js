@@ -35,6 +35,7 @@ const summaryEl = document.getElementById("summary");
 const snapshotInfoEl = document.getElementById("snapshotInfo");
 const roomStatusEl = document.getElementById("roomStatus");
 const healthEl = document.getElementById("health");
+const copyLaunchCommandEl = document.getElementById("copyLaunchCommand");
 const analyzeEl = document.getElementById("analyze");
 
 function setHealthLabel(text, state) {
@@ -225,15 +226,44 @@ async function autoSaveSettings() {
 async function refreshHealth() {
   setHealthLabel("checking local companion...", "checking");
   const response = await chrome.runtime.sendMessage({ type: "companion-health" });
+  const settingsResponse = await chrome.runtime.sendMessage({ type: "get-settings" });
+  const settings = settingsResponse?.settings;
+  
   if (!response?.ok) {
     setHealthLabel(`unreachable at ${companionUrlEl.value.trim() || DEFAULT_SETTINGS.companionUrl}`, "bad");
+    if (settings?.lastKnownRepoRoot) {
+      copyLaunchCommandEl.style.display = "inline-block";
+    } else {
+      copyLaunchCommandEl.style.display = "none";
+    }
     return;
   }
+
+  copyLaunchCommandEl.style.display = "none";
   const health = response.health;
   const codex = health.providers?.codex?.available ? "codex ✓" : "codex ×";
   const claude = health.providers?.claude?.available ? "claude ✓" : "claude ×";
   const gemini = health.providers?.gemini?.available ? "gemini ✓" : "gemini ×";
   setHealthLabel(`reachable · ${codex} · ${claude} · ${gemini}`, "ok");
+}
+
+async function copyLaunchCommand() {
+  const response = await chrome.runtime.sendMessage({ type: "get-settings" });
+  const repoRoot = response?.settings?.lastKnownRepoRoot;
+  if (!repoRoot) return;
+
+  const command = `cd ${repoRoot} && npm --prefix apps/companion run dev`;
+  await navigator.clipboard.writeText(command);
+  
+  const originalText = copyLaunchCommandEl.textContent;
+  copyLaunchCommandEl.textContent = "Copied!";
+  copyLaunchCommandEl.style.borderColor = "#4361ee";
+  copyLaunchCommandEl.style.background = "#273a7d";
+  setTimeout(() => {
+    copyLaunchCommandEl.textContent = originalText;
+    copyLaunchCommandEl.style.borderColor = "";
+    copyLaunchCommandEl.style.background = "";
+  }, 2000);
 }
 
 async function refreshSnapshot() {
@@ -336,6 +366,7 @@ showDebugPanelEl.addEventListener("change", autoSaveSettings);
 autoDownloadReplayEl.addEventListener("change", autoSaveSettings);
 companionUrlEl.addEventListener("change", autoSaveSettings);
 analyzeEl.addEventListener("click", analyzeCurrentTurn);
+copyLaunchCommandEl.addEventListener("click", copyLaunchCommand);
 
 await loadSettings();
 await refreshHealth();

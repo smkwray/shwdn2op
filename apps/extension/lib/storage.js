@@ -40,7 +40,8 @@ export const DEFAULT_SETTINGS = {
   showSelfActionPanel: false,
   showDamagePanel: false,
   showMechanicsPanel: false,
-  showDebugPanel: false
+  showDebugPanel: false,
+  lastKnownRepoRoot: ""
 };
 
 export async function getSettings() {
