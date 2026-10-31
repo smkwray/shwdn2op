@@ -1,0 +1,27 @@
+# Iteration-3 fine-tune data mix: config/uu-iter2-mix.yaml with one change, the human dataset. iter2's 8,812-POV human
+# train split is replaced by the joint split (tmp/uu-human-20261022/split-joint/train: 40,038 POVs; iter2's split plus
+# public 2025-10..2026-10 UU battles and owner games; player-disjoint from split-joint/val; eval-pool families excluded;
+# split.json). Human weight stays 0.30, so the only change is human-data breadth. Self-play piles: v2, as iter2.
+# Dirs are project-relative; the launcher maps them to the host's verified copies with
+# finetune_portable.py --remap tmp/uu-iter3/human=... --remap tmp/uu-iter2/piles-v2=...
+# Metamon dataset config: metamon.rl.dataset_config reads replay_weight / custom_replays / formats and ignores `arms`.
+# Weights are renormalised by Metamon; each custom dir holds gen9uu/*.json.lz4.
+replay_weight: 0.0   # no gen9ou download; the e34 Kakuna-vs-Kakuna stratum is the base anchor.
+formats: [gen9uu]
+custom_replays:
+  # Rank 1: current-UU human demonstrations, joint split train (human_replays.py fetch -> Metamon replay_parser).
+  - dir: tmp/uu-iter3/human/train
+    weight: 0.30
+  # Rank 2: heterogeneous league (config/uu-league-iter2.yaml), frozen per stratum with freeze_pile.py --models.
+  # Kakuna-family POVs: UUKakuna epoch 34 at T 0.7-1.0 and ft1 exports.
+  - dir: tmp/uu-iter2/piles-v2/league-kakuna/UUKakuna/metamon
+    weight: 0.30
+  # Other league POVs: LeagueAlakazam, LeagueKadabra4, LeagueAbra.
+  - dir: tmp/uu-iter2/piles-v2/league-other/UUKakuna/metamon
+    weight: 0.15
+  # Continuity and base-behaviour anchor: the epoch-34 Kakuna-vs-Kakuna UU piles.
+  - dir: tmp/uu-iter2/piles-v2/continuity/UUKakuna/metamon
+    weight: 0.25
+# lr_warmup_steps counts optimizer updates; seq_floor_warmup_steps counts forward calls (grad_accum 4 per update).
+arms:
+  lr3e-5: {learning_rate: 3.0e-5, lr_warmup_steps: 750, seq_floor_warmup_steps: 3000}

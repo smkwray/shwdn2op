@@ -1,0 +1,26 @@
+# Curriculum arm C (pre-registered): config/uu-iter3-mix.yaml (the matched
+# control U) with one change. Each source keeps its iter3 weight, split 80% ordinary sampling of the whole source dir and
+# 20% from that source's event-balanced curriculum pile (scripts/uu_selfplay/curriculum.py freeze: full episodes, five
+# event strata, one POV per battle, family cap, no reviewed games or eval families; true recorded actions and rewards).
+# Launch with finetune_portable.py --remap as iter3, plus --remap tmp/learn-exp-20261024/curriculum=<host copy>.
+replay_weight: 0.0
+formats: [gen9uu]
+custom_replays:
+  - dir: tmp/uu-iter3/human/train
+    weight: 0.24
+  - dir: tmp/learn-exp-20261024/curriculum/human
+    weight: 0.06
+  - dir: tmp/uu-iter2/piles-v2/league-kakuna/UUKakuna/metamon
+    weight: 0.24
+  - dir: tmp/learn-exp-20261024/curriculum/league-kakuna
+    weight: 0.06
+  - dir: tmp/uu-iter2/piles-v2/league-other/UUKakuna/metamon
+    weight: 0.12
+  - dir: tmp/learn-exp-20261024/curriculum/league-other
+    weight: 0.03
+  - dir: tmp/uu-iter2/piles-v2/continuity/UUKakuna/metamon
+    weight: 0.20
+  - dir: tmp/learn-exp-20261024/curriculum/continuity
+    weight: 0.05
+arms:
+  lr3e-5: {learning_rate: 3.0e-5, lr_warmup_steps: 750, seq_floor_warmup_steps: 3000}

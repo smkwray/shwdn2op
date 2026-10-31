@@ -1,0 +1,11 @@
+{
+  "metamon": {
+    "fork": "vendor/metamon",
+    "upstream": "0a00a759c9a4382a2877088d828302ec294a05a5",
+    "tree_sha256": "641b523a1b690e648d3c554eefd7f1897a79defd67341043d18c4350f8f0437a",
+    "files": 202
+  },
+  "amago": {
+    "amago/experiment.py": "ca109f8f9041baafe1228859c9cab56b29a1e9cd4be1feb99b0174bcc94566c1"
+  }
+}

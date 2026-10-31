@@ -1,0 +1,34 @@
+# Heterogeneous Gen 9 UU self-play league for fine-tune iteration 2. Metamon ladder-config format, run by
+#   PY scripts/uu_selfplay/block_portable.py --run RUN --block lgN --league config/uu-league-iter2.yaml \
+#      --export-dir DIR_WITH_policy_epoch_{2,4,8}.pt --challenges N --seconds S [--device cpu]
+# Accounts become UU<block><key>[n]; each process draws its checkpoint and temperature once at start.
+# Matching is the local ladder's, so opponent shares are emergent: read them from the block lifecycle's
+# pov_vs_opponent. Teams: human-roster train families (non-mirror by construction: 127 families per side).
+# 12 accounts (11 model workers + 1 heuristic), sized for the larger hosts; a host under a lower owner worker cap runs
+# a device-local subset (config/uu-league-iter2-<host>.yaml, gitignored) instead.
+defaults:
+  team_set: uu_train_v1
+  battle_backend: metamon
+  checkpoints: [null]          # registry default checkpoint
+  temperatures: [0.8]
+  num_agents: 1
+agents:
+  # Current policy (anchor): epoch-34 Kakuna at realistic temperatures.
+  K34: {model_name: UUKakuna, checkpoints: [34], temperatures: [0.7, 0.85, 1.0], num_agents: 3}
+  # Past checkpoints as league members, not the whole league: ft1 EMA exports (export_candidate.py).
+  Ft: {model_name: UUExport, checkpoints: [2, 4, 8], temperatures: [0.8, 1.0], num_agents: 2,
+       sha256: {2: 7831c0d97d594a3023984777cfac421748197e7524c60f75ebc048d7a6d7b7a1,
+                4: ec56dae5fb5aadc70dfdfc78953f7763e88b962c91f7008866c768e13855fead,
+                8: 25b8d7d5f468844a1cd04205fcde74d3efdf22ec781b62b780f6a2bf5d4bb2a7}}
+  # Other Gen-9-capable upstream policies (HF jakegrigsby/metamon; sizes at the default checkpoint).
+  Sk: {model_name: LeagueSuperkazam}                          # 142M, Kakuna's parent, 0.57 GB
+  Al: {model_name: LeagueAlakazam}                            # ~50M, tera-bug-patched PAC line, 0.30 GB
+  Kd4: {model_name: LeagueKadabra4}                           # ~50M, PAC qualifier #2 gen9ou, 0.30 GB
+  Ab: {model_name: LeagueAbra, temperatures: [0.9]}           # 57M, early gen9 synthetic, 0.23 GB
+  Mk: {model_name: LeagueMinikazam, temperatures: [0.9]}      # 4.7M RNN, 0.02 GB
+  # Stress stratum: epoch-34 Kakuna on uu_stress_v1 (human_replays.py teams: human-revealed rosters from the human
+  # train split, unrevealed fields sampled from usage stats rather than modal, PS-validated). Install the set into
+  # RUN/cache/teams/ first; every other account keeps the realistic uu_train_v1 families.
+  KS: {model_name: UUKakuna, checkpoints: [34], temperatures: [0.85], team_set: uu_stress_v1}
+  # Simple heuristic opponent (writes no trajectories; its opponents' POVs are kept).
+  Hs: {model_name: "baseline:PokeEnvHeuristic"}

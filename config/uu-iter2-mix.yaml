@@ -1,0 +1,34 @@
+# Iteration-2 fine-tune data mix and optimizer probe arms. Self-play piles v2 (tmp/uu-iter2/piles-v2, cut 2026-10-22 10:09 UTC): frozen from the
+# source blocks with freeze_pile.py's trajectory-read own-Illusion rule (pre-fork blocks only), post-fork blocks included.
+# v1 piles (cut 2026-10-21 21:50 UTC; sidecar-team Illusion exclusion, wrong) kept for provenance only, at the same paths
+# with piles/ for piles-v2/: tmp/uu-iter2/piles/{league-kakuna,league-other,continuity}/UUKakuna/metamon.
+# Metamon dataset config: metamon.rl.dataset_config reads replay_weight / custom_replays / formats and ignores `arms`.
+# Run on the eval host from the project root with scripts/uu_selfplay/finetune.sh RUN NAME config/uu-iter2-mix.yaml EPOCHS
+# STEPS EVERY DEADLINE ARM. Dirs are project-relative (finetune.sh resolves them from the project root; elsewhere
+# finetune_portable.py --remap maps them to the host's verified copies).
+# Weights are renormalised by Metamon; each custom dir holds gen9uu/*.json.lz4.
+replay_weight: 0.0   # no gen9ou download; the e34 Kakuna-vs-Kakuna stratum is the base anchor.
+formats: [gen9uu]
+custom_replays:
+  # Rank 1: current-UU human demonstrations (human_replays.py fetch -> Metamon replay_parser -> split train;
+  # eval-team-pool dev/held-out families and source replays excluded; player-disjoint val; last 14 days = test).
+  - dir: tmp/uu-iter2/human/split/train
+    weight: 0.30
+  # Rank 2: heterogeneous league (config/uu-league-iter2.yaml), frozen per stratum with freeze_pile.py --models.
+  # Kakuna-family POVs: UUKakuna epoch 34 at T 0.7-1.0 and ft1 exports.
+  - dir: tmp/uu-iter2/piles-v2/league-kakuna/UUKakuna/metamon
+    weight: 0.30
+  # Other league POVs: LeagueAlakazam, LeagueKadabra4, LeagueAbra (no Superkazam/Minikazam blocks ran by the cut).
+  - dir: tmp/uu-iter2/piles-v2/league-other/UUKakuna/metamon
+    weight: 0.15
+  # Continuity and base-behaviour anchor: the existing epoch-34 Kakuna-vs-Kakuna UU piles (iter1 plus the
+  # per-device blocks, T 1.0-1.5). Kept small so the run cannot repeat ft1's 100% same-policy diet.
+  - dir: tmp/uu-iter2/piles-v2/continuity/UUKakuna/metamon
+    weight: 0.25
+# Short probes from epoch 34 (2 epochs x 1,000 optimizer steps, checkpoint every epoch); promote one arm to
+# 10k-20k steps. lr_warmup_steps counts optimizer updates; the IS filter's seq_floor_warmup_steps counts forward
+# calls, i.e. grad_accum (4) per update, so 3,000 calls = 750 updates. Upstream finetune.gin: 8e-5, 5,000 / 4,000.
+arms:
+  lr1e-5: {learning_rate: 1.0e-5, lr_warmup_steps: 750, seq_floor_warmup_steps: 3000}
+  lr3e-5: {learning_rate: 3.0e-5, lr_warmup_steps: 750, seq_floor_warmup_steps: 3000}
+  lr8e-5: {learning_rate: 8.0e-5, lr_warmup_steps: 750, seq_floor_warmup_steps: 3000}
