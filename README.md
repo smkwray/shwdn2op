@@ -3,27 +3,48 @@
   shwdn2op
 </h1>
 
-**shwdn2op** — Showdown second opinion. A local tool for Pokémon Showdown that reads the live battle state, tracks likely hidden information from your local history, estimates speed and damage, and surfaces a structured recommendation. You make the final call — it never clicks, submits, or plays for you.
+**shwdn2op** (Showdown second opinion) is a local advisor for Pokémon Showdown Gen 9 UU (the UnderUsed tier). A Chromium Manifest V3 (MV3) extension
+streams the battle to a local companion. Under Showdown's own controls, the companion shows the pick of a Metamon
+policy (Kakuna, epoch 34), together with deterministic damage, speed, threat and likely-set notes. It is advisory only:
+it never clicks, sends a choice, ladders or plays for you. A separate **battle-agent** can play local simulated matches
+through validated actions.
 
 ## What it does today
 
-During a Pokémon Showdown battle the extension captures a structured snapshot of the current turn — teams, HP, boosts, field conditions, legal actions, and recent log — and sends it to the local companion daemon. The companion builds a deterministic read of the position first: likely opposing sets and team tendencies from stored local history, estimated speed relationships, damage ranges, type-based interactions, known move tracking, and hidden-info assumptions. That deterministic layer is the foundation of the recommendation system.
+During a Pokémon Showdown battle the extension forwards ordered protocol observations and private requests to the local companion. The companion reduces the canonical state, enumerates actions and builds a deterministic read: hidden-set hypotheses, speed relationships, damage ranges and scored candidate actions. A versioned decision envelope binds those results to the room, request, state revision and hashes. The extension renders that same result, rejecting responses for an older decision. See the [deterministic API contract](apps/companion/README.md).
 
-The extension currently surfaces:
+In battle, the extension annotates Showdown's own move and switch buttons (no overlay):
 
-- **Local Intel** — likely item, ability, Tera, move, and set patterns inferred from reveals plus your locally accumulated battle history
-- **Line to Respect** — the opponent-side action or punish line you most need to account for from the current board and inferred hidden info
-- **Best Line** — your-side recommended action based on deterministic battle-state analysis of the current position
-- **Damage Matrix** and **Mechanics** — damage estimates, speed context, and other structured matchup details
-- A debug panel for raw snapshot inspection
-- **Ask a Friend** — optional one-shot model analysis layered on top of the deterministic snapshot and local intel
+- **Metamon's pick** — the model's most probable action with its probability, a close runner-up, and its best
+  action of the other kind (a switch beside a move pick, a move beside a switch pick)
+- **Warnings** — one short line each (full fact in the tooltip) for likely mistakes; warnings never change the pick
+- **Speed, damage and threats** — the engine's move order, damage bands (hover a move for its band against every
+  opposing Pokémon seen so far) and the opponent's threatening replies
+- **Likely set** — the opponent's revealed facts plus likely items, abilities, Tera and moves from your locally
+  accumulated battle history and monthly ladder usage
+- **Usual lead** — at team preview, a lead model's usual lead for your team
 
-The main path is text-first. Battle state is extracted from the Showdown page DOM and protocol messages, not from screenshots or browser automation.
+Each section shows as soon as it is ready, and every unavailable state says why. The main path uses text protocol and
+private requests. Legacy and Preact page adapters supply recovery data and active-room hints. Screenshots and browser
+automation are not runtime dependencies.
+
+## Gen 9 UU model advisor
+
+- **Model.** The companion runs [Metamon](https://github.com/UT-Austin-RPL/metamon)'s Kakuna checkpoint (epoch 34,
+  unchanged weights) through a pinned worker. The worker uses the project's MIT fork in `vendor/metamon`.
+  - Gen 9 UU is out of distribution for Kakuna. Its format token is unknown to the tokenizer.
+  - The worker samples from Metamon's own action distribution. The deterministic layer never replaces the pick.
+  - A shadow re-ranker logs where rules-certain failures would be avoided, but it does not change the advice.
+  - Short warnings flag likely mistakes.
+- **Lead suggestion.** At team preview, a separate lead model shows the *usual* lead ("Usual lead: X (NN%)").
+- **Self-play and fine-tuning.** `scripts/uu_selfplay` produces self-play data in Metamon's replay format, freezes it into
+  hash-manifested piles, and fine-tunes candidates. A candidate replaces the live model only after it passes the
+  certification described under Evaluation. None has.
 
 ## Safety boundaries
 
-- Advisory only — all recommendations require you to act on them manually
-- No auto-clicking, no move submission, no unattended play
+- The browser extension is advisory; you submit its recommendations manually
+- The separately authorized battle-agent executor currently targets offline simulations; no live autonomous ladder operation is enabled
 - No screenshot-first or browser-control-first architecture
 - Hidden information (unrevealed sets, opponent team preview choices) is surfaced as assumptions, never presented as known
 
@@ -38,14 +59,43 @@ If you play in events with anti-ghosting rules, do not use live advice tools dur
 | `gemini` | `gemini` | `gemini-3-flash-preview` |
 | `mock` | — | — |
 
-Each provider calls the corresponding local CLI. You need that CLI installed and authenticated separately. `mock` returns a canned response with no external calls and is the easiest way to smoke-test the full pipeline before trying a real provider.
+These providers back the companion's legacy `/api/analyze` endpoint; the extension's Metamon-only UI no longer calls
+them. Each provider calls the corresponding local CLI. You need that CLI installed and authenticated separately. `mock` returns a canned response with no external calls and is the easiest way to smoke-test the provider path before trying a real provider.
+
+## OpenCode battle-agent and offline matches
+
+The separate battle-agent uses the same canonical state, deterministic analysis and exact legal actions. It supports configured OpenCode models: **GPT-6 Luna** (`openai/gpt-6-luna#xhigh`) and **Sonnet 5.5** (`anthropic/claude-sonnet-5-5#high`). It uses OpenCode v2 stateless generation with no model tools. The prompt includes canonical pending attacks and recent events as observations, with current state and legality taking precedence; this is not persistent plan memory. Invalid JSON, stale identities and unavailable actions are rejected.
+
+Request an advisory decision without submitting a move:
+
+```bash
+npm run battle-agent:decide -- --model luna
+npm run battle-agent:decide -- --model sonnet
+```
+
+Run a seeded local Gen 9 UU match against a random policy, or explicitly select two models:
+
+```bash
+npm run battle-agent:sim -- --output /tmp/shwdn2op-local-match
+npm run battle-agent:sim -- --p1 sonnet --p2 luna --max-turns 100 --output /tmp/shwdn2op-model-match
+```
+
+The default matchup makes no model calls. Model matchups use your existing OpenCode authentication and provider usage. Matches isolate each player's private requests and use ephemeral history. The simulator permits one correction for rejected JSON, schema or action selection by default. With Luna, `--fallback sonnet` is the default: one one-way hop is allowed only after a nonzero Luna CLI exit declares OpenAI's `server_is_overloaded:` code. Generic 503 errors, invalid formatting and cancellation do not trigger that hop. One shared correction plus one hop allows at most three generations with `--model-attempts 2`, or two with `--model-attempts 1`, all within the original deadline and current identity. `--fallback none` disables the hop and stops on policy failure; `--fallback deterministic` explicitly selects the separate deterministic fallback instead. Reports attribute each attempt to its actual model and count corrections and capacity hops separately. `--help` lists teams, seeds, deadlines and output options. Team legality is checked against the pinned simulator rules; this is not a current live-validator certificate.
+
+For prompt experiments, `--prompt baseline|temporal|card` keeps model effort independent from context. Card mode supports `--heuristics raw|banded|hidden` and places current evidence before its optional shortlist. The advisory CLI also offers an explicitly invoked `--task plan` shadow task and exact-request `card-ledger` comparison. Plans cannot execute actions or carry across turns; these experimental modes have no demonstrated strength benefit. See the [companion context contract](apps/companion/README.md#experimental-decision-context).
+
+Completed model games used low effort. Eight isolated Luna xhigh decisions passed; Sonnet high and overload fallback have mock coverage, not completed-game qualification. These checks do not establish playing strength.
+
+Local deadlines bound returned decisions; OpenCode's stateless endpoint does not establish upstream request cancellation. Its text output is prompt-constrained and locally validated, so a model may fail a decision. See the [companion contract](apps/companion/README.md) for the Metamon runtime and match interfaces.
+
+Model weights and runtime caches stay outside the checkout. Keep shared datasets compact and use small synthetic test fixtures.
 
 ## Quick start
 
 ### Requirements
 
-- Node 20+
-- One or more supported CLIs installed locally (`codex`, `claude`, or `gemini`)
+- Node 22.18+
+- A supported CLI only if you want optional model analysis; deterministic evaluation runs locally without one
 
 ### Install dependencies
 
@@ -59,7 +109,24 @@ npm install
 npm run companion:dev
 ```
 
-The companion listens on `http://127.0.0.1:6127` by default.
+The companion listens on `http://127.0.0.1:6127` by default. For the Metamon advisor, start it with
+`zsh scripts/start_companion.sh LAUNCH_JSON`; without a launch file, only the deterministic notes are shown. The script
+logs to `tmp/`, which a fresh clone lacks, so run `mkdir -p tmp` first. `LAUNCH_JSON` describes your local worker
+runtime. Its schema is `launchSchema` in
+[`apps/companion/src/battle-agent/liveMetamon.ts`](apps/companion/src/battle-agent/liveMetamon.ts); `args` must contain
+`{seed}`. For example (the paths are placeholders for your own runtime and checkpoint):
+
+```json
+{
+  "command": "tmp/metamon-port/.venv/bin/python",
+  "args": ["scripts/metamon-worker.py", "--checkpoint", "PATH/TO/kakuna_epoch_34.pt", "--seed", "{seed}", "--seed-per-side"],
+  "workerSha256": "SHA-256 OF scripts/metamon-worker.py",
+  "maxWorkers": 1
+}
+```
+
+The runtime itself (Python, Metamon and the Kakuna weights) is not in this repository: see
+[`vendor/metamon/README.md`](vendor/metamon/README.md) and [Metamon](https://github.com/UT-Austin-RPL/metamon).
 
 ### Load the extension
 
@@ -72,28 +139,14 @@ The companion listens on `http://127.0.0.1:6127` by default.
 
 1. Open [Pokémon Showdown](https://play.pokemonshowdown.com/)
 2. Start or join a battle
-3. Open the extension popup
-4. Confirm the **Companion URL** is `http://127.0.0.1:6127`
-5. Confirm the popup says **Companion: reachable** before you start relying on the overlay or **Ask a Friend**
-6. Select a provider — use `mock` for a safe smoke test, or `codex` for the real default path
-7. Click **Ask a Friend**
+3. Open the extension popup and confirm the companion is reachable; the toggle turns the inline advice on or off
+4. The pick and notes appear under Showdown's move and switch buttons on each of your turns
 
-If the popup says `unreachable`, the local companion daemon is not answering on `http://127.0.0.1:6127` and battle snapshots will not analyze correctly.
-
-The popup reports the current room status once the companion is reachable:
-
-| Status | Meaning |
-|--------|---------|
-| `ready` | Snapshot captured, analysis should work |
-| `waiting` | Not your turn yet |
-| `ambiguous` | Multiple battle tabs open — focus the one you want |
-| `stale` | No recent battle traffic; wait for the next turn |
-
-**Keyboard shortcut:** `Alt+Shift+S` toggles the in-page overlay panels.
+If the companion is unreachable, the inline notes say so instead of showing stale advice.
 
 ## Testing with mock
 
-The `mock` provider exercises the full path from extension through companion without calling any external CLI:
+The `mock` smoke calls the mock provider directly, with no browser, extension or HTTP server, and no external CLI:
 
 ```bash
 npm run smoke:mock
@@ -117,46 +170,95 @@ npm run smoke:gemini
 npm run mcp:serve
 ```
 
-## Replay extraction and eval
+## Evaluation
 
-`shwdn2op` includes offline tooling for extracting labeled examples from saved Showdown replay logs and evaluating the deterministic recommender against them.
+### Replay imitation metrics (deterministic recommender)
 
-### Extract examples from replays
+`npm run replay:extract` and `npm run replay:eval` score the deterministic recommender against actions taken in saved
+replays. They report top-1/top-3 accuracy, mean reciprocal rank (MRR), and accuracy by action kind. This measures agreement with replay
+actions, not playing strength. Outputs go to the gitignored `ml-artifacts/`.
 
-```bash
-npm run replay:extract
-```
+### Model strength: paired-slot evaluation
 
-Reads replay logs from `replays/`, extracts per-turn decision examples with the action the player actually chose as the label, and writes JSONL output under `ml-artifacts/`.
+**Current status:** the live advisor runs Kakuna epoch 34. **No fine-tuned model or re-ranker has been shown to play
+Gen 9 UU better than it.** The only held-out test run so far failed. New certification is on hold until
+every component listed below has qualified. Nothing in this repository is a strength claim.
 
-### Evaluate the recommender
+**Design** (`scripts/uu_eval`).
+- **Arms.** Each comparison plays two arms on identical slots:
+  - B0 is Kakuna e34 against Kakuna e34;
+  - B1 changes only the home seat, to the candidate.
+- **Slots.** A slot fixes the home team family, the opponent family (a ring offset), the seat, and a native simulator
+  seed vector.
+- **Teams.** Families are human-derived rosters, and each family is represented by one team.
+- **What is frozen.** The spec, the producer source, the runtime and the team hashes are frozen before any game runs.
+  Every game is re-verified by an official recorded-choice replay. Verification uses no model.
+- **Failed games.**
+  - Crashes, deadlines and turn caps are *censored*. They never count as draws or wins, and they are never retried or
+    replaced.
+  - An incomplete pair drops out of the paired estimate. The pair is still listed.
 
-```bash
-npm run replay:eval
-```
+**Inference.**
+- **Unit of analysis.** Home-family means of the paired terminal score difference (B1 − B0), with equal family weights.
+- **Interval.** A deterministic 10,000-draw family-cluster bootstrap gives a 95% percentile interval. All slots of a
+  family stay together.
+- **Sign-flip test.** For the terminal score it is exact at any number of families, because family means are exact
+  rationals. For the secondary material metrics it is exact up to 16 families and seeded Monte Carlo above that.
+- **Opponent dependence.** Opponent families recur across clusters, so these intervals are conditional on the fixed dev
+  panel. They are not population estimates.
+- **Qualification runs.** These are 8-game pipeline checks. They cannot support any claim.
 
-Scores the deterministic recommender's top-1 and top-3 accuracy, MRR, and action-kind breakdowns against extracted examples. This is imitation-style offline eval against replay actions, not a solved best-play benchmark.
+**Certification campaign** (on hold).
+- **Retired entry point.** Certification entry through the dev evaluator is retired. `evaluate.py prepare` now refuses
+  anything except a `--qualification` run.
+- **What replaces it.** A future strength claim must pass a single-controller campaign:
+  - **Fresh panels.** Fresh team-family blocks from both rosters; families used historically are excluded.
+  - **Reservation.** One dev and one held-out reservation per candidate, where the candidate is identified by its
+    *typed tensor identity*: names, dtypes, shapes and values, independent of file name or serialization. This means a
+    re-saved or renamed checkpoint cannot reset its budget. There are no refunds or replacements.
+  - **Alpha spending.** The global held-out level is α = 0.05, spent as α_k = 0.05 / (k(k+1)) at the k-th held-out
+    attempt (`scripts/uu_eval/campaign.py`).
+  - **Inference.** A fixed-N exact betting e-value mixture with a lower confidence bound (`campaign_inference.py`). It
+    is a fixed-sample test, not an optional-stopping guarantee.
+  - **Power.** Design power must be checked by simulation before any run (`campaign_power.py`).
+- **Boundary of the campaign code.** `campaign.py` implements the typed tensor identity, but `reserve` records the
+  binding hashes it is given; it does not recompute them from a checkpoint. It also does not enforce dev success before
+  a held-out reservation. Both belong to the qualified controller, which is not built yet. The 0.05 budget covers the
+  held-out reservations in this prospective campaign's new ledger; historical tests imported into the ledger are not
+  charged against it.
+- **Still open.** Before any campaign is admitted, these must be frozen and qualified:
+  - the canonical ledger writer;
+  - fresh family blocks;
+  - the native inference qualification;
+  - the actual-design power check.
 
-Generated outputs go to `ml-artifacts/` and are gitignored.
+**Internal progress screens** (`scripts/uu_selfplay/progress_eval.py`). These select training candidates only; they are
+never certification, because they reuse training-reserved families adaptively.
+- **Registered design.** A selection screen plays 960 games: 24 progress families × 10 repetitions × 2 seats × 2 arms
+  (`progress_panel.py` with its default 24 families, and `batch_collect.py --purpose progress
+  --progress-repetitions 10`). The default of one repetition gives a 96-game pipeline check, not a selection screen.
+- **What the helper checks.** `progress_eval.py` checks completeness against the plan it is given, not against N = 960,
+  so a smaller plan can still trigger. A consumer that selects a candidate must check the registered design itself.
+- **Pass rule.** A screen passes only if two conditions hold:
+  - the candidate scores at least 0.60;
+  - the paired bootstrap lower bound exceeds +0.05.
+- **Censoring.**
+  - Only deadline censoring is allowed, up to 2% of games.
+  - Censored games are re-scored pessimistically (a loss for the candidate, a win for the baseline), and the screen must
+    pass that way too.
+  - Any other error or missing game fails the screen.
 
-## Publishing from the main folder
+## Privacy and publishing
 
-The repo is set up so you can publish directly from the main folder instead of maintaining a separate release-staging tree.
+Private and device-local material is gitignored: `do/`, `tmp/`, `.local-data/`, `config/local/`, model weights, and
+agent-local directories. Before a commit, the hooks in `.githooks/` run two checks:
+- `scripts/hygiene_check.sh --staged`;
+- `python3 scripts/privacy_gate.py --require-private --cached`. This needs a local, gitignored `.private-denylist`.
 
-Local-only and internal material is meant to stay out via `.gitignore`, especially:
-
-- `do/`
-- `docs/`
-- `replays/`
-- `ml-artifacts/`
-- `.env`, `.mcp.json`, and `.codex/`
-- internal prompt and agent notes
-
-Before pushing, the practical check is just:
-
-```bash
-npm test --silent
-```
+Before a push, scan exactly the objects being pushed (`<remote>/main..<branch>`) for denylist terms, home and cloud
+paths, and secrets, and run the test suites (`npm test`, and `python3 -m unittest` in `scripts/uu_eval`). This
+repository ships no continuous-integration (CI) workflow; the recommended CI command is
+`python3 scripts/privacy_gate.py --public-ci`.
 
 ## Project structure
 
@@ -168,7 +270,8 @@ apps/
 packages/
   schemas/          Shared JSON schemas (BattleSnapshot, AnalysisResult)
 examples/           Sample snapshots and raw protocol frames
-scripts/            Replay extraction, eval, and small local utilities
+scripts/            Live operations, browser checks, replay extraction, uu_selfplay, uu_eval
+vendor/metamon/     MIT fork of Metamon used by the model worker
 ```
 
 ## Schemas
@@ -194,12 +297,17 @@ The companion reads environment variables for overrides:
 
 ## Current limitations
 
-- Protocol coverage is incomplete — some battle formats, edge cases, and multi-battle scenarios may produce partial or missing snapshots
-- Deterministic analysis quality varies; the damage calc and threat-assessment layers are still being calibrated
-- No learned priors or rerankers yet — the core recommender is still mostly deterministic
-- UX is functional but unpolished
-- The MCP server covers a starter subset of dex data, not the full Pokédex surface
-- Only tested on Vivaldi and Chrome; other Chromium browsers may work but are not verified
+- **No certified model.** Kakuna epoch 34 is the live model, and Gen 9 UU is outside its training distribution. No
+  fine-tuned candidate has been shown to beat it, and the certification campaign is on hold (see Evaluation).
+- **Heuristic notes.** Candidate scores, warnings and confidence tiers are heuristics, not calibrated win probabilities.
+- **Withheld advice.** Ambiguous identities and unsupported recovery or mechanics states withhold advice with a stated
+  reason.
+- **Singles only.** Gen 9 singles is the only action contract. Doubles and multi report an explicit unsupported
+  capability.
+- **Hardware.** The model worker needs a local GPU or an Apple-silicon MLX runtime. Weights are not distributed in this
+  repository: `vendor/metamon/assemble.py` builds a runtime from an upstream Metamon checkout.
+- **MCP coverage.** The MCP server covers a starter subset of dex data.
+- **Browsers.** Only Chrome-family browsers are tested.
 
 ## License
 
