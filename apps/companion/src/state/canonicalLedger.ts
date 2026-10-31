@@ -1,4 +1,5 @@
 import type { BattleSnapshot, PendingAttack, PokemonSnapshot } from "../types.js";
+import assert from "node:assert/strict";
 import { Dex } from "@pkmn/dex";
 import { bootsProvenByEntry } from "../mechanics/switchEntry.js";
 
@@ -331,35 +332,40 @@ function rewrittenIdent(ledger: CanonicalLedger, text: string, subject: Subject)
   const parsed = ident(text.replace(/^\[of\]\s*/, ""));
   return `${text.startsWith("[of]") ? "[of] " : ""}${key.replace(":", `${parsed?.[2] ?? ""}:`)}`;
 }
-function isBorrowedMove(ledger: CanonicalLedger, fact: CanonicalFact) {
-  return fact.args.some((arg) => arg.startsWith("[from]")) || ledger.facts.slice(0, ledger.facts.indexOf(fact)).some((prior) => prior.kind === "-transform" && prior.subject.appearanceId === fact.subject.appearanceId);
+/** `transformed` holds the subjects of every -transform fact before this one. */
+function isBorrowedMove(fact: CanonicalFact, transformed: Set<string | undefined>) {
+  return fact.args.some((arg) => arg.startsWith("[from]")) || transformed.has(fact.subject.appearanceId);
+}
+/** First index of each fact ID; lookups replace linear scans of the ledger. */
+function factIndex(ledger: CanonicalLedger) {
+  const index = new Map<string, number>();
+  ledger.facts.forEach((fact, position) => { if (!index.has(fact.id)) index.set(fact.id, position); });
+  return index;
 }
 
-/** Compile the authoritative facts to the existing pure mechanics kernel.
+/** Compile an authoritative fact to the existing pure mechanics kernel.
  * Rebinding recompiles the SAME appearance facts to the resolved instance;
  * no selective copying from a disguise object is involved. */
-export function canonicalProjection(ledger: CanonicalLedger) {
-  return ledger.facts.flatMap((fact) => {
-    if (["poke", "sso-state"].includes(fact.kind)) return [];
-    const args = [...fact.args];
-    if (fact.kind === "request") {
-      const request = JSON.parse(args.join("|"));
-      if (Array.isArray(request?.side?.pokemon)) request.side.pokemon = request.side.pokemon.map((entry: any, index: number) => {
-        const subject = fact.requestSlots?.[index];
-        // No guessed writes to a persistent instance when reconciliation is ambiguous.
-        const borrowed = subject?.appearanceId && ledger.facts.slice(0, ledger.facts.indexOf(fact)).some((prior) => prior.kind === "-transform" && prior.subject.appearanceId === subject.appearanceId);
-        return { ...entry, ...(borrowed ? { moves: [] } : {}), ident: subject && internalKey(ledger, subject) || `${request.side.id}: @request-${fact.id.split(":").at(-1)}-${index + 1}` };
-      });
-      return [{ fact, line: `|request|${JSON.stringify(request)}` }];
-    }
-    for (const [index, subject] of Object.entries(fact.references)) args[Number(index)] = rewrittenIdent(ledger, args[Number(index)]!, subject);
-    if (fact.kind === "-transform" && fact.overlaySpecies) return [{ fact, line: `|-formechange|${args[0]}|${fact.overlaySpecies}` }];
-    if (["switch", "drag"].includes(fact.kind) && fact.subject.appearanceId) {
-      const appearance = ledger.appearances[fact.subject.appearanceId]!;
-      if (appearance.revealedDetails) args[1] = appearance.revealedDetails;
-    }
-    return [{ fact, line: `|${fact.kind}|${args.join("|")}` }];
-  });
+function projectFact(ledger: CanonicalLedger, fact: CanonicalFact, transformed: Set<string | undefined>) {
+  if (["poke", "sso-state"].includes(fact.kind)) return undefined;
+  const args = [...fact.args];
+  if (fact.kind === "request") {
+    const request = JSON.parse(args.join("|"));
+    if (Array.isArray(request?.side?.pokemon)) request.side.pokemon = request.side.pokemon.map((entry: any, index: number) => {
+      const subject = fact.requestSlots?.[index];
+      // No guessed writes to a persistent instance when reconciliation is ambiguous.
+      const borrowed = subject?.appearanceId && transformed.has(subject.appearanceId);
+      return { ...entry, ...(borrowed ? { moves: [] } : {}), ident: subject && internalKey(ledger, subject) || `${request.side.id}: @request-${fact.id.split(":").at(-1)}-${index + 1}` };
+    });
+    return `|request|${JSON.stringify(request)}`;
+  }
+  for (const [index, subject] of Object.entries(fact.references)) args[Number(index)] = rewrittenIdent(ledger, args[Number(index)]!, subject);
+  if (fact.kind === "-transform" && fact.overlaySpecies) return `|-formechange|${args[0]}|${fact.overlaySpecies}`;
+  if (["switch", "drag"].includes(fact.kind) && fact.subject.appearanceId) {
+    const appearance = ledger.appearances[fact.subject.appearanceId]!;
+    if (appearance.revealedDetails) args[1] = appearance.revealedDetails;
+  }
+  return `|${fact.kind}|${args.join("|")}`;
 }
 export function canonicalSeed(ledger: CanonicalLedger) {
   return Object.values(ledger.instances).filter((instance) => !ledger.privateSides.includes(instance.side) || instance.origin === "private-party")
@@ -473,6 +479,7 @@ function supportingFacts(ledger: CanonicalLedger, fact: CanonicalFact): string[]
 
 export function contributionsFromLedger(ledger: CanonicalLedger): EvidenceContribution[] {
   const contributions = new Map<string, EvidenceContribution>();
+  const index = factIndex(ledger), transformed = new Set<string | undefined>();
   const emit = (fact: CanonicalFact, metric: EvidenceContribution["metric"], value: string) => {
     const instance = resolvedInstance(ledger, fact.subject);
     const appearance = fact.subject.appearanceId && ledger.appearances[fact.subject.appearanceId];
@@ -481,39 +488,99 @@ export function contributionsFromLedger(ledger: CanonicalLedger): EvidenceContri
     const existing = contributions.get(id);
     if (existing) existing.factIds.push(fact.id);
     else contributions.set(id, { id, instanceId: instance.id, species: instance.species, factIds: supportingFacts(ledger, fact), metric, value,
-      eligibility: supportingFacts(ledger, fact).every((id) => ledger.facts.find((entry) => entry.id === id)?.source.channel !== "recovery") ? "active" : "quarantined" });
+      eligibility: supportingFacts(ledger, fact).every((id) => ledger.facts[index.get(id) ?? -1]?.source.channel !== "recovery") ? "active" : "quarantined" });
   };
   for (const fact of ledger.facts) {
     if (["switch", "drag"].includes(fact.kind)) emit(fact, "battle-seen", "seen");
-    if (fact.kind === "move" && !isBorrowedMove(ledger, fact)) emit(fact, "move", fact.args[1] ?? "");
+    if (fact.kind === "move" && !isBorrowedMove(fact, transformed)) emit(fact, "move", fact.args[1] ?? "");
     if (["-item", "-enditem"].includes(fact.kind)) emit(fact, "item", fact.args[1] ?? "");
     if (fact.kind === "-ability") emit(fact, "ability", fact.args[1] ?? "");
     if (fact.kind === "-terastallize") emit(fact, "tera", fact.args[1] ?? "");
+    if (fact.kind === "-transform") transformed.add(fact.subject.appearanceId);
   }
   return [...contributions.values()].sort((a, b) => a.id.localeCompare(b.id));
 }
 
-const kernel = await import(new URL("../../../extension/lib/showdown-parser.js", import.meta.url).href);
-export function materializeCanonicalLedger(ledger: CanonicalLedger) {
-  const room = kernel.createEmptyRoomState(ledger.roomId);
-  kernel.seedCanonicalRoster(room, canonicalSeed(ledger));
+/** Copy-on-write fork for a staged transaction: facts are never mutated after
+ * append, while instance and appearance bindings are revised in place. */
+export function forkCanonicalLedger(ledger: CanonicalLedger): CanonicalLedger {
+  return { ...ledger, facts: [...ledger.facts], instances: structuredClone(ledger.instances), appearances: structuredClone(ledger.appearances),
+    active: { ...ledger.active }, privateSides: [...ledger.privateSides], recoveryQuarantines: [...ledger.recoveryQuarantines] };
+}
+/** Evidence fact IDs are the ordered union of these parts, expanded with the bindings current at materialization:
+ * a fact index (its supporting facts), [index, subject] (the same with that subject), { past } (supporting facts of
+ * every earlier fact except moves, cants, turns and battle metadata) or a literal fact ID. */
+type FactIdParts = Array<number | string | [number, Subject] | { past: number }>;
+type EvidenceGroup = { parts: FactIdParts; contributions: EvidenceContribution[] };
+/** The kernel room and reducer state after `applied` facts, before identity annotation. */
+export interface CanonicalReduction {
+  applied: number;
+  resumed: boolean;
+  playerSide: string | null;
+  room: any;
+  damage: EvidenceGroup[];
+  order: EvidenceGroup[];
+  state: {
+    continuityUnknown: boolean; pendingAttacks: Map<string, PendingAttack>; turnFact: CanonicalFact | undefined;
+    futureCast: { fact: CanonicalFact; moveId: string; moveName: string; targetSide: SideId } | undefined;
+    moves: Array<{ fact: CanonicalFact; actor: PokemonSnapshot; other: PokemonSnapshot; otherKey: string; field: BattleSnapshot["field"]; parts: FactIdParts }>;
+    orderSafe: boolean; unactedKo: boolean; suppressedAppearances: Map<string, Set<string>>; gasAppearances: Set<string>;
+    substituteAppearances: Set<string>; interval: string[]; transformed: Set<string | undefined>;
+    window: { fact: CanonicalFact; attacker: PokemonSnapshot; defender: PokemonSnapshot; field: BattleSnapshot["field"];
+      safe: boolean; hits: number; percent: number; targetKey: string; parts: FactIdParts } | null;
+  };
+}
+const requestSide = (ledger: CanonicalLedger) => {
   // A null request revokes choices, not the player's established side or party.
   const request = [...ledger.facts].reverse().find((fact) => fact.kind === "request" && JSON.parse(fact.args.join("|"))?.side?.id);
-  if (request) {
-    room.playerSide = JSON.parse(request.args.join("|")).side?.id ?? null;
-    room.opponentSideId = room.playerSide === "p1" ? "p2" : "p1";
+  return request ? JSON.parse(request.args.join("|")).side?.id ?? null : undefined;
+};
+/** A reduction carries forward only when every fact it reduced would compile and reduce identically now: same facts,
+ * seed, quarantines and identity bindings. An appearance may gain supporting facts (re-rendered on output) and end. */
+function resumable(prior: { ledger: CanonicalLedger; reduction: CanonicalReduction } | undefined, ledger: CanonicalLedger) {
+  if (!prior || prior.reduction.applied !== prior.ledger.facts.length || prior.ledger.roomId !== ledger.roomId) return false;
+  const before = prior.ledger;
+  if (before.facts.some((fact, index) => ledger.facts[index] !== fact)
+      || JSON.stringify([before.instances, before.privateSides, before.recoveryQuarantines]) !== JSON.stringify([ledger.instances, ledger.privateSides, ledger.recoveryQuarantines])
+      || (requestSide(ledger) ?? null) !== prior.reduction.playerSide) return false;
+  const structure = (appearance: Appearance, ended: boolean) => JSON.stringify({ ...appearance, resolvedBy: undefined, endedBy: ended ? appearance.endedBy : undefined });
+  return Object.values(before.appearances).every((appearance) =>
+    ledger.appearances[appearance.id] && structure(appearance, true) === structure(ledger.appearances[appearance.id]!, Boolean(appearance.endedBy)));
+}
+
+const kernel = await import(new URL("../../../extension/lib/showdown-parser.js", import.meta.url).href);
+export function materializeCanonicalLedger(ledger: CanonicalLedger): any {
+  return reduceCanonicalLedger(ledger).room;
+}
+/** Materialize the ledger, reducing only facts appended since `prior` when its reduction provably carries forward;
+ * otherwise from the empty room. Neither input is mutated, so a failed transaction leaves committed state intact. */
+export function reduceCanonicalLedger(ledger: CanonicalLedger, prior?: { ledger: CanonicalLedger; reduction: CanonicalReduction }): { room: any; reduction: CanonicalReduction } {
+  const resumed = resumable(prior, ledger);
+  let reduction: CanonicalReduction;
+  if (resumed) {
+    const { damage, order, ...rest } = prior!.reduction;
+    reduction = { ...structuredClone(rest), damage: [...damage], order: [...order], resumed };
+  } else {
+    const room = kernel.createEmptyRoomState(ledger.roomId);
+    kernel.seedCanonicalRoster(room, canonicalSeed(ledger));
+    const playerSide = requestSide(ledger);
+    if (playerSide !== undefined) {
+      room.playerSide = playerSide;
+      room.opponentSideId = room.playerSide === "p1" ? "p2" : "p1";
+    }
+    reduction = { applied: 0, resumed, playerSide: playerSide ?? null, room, damage: [], order: [], state: {
+      continuityUnknown: false, pendingAttacks: new Map(), turnFact: undefined, futureCast: undefined, moves: [], orderSafe: true, unactedKo: false,
+      suppressedAppearances: new Map(), gasAppearances: new Set(), substituteAppearances: new Set(), interval: [], transformed: new Set(), window: null } };
   }
+  const { room, damage, order } = reduction;
+  const { pendingAttacks, suppressedAppearances, gasAppearances, substituteAppearances, transformed } = reduction.state;
+  let { continuityUnknown, turnFact, futureCast, moves, orderSafe, unactedKo, interval, window } = reduction.state;
   const rooms = new Map([[ledger.roomId, room]]);
-  const damage: EvidenceContribution[] = [];
-  const order: EvidenceContribution[] = [];
+  const factAt = factIndex(ledger), at = (id: string | undefined) => factAt.get(id ?? "") ?? -1;
   const continuityGaps = new Set(ledger.recoveryQuarantines
     .filter((entry) => entry.reason === "recovery_public_continuity_unknown").map((entry) => entry.observationId));
   const gapIndex = ledger.facts.findIndex((fact) => continuityGaps.has(fact.source.observationId));
   const postGapFacts = new Set(gapIndex < 0 ? [] : ledger.facts.slice(gapIndex).map((fact) => fact.id));
-  let continuityUnknown = false;
-  const pendingAttacks = new Map<string, PendingAttack>();
-  let turnFact: CanonicalFact | undefined;
-  let futureCast: { fact: CanonicalFact; moveId: string; moveName: string; targetSide: SideId } | undefined;
   const futureMove = (name: string | undefined) => {
     const move = Dex.forGen(Number(room.format.match(/\[Gen\s*(\d+)\]/i)?.[1] ?? 9)).moves.get((name ?? "").replace(/^move:\s*/i, ""));
     return move.exists && move.flags.futuremove ? move : undefined;
@@ -524,16 +591,6 @@ export function materializeCanonicalLedger(ledger: CanonicalLedger) {
       if (mon.fieldSources) delete mon.fieldSources.slowStartActive;
     }
   };
-  let moves: Array<{ fact: CanonicalFact; actor: PokemonSnapshot; other: PokemonSnapshot; otherKey: string; field: BattleSnapshot["field"]; factIds: string[] }> = [];
-  let orderSafe = true;
-  // The turn's only move KO'd the other active before it acted (e.g. an Armarouge KOs a 353-Speed Thundurus).
-  let unactedKo = false;
-  const suppressedAppearances = new Map<string, Set<string>>();
-  const gasAppearances = new Set<string>();
-  const substituteAppearances = new Set<string>();
-  let interval: string[] = [];
-  let window: { fact: CanonicalFact; attacker: PokemonSnapshot; defender: PokemonSnapshot;
-    field: BattleSnapshot["field"]; safe: boolean; hits: number; percent: number; targetKey: string; factIds: string[] } | null = null;
   const tagMon = (mon: PokemonSnapshot, subject: Subject): PokemonSnapshot => {
     const instance = resolvedInstance(ledger, subject)!;
     return { ...structuredClone(mon), ident: `${instance.side}: ${instance.aliases.at(-1) ?? instance.species}`, displayName: instance.aliases.at(-1) ?? instance.species,
@@ -542,14 +599,13 @@ export function materializeCanonicalLedger(ledger: CanonicalLedger) {
   const close = (boundary: CanonicalFact) => {
     if (!window) return;
     if (window.safe && window.hits === 1 && window.percent > 0) {
-      const factIds = unique([...window.factIds, boundary.id]);
-      for (const mon of [window.attacker, window.defender]) damage.push({
-        id: `${window.fact.id}:damage:${mon === window.attacker ? "attacker" : "defender"}`, instanceId: mon.instanceId!, species: mon.canonicalSpecies!, factIds,
-        metric: "damage", value: window.fact.args[1]!,
-        eligibility: factIds.every((id) => ledger.facts.find((fact) => fact.id === id)?.source.channel !== "recovery") ? "active" : "quarantined",
-        damage: { turn: window.fact.turn, moveName: window.fact.args[1]!, percent: window.percent,
-          attacker: window.attacker, defender: window.defender, field: window.field }
-      });
+      const { attacker, defender } = window;
+      damage.push({ parts: [...window.parts, boundary.id], contributions: [attacker, defender].map((mon) => ({
+        id: `${window!.fact.id}:damage:${mon === attacker ? "attacker" : "defender"}`, instanceId: mon.instanceId!, species: mon.canonicalSpecies!, factIds: [],
+        metric: "damage", value: window!.fact.args[1]!, eligibility: "active",
+        damage: { turn: window!.fact.turn, moveName: window!.fact.args[1]!, percent: window!.percent,
+          attacker: window!.attacker, defender: window!.defender, field: window!.field }
+      })) });
     }
     window = null;
   };
@@ -558,24 +614,25 @@ export function materializeCanonicalLedger(ledger: CanonicalLedger) {
       const first = moves[0]!, second = moves[1]!;
       // Singles: the second mover cannot overtake an action that already happened, so later state changes
       // (Knock Off, a Rapid Spin boost) do not alter the order. Record both sides at the first move's state.
-      const factIds = unique([...first.factIds, ...second.factIds, ...interval, boundary.id]);
-      for (const [index, entry] of moves.entries()) order.push({
-        id: `${first.fact.id}:speed:${index + 1}`, instanceId: entry.actor.instanceId!, species: entry.actor.canonicalSpecies!, factIds,
-        metric: "speed", value: "observed_order", eligibility: factIds.every((id) => ledger.facts.find((fact) => fact.id === id)?.source.channel !== "recovery") ? "active" : "quarantined",
+      order.push({ parts: [...first.parts, ...second.parts, ...interval, boundary.id], contributions: moves.map((entry, index) => ({
+        id: `${first.fact.id}:speed:${index + 1}`, instanceId: entry.actor.instanceId!, species: entry.actor.canonicalSpecies!, factIds: [],
+        metric: "speed", value: "observed_order", eligibility: "active",
         speed: { turn: first.fact.turn, relation: index === 0 ? "first" : "second", pokemon: index === 0 ? first.actor : first.other,
           other: index === 0 ? first.other : first.actor, moveName: entry.fact.args[1]!, otherMoveName: moves[1 - index]!.fact.args[1]!, field: first.field }
-      });
+      })) });
     } else if (orderSafe && unactedKo && moves.length === 1) {
-      const only = moves[0]!, factIds = unique([...only.factIds, ...interval, boundary.id]);
-      order.push({
-        id: `${only.fact.id}:speed:1`, instanceId: only.actor.instanceId!, species: only.actor.canonicalSpecies!, factIds,
-        metric: "speed", value: "observed_order", eligibility: factIds.every((id) => ledger.facts.find((fact) => fact.id === id)?.source.channel !== "recovery") ? "active" : "quarantined",
+      const only = moves[0]!;
+      order.push({ parts: [...only.parts, ...interval, boundary.id], contributions: [{
+        id: `${only.fact.id}:speed:1`, instanceId: only.actor.instanceId!, species: only.actor.canonicalSpecies!, factIds: [],
+        metric: "speed", value: "observed_order", eligibility: "active",
         speed: { turn: only.fact.turn, relation: "first", pokemon: only.actor, other: only.other, moveName: only.fact.args[1]!, otherMoveName: "", field: only.field, unacted: true }
-      });
+      }] });
     }
     moves = []; interval = []; orderSafe = true; unactedKo = false;
   };
-  for (const { fact, line } of canonicalProjection(ledger)) {
+  for (let position = reduction.applied; position < ledger.facts.length; position++) {
+    const fact = ledger.facts[position]!, line = projectFact(ledger, fact, transformed);
+    if (line === undefined) continue;
     if (continuityGaps.has(fact.source.observationId)) continuityUnknown = true;
     if (continuityUnknown) {
       forgetUnprovenActivation();
@@ -624,7 +681,7 @@ export function materializeCanonicalLedger(ledger: CanonicalLedger) {
         // Materialization sees final identity bindings. Cite an instance only
         // when a private request explicitly bound this appearance before cast;
         // later Illusion/party resolution must not add an uncited source claim.
-        const binding = resolved && ledger.facts.slice(0, ledger.facts.indexOf(cast)).find((prior) =>
+        const binding = resolved && ledger.facts.slice(0, at(cast.id)).find((prior) =>
           prior.requestSlots?.some((subject) => subject.appearanceId === appearanceId && subject.instanceId === resolved.id));
         const instance = binding ? resolved : undefined;
         pendingAttacks.set(key, { moveId: futureCast.moveId, moveName: futureCast.moveName,
@@ -662,17 +719,16 @@ export function materializeCanonicalLedger(ledger: CanonicalLedger) {
       if (window && gasAppearances.has(appearanceId)) window.safe = false;
       gasAppearances.delete(appearanceId);
     }
-    // A pivot or forced switch after both actions cannot reorder them.
-    if (["turn", "upkeep", "request", "win", "tie"].includes(fact.kind) || ((moves.length === 2 || unactedKo) && ["switch", "drag"].includes(fact.kind))) closeOrder(fact);
+    // A pivot, forced switch or forme change after both actions cannot reorder them (e.g. Mimikyu's Disguise breaking at
+    // the end of a turn whose order was clean).
+    if (["turn", "upkeep", "request", "win", "tie"].includes(fact.kind)
+      || ((moves.length === 2 || unactedKo) && ["switch", "drag", "-transform", "-formechange", "detailschange"].includes(fact.kind))) closeOrder(fact);
     interval.push(fact.id);
     if (["switch", "drag", "cant", "-transform", "-formechange", "detailschange"].includes(fact.kind)) orderSafe = false;
     if (["move", "cant", "switch", "drag", "turn", "upkeep", "request", "win", "tie"].includes(fact.kind)) close(fact);
-    if (fact.kind === "move" && room.playerSide && !isBorrowedMove(ledger, fact)) {
-      const activeAtMove = Object.values(ledger.appearances).filter((appearance) => {
-        const index = ledger.facts.indexOf(fact);
-        return ledger.facts.findIndex((entry) => entry.id === appearance.startedBy) <= index
-          && (!appearance.endedBy || ledger.facts.findIndex((entry) => entry.id === appearance.endedBy) > index);
-      });
+    if (fact.kind === "move" && room.playerSide && !isBorrowedMove(fact, transformed)) {
+      const activeAtMove = Object.values(ledger.appearances).filter((appearance) =>
+        at(appearance.startedBy) <= position && (!appearance.endedBy || at(appearance.endedBy) > position));
       const suppressedAtMove = activeAtMove.some((appearance) => suppressedAppearances.get(appearance.id)?.size || gasAppearances.has(appearance.id));
       if (suppressedAtMove) {
         orderSafe = false;
@@ -683,22 +739,20 @@ export function materializeCanonicalLedger(ledger: CanonicalLedger) {
       // occupant and its bound semantic key for the comparison at this move.
       const otherKey = room.sides[opposingSide]?.activeKey;
       const otherSubject = Object.values(ledger.appearances).find((appearance) => internalKey(ledger, subjectForAppearance(appearance)) === otherKey
-        && ledger.facts.indexOf(ledger.facts.find((entry) => entry.id === appearance.startedBy)!) <= ledger.facts.indexOf(fact)
-        && (!appearance.endedBy || ledger.facts.indexOf(ledger.facts.find((entry) => entry.id === appearance.endedBy)!) > ledger.facts.indexOf(fact)));
+        && at(appearance.startedBy) <= position && (!appearance.endedBy || at(appearance.endedBy) > position));
       const view = kernel.roomToSnapshot(room), all = [...(view?.yourSide.team ?? []), ...(view?.opponentSide.team ?? [])];
       const actorMon = all.find((mon: PokemonSnapshot) => mon.ident === actorKey), otherMon = all.find((mon: PokemonSnapshot) => mon.ident === otherKey);
       if (actor && actorMon && otherMon && otherSubject?.resolution === "resolved" && ledger.appearances[fact.subject.appearanceId ?? ""]?.resolution === "resolved") {
         const otherRef = subjectForAppearance(otherSubject);
-        const pastContext = ledger.facts.slice(0, ledger.facts.indexOf(fact)).filter((entry) => !["move", "cant", "turn", "init", "title", "player"].includes(entry.kind));
         moves.push({ fact, actor: tagMon(actorMon, fact.subject), other: tagMon(otherMon, otherRef), otherKey: otherKey!, field: structuredClone(view.field),
-          factIds: unique([...supportingFacts(ledger, fact), ...supportingFacts(ledger, { ...fact, subject: otherRef }), ...pastContext.flatMap((entry) => supportingFacts(ledger, entry))]) });
+          parts: [position, [position, otherRef], { past: position }] });
       } else orderSafe = false;
       const attacker = resolvedInstance(ledger, fact.subject), defender = fact.references[2] && resolvedInstance(ledger, fact.references[2]);
       const attackingAppearance = fact.subject.appearanceId && ledger.appearances[fact.subject.appearanceId];
       const defendingAppearance = fact.references[2]?.appearanceId && ledger.appearances[fact.references[2].appearanceId!];
       const move = Dex.forGen(Number(room.format.match(/\[Gen\s*(\d+)\]/i)?.[1] ?? 9)).moves.get(fact.args[1]!);
-      const transformed = ledger.facts.slice(0, ledger.facts.indexOf(fact)).some((prior) => prior.kind === "-transform" && [fact.subject.appearanceId, fact.references[2]?.appearanceId].includes(prior.subject.appearanceId));
-      if (move.exists && move.category !== "Status" && !move.flags.futuremove && !move.multihit && !move.noFaint && !transformed
+      const transformedPair = [fact.subject.appearanceId, fact.references[2]?.appearanceId].some((id) => transformed.has(id));
+      if (move.exists && move.category !== "Status" && !move.flags.futuremove && !move.multihit && !move.noFaint && !transformedPair
           && !["counter", "mirrorcoat", "metalburst", "comeuppance", "bide", "finalgambit", "endeavor"].includes(move.id)
           && attacker && defender && attacker.side !== defender.side && attackingAppearance && defendingAppearance
           && attackingAppearance.resolution === "resolved" && defendingAppearance.resolution === "resolved") {
@@ -707,16 +761,16 @@ export function materializeCanonicalLedger(ledger: CanonicalLedger) {
         const attackerKey = internalKey(ledger, fact.subject), defenderKey = internalKey(ledger, fact.references[2]!);
         const attackerMon = all.find((mon: PokemonSnapshot) => mon.ident === attackerKey), defenderMon = all.find((mon: PokemonSnapshot) => mon.ident === defenderKey);
         if (attackerMon && defenderMon && Number.isFinite(defenderMon.hpPercent)) {
-          const prior = ledger.facts.slice(0, ledger.facts.indexOf(fact)).filter((entry) => {
-            if (["move", "cant", "turn", "init", "title", "player", "poke"].includes(entry.kind)) return false;
+          const prior = ledger.facts.slice(0, position).flatMap((entry, priorPosition) => {
+            if (["move", "cant", "turn", "init", "title", "player", "poke"].includes(entry.kind)) return [];
             const owner = resolvedInstance(ledger, entry.subject);
             return owner?.id === attacker.id || owner?.id === defender.id || entry.requestSlots?.some((subject) => [attacker.id, defender.id].includes(subject.instanceId ?? ""))
               || (entry.kind === "-activate" && /^(?:move: )?skill swap$/i.test(entry.args[1] ?? "")
                 && Object.values(entry.references).some((subject) => [attacker.id, defender.id].includes(resolvedInstance(ledger, subject)?.id ?? "")))
-              || ["-weather", "-fieldstart", "-fieldend", "-sidestart", "-sideend", "-clearallboost"].includes(entry.kind);
+              || ["-weather", "-fieldstart", "-fieldend", "-sidestart", "-sideend", "-clearallboost"].includes(entry.kind) ? [priorPosition] : [];
           });
           window = { fact, attacker: tagMon(attackerMon, fact.subject), defender: tagMon(defenderMon, fact.references[2]!), field: structuredClone(view.field),
-            safe: !suppressedAtMove, hits: 0, percent: 0, targetKey: defenderKey!, factIds: unique([...supportingFacts(ledger, fact), ...supportingFacts(ledger, { ...fact, subject: fact.references[2]! }), ...prior.flatMap((entry) => supportingFacts(ledger, entry))]) };
+            safe: !suppressedAtMove, hits: 0, percent: 0, targetKey: defenderKey!, parts: [position, [position, fact.references[2]!], ...prior] };
         }
       }
     } else if (fact.kind === "move") orderSafe = false;
@@ -727,11 +781,11 @@ export function materializeCanonicalLedger(ledger: CanonicalLedger) {
     const presentationName = appearance ? nickname(appearance.revealedIdent ?? appearance.apparent.ident)
       : instance?.aliases.at(-1) ?? instance?.species;
     kernel.applyRawFrameToRoomMap(rooms, `>${ledger.roomId}\n${line}`, {
-      lineId: `${fact.source.observationId}#${fact.source.lineIndex}`, recordMove: !isBorrowedMove(ledger, fact), presentationName
+      lineId: `${fact.source.observationId}#${fact.source.lineIndex}`, recordMove: !isBorrowedMove(fact, transformed), presentationName
     });
     if (continuityUnknown) forgetUnprovenActivation();
     if (window) {
-      window.factIds.push(fact.id);
+      window.parts.push(fact.id);
       if (["-crit", "-miss", "-fail", "-transform", "-formechange", "detailschange", "-hitcount"].includes(fact.kind)
           || (["-activate", "-enditem", "-ability", "-singleturn"].includes(fact.kind) && fact.args.some((arg) => /(?:Focus Sash|Focus Band|Sturdy|Endure)/i.test(arg)))) window.safe = false;
       if (fact.kind === "-damage" && !fact.args.some((arg) => arg.startsWith("[from]")) && internalKey(ledger, fact.subject) === window.targetKey) {
@@ -744,12 +798,18 @@ export function materializeCanonicalLedger(ledger: CanonicalLedger) {
         }
       }
     }
+    if (fact.kind === "-transform") transformed.add(fact.subject.appearanceId);
   }
-  annotateCanonicalRoom(ledger, room);
-  if (pendingAttacks.size) room.pendingAttacks = [...pendingAttacks.values()];
+  Object.assign(reduction.state, { continuityUnknown, turnFact, futureCast, moves, orderSafe, unactedKo, interval, window });
+  reduction.applied = ledger.facts.length;
+  // The carried kernel room is never annotated: annotation reflects bindings current at this materialization.
+  const output = structuredClone(room);
+  output.updatedAt = Date.now();
+  annotateCanonicalRoom(ledger, output);
+  if (pendingAttacks.size) output.pendingAttacks = [...pendingAttacks.values()];
   const livingActiveAppearances = Object.values(ledger.active).filter((id) => {
     const appearance = ledger.appearances[id]!;
-    const mon = room.sides[appearance.side]?.team[internalKey(ledger, subjectForAppearance(appearance))!];
+    const mon = output.sides[appearance.side]?.team[internalKey(ledger, subjectForAppearance(appearance))!];
     return !mon?.fainted;
   });
   const unsupportedSuppression = livingActiveAppearances.some((id) => suppressedAppearances.get(id)?.size || gasAppearances.has(id));
@@ -757,9 +817,9 @@ export function materializeCanonicalLedger(ledger: CanonicalLedger) {
   // withheld. Only current living appearances count; old stints do not linger.
   // An opponent-only Substitute affects just your damage into it (withheld downstream).
   const substituteSides = new Set(livingActiveAppearances.filter((id) => substituteAppearances.has(id)).map((id) => ledger.appearances[id]!.side));
-  const unsupportedSubstitute = room.playerSide ? substituteSides.has(room.playerSide) : substituteSides.size > 0;
+  const unsupportedSubstitute = output.playerSide ? substituteSides.has(output.playerSide) : substituteSides.size > 0;
   const opponentSubstitute = !unsupportedSubstitute && substituteSides.size > 0;
-  room.canonicalEvidence = {
+  output.canonicalEvidence = {
     version: "canonical-evidence@1", facts: ledger.facts.map((fact) => {
       const instance = resolvedInstance(ledger, fact.subject);
       const appearance = fact.subject.appearanceId ? ledger.appearances[fact.subject.appearanceId] : undefined;
@@ -767,7 +827,7 @@ export function materializeCanonicalLedger(ledger: CanonicalLedger) {
     }),
     // Identity/lifecycle after an unbridged public gap is not established by
     // later wire facts alone. Keep raw facts and complete pre-gap contributions.
-    contributions: [...contributionsFromLedger(ledger), ...damage, ...order]
+    contributions: [...contributionsFromLedger(ledger), ...renderEvidence(ledger, factAt, [...damage, ...order])]
       .filter((entry) => !entry.factIds.some((id) => postGapFacts.has(id))),
     ambiguities: [...Object.values(ledger.appearances).filter((appearance) => !appearance.endedBy && appearance.resolution !== "resolved").map((appearance) => appearance.id),
       ...([...ledger.facts].reverse().find((fact) => fact.kind === "request")?.requestSlots ?? []).flatMap((subject, index) => subject.instanceId ? [] : [`request-slot:${index + 1}`])],
@@ -782,5 +842,36 @@ export function materializeCanonicalLedger(ledger: CanonicalLedger) {
         ? ["temporary_ability_forecasts_unavailable"] : []),
       ...Object.values(ledger.appearances).filter((appearance) => !appearance.endedBy && ledger.facts.some((fact) => fact.kind === "-transform" && fact.subject.appearanceId === appearance.id)).map(() => "transform_mechanics_unavailable")])
   };
-  return room;
+  if (resumed && process.env.CANONICAL_REDUCTION_CHECK === "1") {
+    // Test aid: a carried reduction must equal reduction of the whole ledger from the empty room.
+    const full = { ...materializeCanonicalLedger(ledger), updatedAt: output.updatedAt };
+    assert.deepStrictEqual(output, full);
+    assert.equal(JSON.stringify(output), JSON.stringify(full));
+  }
+  return { room: output, reduction };
+}
+/** Expand evidence fact-ID parts with the current bindings: a later rebinding extends the supporting facts of every
+ * contribution that cites the rebound appearance, exactly as a reduction from the empty room would. */
+function renderEvidence(ledger: CanonicalLedger, factAt: Map<string, number>, groups: EvidenceGroup[]) {
+  const support: string[][] = [];
+  const supportAt = (position: number) => support[position] ??= supportingFacts(ledger, ledger.facts[position]!);
+  // past[0, pastEnd[p]) is the ordered union of supporting facts before position p, as { past: p } cites them.
+  const past: string[] = [], pastEnd: number[] = [], seen = new Set<string>();
+  ledger.facts.forEach((fact, position) => {
+    pastEnd[position] = past.length;
+    if (["move", "cant", "turn", "init", "title", "player"].includes(fact.kind)) return;
+    for (const id of supportAt(position)) if (!seen.has(id)) { seen.add(id); past.push(id); }
+  });
+  return groups.flatMap(({ parts, contributions }) => {
+    const ids = new Set<string>();
+    for (const part of parts) {
+      if (typeof part === "string") ids.add(part);
+      else if (typeof part === "number") for (const id of supportAt(part)) ids.add(id);
+      else if (Array.isArray(part)) for (const id of supportingFacts(ledger, { ...ledger.facts[part[0]]!, subject: part[1] })) ids.add(id);
+      else for (let index = 0; index < pastEnd[part.past]!; index++) ids.add(past[index]!);
+    }
+    const factIds = [...ids];
+    const eligibility = factIds.every((id) => ledger.facts[factAt.get(id) ?? -1]?.source.channel !== "recovery") ? "active" as const : "quarantined" as const;
+    return contributions.map((contribution) => ({ ...contribution, factIds, eligibility }));
+  });
 }

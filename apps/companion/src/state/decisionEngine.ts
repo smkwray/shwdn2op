@@ -3,7 +3,7 @@ import { createDecisionIdentity, hashCanonical, sameDecision, type DecisionIdent
 import { battleSnapshotSchema } from "../schema.js";
 import type { BattleSnapshot } from "../types.js";
 import { withinDeadline } from "./deadline.js";
-import { createCanonicalLedger, appendCanonicalLines, materializeCanonicalLedger, isCanonicalTimelineLine, type CanonicalLedger } from "./canonicalLedger.js";
+import { createCanonicalLedger, appendCanonicalLines, forkCanonicalLedger, reduceCanonicalLedger, isCanonicalTimelineLine, type CanonicalLedger, type CanonicalReduction } from "./canonicalLedger.js";
 
 // The existing reducer remains shared during the move to companion-owned
 // observations. There is one implementation, used by fixtures and replay too.
@@ -27,6 +27,9 @@ export interface CanonicalDecisionIdentity extends DecisionIdentity {
 type RoomRecord = {
   room: any;
   ledger: CanonicalLedger;
+  reduction: CanonicalReduction;
+  /** Cache of the capture-time-free snapshot hash; a pure function of the record. */
+  snapshotHash?: Promise<string>;
   sequence: number;
   stateRevision: number;
   observations: Array<BattleObservation & { payloadHash: string }>;
@@ -87,12 +90,8 @@ export class DecisionEngine {
   ingestBatch(inputs: BattleObservation[], commit?: (results: ObservationResult[], check: () => void) => Promise<void>) {
     return this.serialize("ingestion", async (check) => {
       const observations = z.array(observationSchema).min(1).max(100).parse(inputs);
+      // apply() never mutates a record: it forks the ledger and reduction, so staging needs only its own map.
       const staged = new Map(this.rooms);
-      const affected = new Set(observations.map((entry) => this.key(entry.sessionId, entry.roomId)));
-      for (const key of affected) {
-        const record = staged.get(key);
-        if (record) staged.set(key, { ...record, room: structuredClone(record.room), ledger: structuredClone(record.ledger), observations: [...record.observations], ids: new Map(record.ids) });
-      }
       const results = [];
       for (const observation of observations) results.push(await this.apply(observation, staged));
       check();
@@ -117,13 +116,13 @@ export class DecisionEngine {
     if (previous && observation.sequence <= previous.sequence) throw new DecisionConflict("Out-of-order observation; retry missing observations in sequence.");
 
     const reset = observation.source === "protocol" && packets[0].lines.includes("|init|battle");
-    let ledger = previous && !reset ? structuredClone(previous.ledger) : createCanonicalLedger(observation.roomId);
-    let room: any;
+    let ledger = previous && !reset ? forkCanonicalLedger(previous.ledger) : createCanonicalLedger(observation.roomId);
+    let room: any, reduction: CanonicalReduction;
     if (observation.source === "protocol") {
       // A fresh server initialization starts a new reduction, preserving the
       // outer observation revision so a reconnect cannot reuse an old result.
       appendCanonicalLines(ledger, packets[0].lines, observation);
-      room = materializeCanonicalLedger(ledger);
+      ({ room, reduction } = reduceCanonicalLedger(ledger, previous && !reset ? previous : undefined));
     } else {
       // Classify private epochs before invoking any reducer: dropping
       // lastRequest after reduction cannot undo HP/item/stat mutations.
@@ -223,20 +222,18 @@ export class DecisionEngine {
         ledger.recoveryQuarantines.push({ observationId: observation.observationId, reason: "recovery_public_continuity_unknown" });
       }
       appendCanonicalLines(ledger, admitted, observation);
-      room = materializeCanonicalLedger(ledger);
+      // Recovery may rebase or quarantine history: always reduce from the empty room.
+      ({ room, reduction } = reduceCanonicalLedger(ledger));
       room.quarantinedRequests = quarantinedRequests;
     }
     if (!room) throw new DecisionConflict("No battle room could be reduced.");
     const record: RoomRecord = {
-      room, ledger, sequence: observation.sequence, stateRevision: previous?.stateRevision ?? 0,
+      room, ledger, reduction, sequence: observation.sequence, stateRevision: previous?.stateRevision ?? 0,
       observations: [...(previous?.observations ?? []), { ...observation, payloadHash }],
       ids: new Map(previous?.ids ?? []),
       quarantinedRequests: room.quarantinedRequests ?? previous?.quarantinedRequests ?? []
     };
-    const oldSnapshot = previous ? this.snapshot(previous) : null;
-    const newSnapshot = this.snapshot(record);
-    const changed = !previous || reset
-      || await hashCanonical(oldSnapshot && { ...oldSnapshot, capturedAt: null }) !== await hashCanonical(newSnapshot && { ...newSnapshot, capturedAt: null });
+    const changed = !previous || reset || await this.snapshotHash(previous) !== await this.snapshotHash(record);
     if (changed) record.stateRevision++;
     record.ids.set(observation.observationId, payloadHash);
     records.set(key, record);
@@ -285,6 +282,13 @@ export class DecisionEngine {
         || snapshot.rawRequestSummary?.sideId !== snapshot.yourSide.slot) return;
     return { source: "owned_offline_simulator", turn: snapshot.turn, turnFactId: turn.id, requestFactId: request.id,
       fromSequence: turn.source.sequence, throughSequence: record.sequence };
+  }
+
+  private snapshotHash(record: RoomRecord) {
+    return record.snapshotHash ??= (async () => {
+      const snapshot = this.snapshot(record);
+      return hashCanonical(snapshot && { ...snapshot, capturedAt: null });
+    })();
   }
 
   private snapshot(record: RoomRecord): BattleSnapshot | null {
