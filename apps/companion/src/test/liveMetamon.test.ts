@@ -982,7 +982,12 @@ test("live Metamon reads maxWorkers from the launch file and defaults to one", a
   assert.equal((await readLiveMetamonLaunch(file)).maxWorkers, 1);
   await fs.writeFile(file, JSON.stringify({ ...base, maxWorkers: 0 }));
   await assert.rejects(readLiveMetamonLaunch(file));
-  const config = JSON.parse(await fs.readFile(new URL("../../../../config/local/metamon-live.json", import.meta.url), "utf8"));
+});
+
+// The device-local launch config is gitignored; where it exists, it must allow concurrent battles.
+const deviceLaunch = new URL("../../../../config/local/metamon-live.json", import.meta.url);
+test("the device-local MLX launch config allows concurrent battles", { skip: await fs.access(deviceLaunch).then(() => false, () => "no device-local launch config in this checkout") }, async () => {
+  const config = JSON.parse(await fs.readFile(deviceLaunch, "utf8"));
   assert.ok(Number.isInteger(config.maxWorkers) && config.maxWorkers >= 2, "the MLX live config allows concurrent battles");
 });
 
