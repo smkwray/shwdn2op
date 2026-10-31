@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# commit-msg — refuse Co-authored-by trailers.
+#
+# GitHub counts a Co-authored-by trailer as an extra contributor, so smkwray/*
+# commits must carry none (agents and Cursor's attribution setting both inject
+# them). The global ~/.config/git/hooks/commit-msg does the same for repos that
+# do not set core.hooksPath; this copy covers repos that do.
+set -euo pipefail
+if grep -Ei '^Co-authored-by:' "$1" >/dev/null; then
+  printf 'commit-msg: REFUSED — Co-authored-by trailers are not allowed.\n' >&2
+  printf '  Remove the trailer (agent attribution settings: Claude attribution.commit=false;\n' >&2
+  printf '  Cursor attribution.attributeCommitsToAgent=false) and retry.\n' >&2
+  exit 1
+fi
+ROOT="$(git rev-parse --show-toplevel)"
+if [[ -x "$ROOT/scripts/hygiene_check.sh" ]]; then
+  if ! (cd "$ROOT" && scripts/hygiene_check.sh --message "$1"); then
+    printf 'commit-msg: REJECT — commit message failed the private-identifier scan.\n' >&2
+    exit 1
+  fi
+fi
+exit 0

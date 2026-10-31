@@ -1,0 +1,2 @@
+# Upstream Metamon files stay byte-identical to the pinned tree, so whitespace checks skip them.
+vendor/metamon/** -whitespace

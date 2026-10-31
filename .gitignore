@@ -10,9 +10,14 @@ AGENTS.md
 CLAUDE.md
 PROMPT_FOR_CODEX.md
 .codex/
+.claude/
+.cursor/
+.worktrees/
+.private-denylist
 .mcp.json
 .env
 .env.local
+.env.*
 *.tsbuildinfo
 .vscode
 .idea
@@ -33,3 +38,24 @@ replays/
 ml-artifacts/
 public-release/
 output/
+*.safetensors
+*.pt
+*.pth
+*.ckpt
+
+# Device-local scratch (Syncthing ignores proj/*/tmp)
+/tmp/
+
+# Device-local toolchains/SDKs (platform-specific; reinstall per device)
+.tools/
+.*-private-denylist
+
+# Test scratch dirs a crashed or running liveMetamon test leaves behind
+apps/companion/src/test/.live-metamon-*/
+
+# Device-specific config (hosts, absolute paths, per-device modes): synced, never tracked.
+config/local/
+# Legacy device-named paths kept only while running jobs still read them.
+config/metamon-live-*-mlx.json
+config/uu-eval-runtime-*.json
+config/uu-league-iter2-*.yaml
