@@ -1,17 +1,47 @@
+import type { MetaMovePriorView } from "./history/metaPriorStore.js";
+import type { DecisionIdentity } from "../../extension/lib/decision-identity.js";
+import type { CanonicalFact, EvidenceContribution, IdentityStatus } from "./state/canonicalLedger.js";
+
 export type ProviderName = "mock" | "codex" | "claude" | "gemini";
 
 export interface LegalAction {
   id: string;
-  kind: "move" | "switch" | "special";
+  kind: "move" | "switch" | "team" | "special";
   label: string;
   moveName?: string | null | undefined;
+  /** One-based request slot; null/absent when public replay evidence cannot recover it. */
+  moveSlot?: number | null | undefined;
+  targetSlot?: number | null | undefined;
+  terastallize?: boolean | undefined;
+  actorSlot?: number | undefined;
+  moveId?: string | undefined;
+  teamSpec?: number[] | undefined;
+  /** Showdown choice grammar, without /choose, room routing or rqid suffix. */
+  choice?: string | undefined;
+  legality?: "certain" | "uncertain" | "disabled" | undefined;
+  canUndo?: boolean | undefined;
   target?: string | null | undefined;
   pp?: number | null | undefined;
   disabled?: boolean | null | undefined;
+  uncertainLegal?: boolean | undefined;
+  uncertaintyReason?: "maybe_disabled" | "hidden_trapping_ability" | undefined;
+  reviving?: boolean | undefined;
+  actorAppearanceId?: string | undefined;
+  targetInstanceId?: string | undefined;
   details?: string | null | undefined;
 }
 
 export interface PokemonSnapshot {
+  instanceId?: string | undefined;
+  appearanceId?: string | undefined;
+  identityStatus?: IdentityStatus | undefined;
+  /** An unresolved opposing disguise (possible Illusion): the team-preview instance it shows, presumed for display. */
+  presumedInstanceId?: string | undefined;
+  candidateInstanceIds?: string[] | undefined;
+  evidenceRefs?: string[] | undefined;
+  canonicalSpecies?: string | undefined;
+  appearanceMoves?: string[] | undefined;
+  turnsSinceEntry?: number | undefined;
   ident: string | null;
   species: string | null;
   displayName: string | null;
@@ -26,11 +56,19 @@ export interface PokemonSnapshot {
   stats?: Record<string, number> | undefined;
   knownMoves: string[];
   item: string | null;
+  /** The held item is proven by an entry that hazards did not affect (not revealed by the protocol). */
+  itemProof?: { hazard: string; turn: number; factIds: string[] } | undefined;
   removedItem: string | null;
   ability: string | null;
   types: string[];
   teraType: string | null;
   terastallized: boolean;
+  /** undefined: capture unknown; null: explicitly inactive; otherwise revealed boosted stat. */
+  paradoxBoostedStat?: "atk" | "def" | "spa" | "spd" | "spe" | null | undefined;
+  /** Item loss in the current active stint; only effective with Unburden and no held item. */
+  unburdenActive?: boolean | undefined;
+  /** Current stint activation: absent capture is unknown, not expired. */
+  slowStartActive?: boolean | undefined;
 }
 
 export interface SideSnapshot {
@@ -38,6 +76,22 @@ export interface SideSnapshot {
   name: string | null;
   active: PokemonSnapshot | null;
   team: PokemonSnapshot[];
+}
+
+/** A successful delayed attack is attached to a field position, not its current occupant. */
+export interface PendingAttack {
+  moveId: string;
+  moveName: string;
+  sourceSide: "p1" | "p2";
+  sourceInstanceId?: string | undefined;
+  sourceAppearanceId?: string | undefined;
+  targetSide: "p1" | "p2";
+  targetPosition: "a";
+  castTurn: number;
+  dueTurn: number;
+  phase: "end_of_turn";
+  status: "scheduled" | "timing_unknown";
+  factIds: string[];
 }
 
 export interface BattleSnapshot {
@@ -58,6 +112,39 @@ export interface BattleSnapshot {
     opponentSideConditions: string[];
   };
   legalActions: LegalAction[];
+  pendingAttacks?: PendingAttack[] | undefined;
+  /** Complete owned simulator stream from init through this current own request.
+   * The interval starts at the current turn fact and ends at the latest frame. */
+  turnCoverage?: {
+    source: "owned_offline_simulator";
+    turn: number;
+    turnFactId: string;
+    requestFactId: string;
+    fromSequence: number;
+    throughSequence: number;
+  } | undefined;
+  canonicalEvidence?: {
+    version: string;
+    facts: Array<CanonicalFact & { ownerInstanceId?: string | undefined; identityStatus: IdentityStatus; supportingFactIds: string[] }>;
+    contributions: EvidenceContribution[];
+    ambiguities: string[];
+    limitations: string[];
+  } | undefined;
+  entryObservations?: Array<{
+    ident: string;
+    species: string;
+    side: string;
+    turn: number;
+    hazards: string[];
+    types: string[];
+    damageObserved: boolean;
+    complete: boolean;
+    observationIds: string[];
+    factIds?: string[] | undefined;
+    instanceId?: string | undefined;
+    appearanceId?: string | undefined;
+    identityStatus?: IdentityStatus | undefined;
+  }> | undefined;
   recentLog: string[];
   rawRequestSummary?: Record<string, unknown> | null | undefined;
   notes: string[];
@@ -88,13 +175,22 @@ export interface LikelihoodEntry {
   share: number;
   sampleCount: number;
   confidenceTier: "thin" | "usable" | "strong";
+  /** Absent: the owner's observed history and/or curated sample teams. */
+  source?: "monthly_ladder" | undefined;
+}
+
+export interface ImmediateDamageAssessment {
+  ko: "all_rolls" | "some_rolls" | "conditional" | "no_ko" | "unknown";
+  minHpLossPercent: number | null;
+  maxHpLossPercent: number | null;
+  note?: string;
 }
 
 export interface DamageAssumptionBand {
   label: string;
   minPercent: number | null;
   maxPercent: number | null;
-  coverage: "covers_current_hp" | "can_cover_current_hp" | "misses_current_hp" | "unknown";
+  immediate: ImmediateDamageAssessment;
   outcome?: "damage" | "status" | "immune" | "blocked" | undefined;
   detail?: string | undefined;
 }
@@ -156,6 +252,8 @@ export interface StatPosteriorBand {
 
 export interface OpponentPosteriorPreview {
   topHypotheses: PosteriorHypothesis[];
+  /** Item marginals over every scored hypothesis (topHypotheses is a truncated view and overstates its items). */
+  itemShares?: Array<{ name: string; share: number }> | undefined;
   statBands: StatPosteriorBand[];
   confidenceTier: "thin" | "usable" | "strong";
   evidenceKinds: PosteriorEvidenceKind[];
@@ -173,11 +271,15 @@ export interface OpponentPosteriorPreview {
 export type InferenceEventSide = "opponent" | "player";
 
 interface InferenceEventBase {
+  instanceId?: string | undefined;
+  appearanceId?: string | undefined;
+  factIds?: string[] | undefined;
   side: InferenceEventSide;
   /** Species name (display form, e.g. "Great Tusk"). */
   species: string;
   /** Turn the event was observed on. */
   turn: number;
+  observationIds?: string[] | undefined;
 }
 
 /** Mon took no entry-hazard damage despite hazards being active. */
@@ -282,14 +384,31 @@ export interface MechanicsState {
   events: InferenceEvent[];
 }
 
+/** These bands are conditional impact estimates, never damage on the cast turn. */
+export interface DelayedDamagePreview {
+  kind: "delayed";
+  delayTurns: 2;
+  phase: "end_of_turn";
+  immediateDamagePercent: 0;
+  scheduling: "clear" | "occupied" | "unknown";
+  dueTurn: number | null;
+  targetSide: "p1" | "p2";
+  targetPosition: "a";
+  recipient: "slot_at_impact";
+  factIds: string[];
+  bands: DamageAssumptionBand[];
+}
+
 export interface DamagePreview {
   actionId: string;
+  terastallize?: boolean | undefined;
   label: string;
   moveName: string;
   targetName: string;
   targetCurrentHpPercent?: number | null | undefined;
   category: "Physical" | "Special" | "Status";
   bands: DamageAssumptionBand[];
+  delayed?: DelayedDamagePreview | undefined;
   observedRange?: ObservedRangeSummary | undefined;
   likelyBandSource?: "calc" | "context" | "aggregate" | "posterior" | undefined;
   summary: string;
@@ -298,10 +417,12 @@ export interface DamagePreview {
 }
 
 export interface ThreatTargetPreview {
+  instanceId?: string | undefined;
   species: string;
   targetCurrentHpPercent?: number | null | undefined;
   relation: "faster" | "slower" | "overlap" | "unknown";
   bands: DamageAssumptionBand[];
+  delayed?: DelayedDamagePreview | undefined;
   observedRange?: ObservedRangeSummary | undefined;
   likelyBandSource?: "calc" | "context" | "aggregate" | "posterior" | undefined;
   summary: string;
@@ -318,6 +439,7 @@ export interface ThreatPreview {
 }
 
 export interface SwitchSpeedMatchup {
+  instanceId?: string | undefined;
   species: string;
   effectiveSpeed: number | null;
   relation: "faster" | "slower" | "overlap" | "unknown";
@@ -327,6 +449,7 @@ export interface SpeedEvidenceTag {
   kind: "history" | "current_turn_order" | "item_ability_assumption" | "confounded" | "base_range" | "capture_gap";
   label: string;
   detail?: string | undefined;
+  factIds?: string[] | undefined;
 }
 
 export interface SpeedPreview {
@@ -342,6 +465,10 @@ export interface SpeedPreview {
   confounders: string[];
   switchMatchups: SwitchSpeedMatchup[];
   historyNotes: string[];
+  /** Opponent's revealed or likely damaging priority moves: an order verdict does not cover them. */
+  priorityMoves?: string[] | undefined;
+  /** The one-line order verdict shown under Showdown's controls (speedVerdict). */
+  verdict?: { text: string; tone: "faster" | "slower" | "overlap" | "unknown" } | undefined;
 }
 
 export type OpponentActionClass = "stay_attack" | "switch" | "status_or_setup" | "unknown";
@@ -371,6 +498,8 @@ export interface OpponentActionCandidate {
 }
 
 export interface OpponentActionPrediction {
+  /** Current-turn action timing during a living forced replacement, not a move probability. */
+  replyTiming?: { status: "pending" | "spent" | "unknown"; summary: string; factIds: string[] } | undefined;
   topActionClass: OpponentActionClass;
   confidenceTier: "low" | "medium" | "high";
   topActions: OpponentActionCandidate[];
@@ -455,6 +584,7 @@ export interface SelfActionRecommendation {
 }
 
 export interface OpponentIntelEntry {
+  instanceId?: string | undefined;
   species: string;
   displayName: string | null;
   battlesSeen: number;
@@ -469,6 +599,7 @@ export interface OpponentIntelEntry {
   revealedAbility: string | null;
   revealedTeraType: string | null;
   likelyMoves: LikelihoodEntry[];
+  metaMovePrior?: MetaMovePriorView;
   likelyItems: LikelihoodEntry[];
   likelyAbilities: LikelihoodEntry[];
   likelyTeraTypes: LikelihoodEntry[];
@@ -484,13 +615,39 @@ export interface OpponentIntelEntry {
   switchSpeedMatchups?: SwitchSpeedMatchup[] | undefined;
   speedNotes: string[];
   posterior?: OpponentPosteriorPreview | undefined;
+  /** Monthly ladder attacking set for the opponent's "likely" damage band (absent without priors). */
+  ladderAttackProfile?: LadderAttackProfile | undefined;
+}
+
+/** The ladder's modal attacking spread per category (nature, EVs in the attacking stat, share of spreads) and its modal
+ * held item among the live-plausible ones. */
+export interface LadderAttackProfile {
+  Physical?: { nature: string; evs: { atk: number }; share: number } | undefined;
+  Special?: { nature: string; evs: { spa: number }; share: number } | undefined;
+  item?: string | undefined;
+}
+
+/** One of our moves against each opposing Pokémon seen so far: its likely band at that Pokémon's current HP and set. */
+export interface MoveTargetPreview {
+  actionId: string;
+  moveName: string;
+  targets: Array<{ instanceId?: string | undefined; species: string; active: boolean; hpPercent: number | null; teraType?: string | undefined; band: DamageAssumptionBand | null }>;
 }
 
 export interface LocalIntelSnapshot {
   generatedAt: string;
   note: string;
   playerDamagePreview?: DamagePreview[] | undefined;
+  /** Hover detail: each move button's damage against every opposing Pokémon seen so far (the last section built). */
+  moveTargetPreview?: MoveTargetPreview[] | undefined;
   opponentThreatPreview?: ThreatPreview[] | undefined;
+  opponentThreatCoverage?: {
+    consideredMoves: Array<{ name: string; source: "known" | "likely" }>;
+    omittedMoves: Array<{ name: string; reason: "admission_threshold" | "move_slot_limit" }>;
+    uncomputedMoves: Array<{ name: string; reason: "no_damage_forecast" }>;
+    unrevealedSlots: number;
+    note: string;
+  } | undefined;
   opponentActionPrediction?: OpponentActionPrediction | undefined;
   opponentLeadPrediction?: OpponentLeadPrediction | undefined;
   playerLeadRecommendation?: PlayerLeadRecommendation | undefined;
@@ -499,6 +656,10 @@ export interface LocalIntelSnapshot {
   hazardSummary?: string | undefined;
   survivalCaveats?: string[] | undefined;
   debug?: Record<string, unknown> | undefined;
+  /** The opposing active may be an Illusion user in disguise: the numbers assume the shown species. */
+  illusion?: { shown: string; possible: string[] } | undefined;
+  /** The same board if the (first) possible Illusion user were the one on the field. */
+  illusionAlternative?: { species: string; speedPreview?: SpeedPreview | undefined; playerDamagePreview: DamagePreview[]; opponentThreatPreview: ThreatPreview[] } | undefined;
   opponents: OpponentIntelEntry[];
 }
 
@@ -538,6 +699,8 @@ export interface ProviderDebug {
 }
 
 export interface AnalyzeResponse {
+  historyAuthority?: "legacy_untrusted" | undefined;
+  decisionIdentity: DecisionIdentity;
   analysis: AnalysisResult;
   provider: ProviderName;
   model: string;

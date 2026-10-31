@@ -1,0 +1,383 @@
+=== [gen9uu] UU01 - Hazard offense - authored derivative ===
+
+Scizor @ Life Orb
+Ability: Technician
+Tera Type: Steel
+EVs: 108 HP / 252 Atk / 148 Spe
+Adamant Nature
+- Swords Dance
+- Bullet Punch
+- Bug Bite
+- Knock Off
+
+Mew @ Red Card
+Ability: Synchronize
+Tera Type: Ghost
+EVs: 252 HP / 4 Def / 252 Spe
+Timid Nature
+IVs: 0 Atk
+- Stealth Rock
+- Spikes
+- Taunt
+- Misty Explosion
+
+Greninja @ Expert Belt
+Ability: Battle Bond
+Tera Type: Stellar
+EVs: 252 SpA / 4 SpD / 252 Spe
+Timid Nature
+- Surf
+- Ice Beam
+- Dark Pulse
+- Extrasensory
+
+Thundurus-Therian @ Sitrus Berry
+Ability: Volt Absorb
+Tera Type: Steel
+EVs: 248 HP / 16 Def / 136 SpA / 8 SpD / 100 Spe
+Modest Nature
+- Nasty Plot
+- Thunderbolt
+- Dark Pulse
+- Agility
+
+Slither Wing @ Booster Energy
+Ability: Protosynthesis
+Tera Type: Fire
+EVs: 252 Atk / 4 SpD / 252 Spe
+Adamant Nature
+- Bulk Up
+- Leech Life
+- Earthquake
+- Flame Charge
+
+Mimikyu @ Red Card
+Ability: Disguise
+Tera Type: Ghost
+EVs: 252 Atk / 4 SpD / 252 Spe
+Jolly Nature
+- Swords Dance
+- Shadow Sneak
+- Play Rough
+- Shadow Claw
+
+=== [gen9uu] UU02 - Aurora Veil offense - authored derivative ===
+
+Ninetales-Alola @ Light Clay
+Ability: Snow Warning
+Tera Type: Steel
+EVs: 128 HP / 128 SpA / 252 Spe
+Timid Nature
+IVs: 0 Atk
+- Aurora Veil
+- Snowscape
+- Freeze-Dry
+- Roar
+
+Slither Wing @ Booster Energy
+Ability: Protosynthesis
+Tera Type: Fire
+EVs: 252 Atk / 4 SpD / 252 Spe
+Adamant Nature
+- Bulk Up
+- Leech Life
+- Earthquake
+- Flame Charge
+
+Thundurus-Therian (M) @ Sitrus Berry
+Ability: Volt Absorb
+Tera Type: Steel
+EVs: 232 HP / 176 SpA / 100 Spe
+Modest Nature
+- Thunderbolt
+- Nasty Plot
+- Agility
+- Dark Pulse
+
+Revavroom @ Air Balloon
+Ability: Filter
+Tera Type: Fire
+EVs: 252 Atk / 4 Def / 252 Spe
+Adamant Nature
+- Shift Gear
+- Gunk Shot
+- High Horsepower
+- Temper Flare
+
+Azumarill @ Sitrus Berry
+Ability: Huge Power
+Tera Type: Water
+EVs: 4 HP / 252 Atk / 252 Spe
+Adamant Nature
+- Belly Drum
+- Aqua Jet
+- Play Rough
+- Knock Off
+
+Weavile @ Heavy-Duty Boots
+Ability: Pickpocket
+Tera Type: Ice
+EVs: 252 Atk / 4 SpD / 252 Spe
+Jolly Nature
+- Swords Dance
+- Knock Off
+- Triple Axel
+- Ice Shard
+
+=== [gen9uu] UU03 - Hound Sand - Micciu published reference ===
+
+Houndstone @ Choice Band
+Ability: Sand Rush
+Tera Type: Ghost
+EVs: 252 Atk / 4 SpD / 252 Spe
+Adamant Nature
+- Poltergeist
+- Play Rough
+- Shadow Sneak
+- Body Press
+
+Hippowdon @ Smooth Rock
+Ability: Sand Stream
+Tera Type: Water
+EVs: 248 HP / 112 Def / 148 SpD
+Impish Nature
+- Stealth Rock
+- Ice Fang
+- Earthquake
+- Slack Off
+
+Excadrill @ Air Balloon
+Ability: Sand Rush
+Tera Type: Ghost
+EVs: 252 Atk / 4 SpD / 252 Spe
+Adamant Nature
+- Swords Dance
+- Earthquake
+- Iron Head
+- Rapid Spin
+
+Hydrapple @ Eject Button
+Ability: Regenerator
+Tera Type: Poison
+EVs: 252 HP / 136 SpA / 68 SpD / 52 Spe
+Modest Nature
+IVs: 0 Atk
+- Nasty Plot
+- Fickle Beam
+- Recover
+- Earth Power
+
+Mandibuzz (F) @ Heavy-Duty Boots
+Ability: Overcoat
+Tera Type: Steel
+EVs: 252 HP / 240 Def / 16 Spe
+Impish Nature
+- Foul Play
+- Defog
+- Roost
+- U-turn
+
+Rotom-Wash @ Leftovers
+Ability: Levitate
+Tera Type: Steel
+EVs: 248 HP / 56 Def / 120 SpD / 84 Spe
+Calm Nature
+IVs: 0 Atk
+- Volt Switch
+- Hydro Pump
+- Will-O-Wisp
+- Pain Split
+
+=== [gen9uu] UU04 - Specs Keldeo Scarf Metagross - umbry published reference ===
+
+Donphan @ Leftovers
+Ability: Sturdy
+Tera Type: Ghost
+EVs: 252 HP / 216 Def / 12 SpD / 28 Spe
+Impish Nature
+- Stealth Rock
+- Earthquake
+- Ice Spinner
+- Rapid Spin
+
+Keldeo @ Choice Specs
+Ability: Justified
+Tera Type: Water
+EVs: 252 SpA / 4 SpD / 252 Spe
+Timid Nature
+IVs: 0 Atk
+- Surf
+- Secret Sword
+- Icy Wind
+- Vacuum Wave
+
+Thundurus @ Heavy-Duty Boots
+Ability: Prankster
+Tera Type: Steel
+EVs: 252 SpA / 4 SpD / 252 Spe
+Timid Nature
+- Thunder Wave
+- Knock Off
+- Focus Blast
+- Volt Switch
+
+Hydrapple @ Heavy-Duty Boots
+Ability: Regenerator
+Tera Type: Fairy
+EVs: 248 HP / 212 Def / 16 SpA / 32 Spe
+Modest Nature
+IVs: 0 Atk
+- Nasty Plot
+- Fickle Beam
+- Earth Power
+- Recover
+
+Metagross @ Choice Scarf
+Ability: Clear Body
+Tera Type: Steel
+EVs: 252 Atk / 4 SpD / 252 Spe
+Jolly Nature
+- Heavy Slam
+- Knock Off
+- Earthquake
+- Trick
+
+Conkeldurr @ Assault Vest
+Ability: Iron Fist
+Tera Type: Electric
+EVs: 252 Atk / 216 SpD / 40 Spe
+Adamant Nature
+- Drain Punch
+- Thunder Punch
+- Earthquake
+- Mach Punch
+
+=== [gen9uu] UU05 - Latios Heatran pivot balance - authored representative ===
+
+Latios @ Soul Dew
+Ability: Levitate
+Tera Type: Steel
+EVs: 4 Def / 252 SpA / 252 Spe
+Timid Nature
+IVs: 0 Atk
+- Calm Mind
+- Draco Meteor
+- Luster Purge
+- Recover
+
+Heatran @ Air Balloon
+Ability: Flash Fire
+Tera Type: Grass
+EVs: 4 Def / 252 SpA / 252 Spe
+Timid Nature
+IVs: 0 Atk
+- Magma Storm
+- Earth Power
+- Taunt
+- Body Press
+
+Sandy Shocks @ Heavy-Duty Boots
+Ability: Protosynthesis
+Tera Type: Ghost
+EVs: 4 Def / 252 SpA / 252 Spe
+Timid Nature
+IVs: 0 Atk
+- Stealth Rock
+- Earth Power
+- Power Gem
+- Volt Switch
+
+Mandibuzz (F) @ Heavy-Duty Boots
+Ability: Overcoat
+Tera Type: Steel
+EVs: 252 HP / 240 Def / 16 Spe
+Impish Nature
+- Foul Play
+- Roost
+- Defog
+- U-turn
+
+Rotom-Wash @ Leftovers
+Ability: Levitate
+Tera Type: Steel
+EVs: 248 HP / 56 Def / 120 SpD / 84 Spe
+Calm Nature
+IVs: 0 Atk
+- Hydro Pump
+- Volt Switch
+- Will-O-Wisp
+- Pain Split
+
+Lokix @ Heavy-Duty Boots
+Ability: Tinted Lens
+Tera Type: Bug
+EVs: 4 Def / 252 Atk / 252 Spe
+Adamant Nature
+- First Impression
+- Knock Off
+- U-turn
+- Sucker Punch
+
+=== [gen9uu] UU06 - Weavile semi-stall - authored representative ===
+
+Skarmory @ Rocky Helmet
+Ability: Sturdy
+Tera Type: Water
+EVs: 248 HP / 204 Def / 56 Spe
+Impish Nature
+- Spikes
+- Roost
+- Body Press
+- Whirlwind
+
+Blissey @ Heavy-Duty Boots
+Ability: Natural Cure
+Tera Type: Ghost
+EVs: 252 HP / 252 Def / 4 SpD
+Bold Nature
+IVs: 0 Atk
+- Seismic Toss
+- Soft-Boiled
+- Heal Bell
+- Thunder Wave
+
+Clodsire @ Heavy-Duty Boots
+Ability: Water Absorb
+Tera Type: Dark
+EVs: 248 HP / 8 Def / 252 SpD
+Careful Nature
+- Stealth Rock
+- Earthquake
+- Toxic
+- Recover
+
+Skeledirge @ Heavy-Duty Boots
+Ability: Unaware
+Tera Type: Fairy
+EVs: 248 HP / 252 Def / 8 SpD
+Bold Nature
+IVs: 0 Atk
+- Torch Song
+- Hex
+- Will-O-Wisp
+- Slack Off
+
+Mandibuzz (F) @ Heavy-Duty Boots
+Ability: Overcoat
+Tera Type: Steel
+EVs: 252 HP / 240 Def / 16 Spe
+Impish Nature
+- Foul Play
+- Roost
+- Defog
+- U-turn
+
+Weavile @ Heavy-Duty Boots
+Ability: Pressure
+Tera Type: Ice
+EVs: 4 SpD / 252 Atk / 252 Spe
+Jolly Nature
+- Swords Dance
+- Triple Axel
+- Knock Off
+- Ice Shard

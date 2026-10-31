@@ -1,9 +1,13 @@
+import { detachMetaMovePrior, metaMoveInclusion, metaMovePriorView, metaSetPriorEntries, metaAttackProfile, type MetaMovePrior } from "./metaPriorStore.js";
+import { projectSwitchEntry } from "../mechanics/switchEntry.js";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { Dex } from "@pkmn/dex";
 import { Generations } from "@pkmn/data";
+import { createDecisionIdentity, hashCanonical, sameDecision, type DecisionIdentity } from "../../../extension/lib/decision-identity.js";
 
 import { config } from "../config.js";
+import { withinDeadline } from "../state/deadline.js";
 import {
   buildOpponentPosterior,
   type PosteriorBattleDamageObservation,
@@ -21,24 +25,27 @@ import {
 } from "./externalCuratedStore.js";
 import type {
   BattleSnapshot,
+  DamageAssumptionBand,
+  DamagePreview,
   InferenceEvent,
   LikelihoodEntry,
   LocalIntelSnapshot,
+  MoveTargetPreview,
   OpponentIntelEntry,
   PokemonSnapshot,
   SpeedEvidenceTag,
   SpeedPreview,
   SwitchSpeedMatchup
 } from "../types.js";
-import { filterLiveLikelyHeldItemEntries, filterLiveLikelyHeldItemNames } from "../mechanics/liveLikelyItems.js";
+import { choiceRefutedByStint, filterLiveLikelyHeldItemEntries, filterLiveLikelyHeldItemNames } from "../mechanics/liveLikelyItems.js";
 import { parseInferenceEvents } from "../mechanics/inferenceEvents.js";
 import {
+  effectiveSpeed,
+  effectiveSpeedRange,
+  effectiveSpeedField,
   FIELD_SPEED_ABILITY_RULES,
-  speedStageMultiplier,
-  paralysisSpeedMultiplier,
   matchingFieldSpeedAbilityRule,
-  unburdenSpeedMultiplier,
-  boosterEnergySpeedMultiplier,
+  speedAbilityMultiplierRange,
   type FieldSpeedAbilityRule
 } from "../mechanics/speed.js";
 import { buildDamagePreview, buildThreatPreview } from "../prompting/damageNotes.js";
@@ -88,6 +95,7 @@ interface BattleLedger {
   updatedAt: string;
   leadRecorded?: boolean | undefined;
   species: Record<string, BattleSpeciesLedger>;
+  instances?: Record<string, BattleSpeciesLedger> | undefined;
   predictionHistory?: Array<{
     turn: number;
     predictedClass: "stay_attack" | "switch" | "status_or_setup" | "unknown";
@@ -126,6 +134,8 @@ interface IntelStore {
   species: Record<string, IntelSpeciesRecord>;
   battles: Record<string, BattleLedger>;
   externalCurated: ExternalCuratedStore;
+  canonicalBattles?: Record<string, { format: string; contributions: NonNullable<BattleSnapshot["canonicalEvidence"]>["contributions"];
+    confirmedFacts: Record<string, string>; lineageConflict?: boolean | undefined }> | undefined;
 }
 
 type PersistedIntelStore = Omit<IntelStore, "externalCurated"> & {
@@ -340,12 +350,13 @@ async function readExternalCuratedStore(fallback?: PersistedIntelStore): Promise
     const text = await fs.readFile(config.externalCuratedStorePath, "utf8");
     const parsed = JSON.parse(text) as Partial<ExternalCuratedStore>;
     return normalizeExternalCuratedStore(parsed);
-  } catch {
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") throw error;
     return normalizeExternalCuratedStore(fallback?.externalCurated ?? fallback?.sampleTeams);
   }
 }
 
-async function readStore(): Promise<IntelStore> {
+async function readStoreFiles(): Promise<IntelStore> {
   try {
     const text = await fs.readFile(config.localIntelStorePath, "utf8");
     const parsed = JSON.parse(text) as PersistedIntelStore;
@@ -355,9 +366,11 @@ async function readStore(): Promise<IntelStore> {
       updatedAt: parsed.updatedAt ?? EMPTY_STORE.updatedAt,
       species: parsed.species ?? {},
       battles: parsed.battles ?? {},
+      canonicalBattles: parsed.canonicalBattles ?? {},
       externalCurated
     };
-  } catch {
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") throw error;
     return {
       ...structuredClone(EMPTY_STORE),
       externalCurated: await readExternalCuratedStore()
@@ -365,26 +378,138 @@ async function readStore(): Promise<IntelStore> {
   }
 }
 
-async function writeStore(store: IntelStore) {
-  await ensureStoreDirs();
-  store.updatedAt = new Date().toISOString();
-  const persisted: PersistedIntelStore = {
-    version: store.version,
-    updatedAt: store.updatedAt,
-    species: store.species,
-    battles: store.battles
-  };
-  await fs.writeFile(config.localIntelStorePath, JSON.stringify(persisted, null, 2));
-  await fs.writeFile(config.externalCuratedStorePath, JSON.stringify(store.externalCurated, null, 2));
+// This process keeps the parsed history in memory and never mutates an installed store in place (each change installs
+// a new object), so evaluation contexts share it without copies. Persistence is write-behind: changes are coalesced
+// and written atomically (temporary file + rename) within PERSIST_DELAY_MS, off the request path, and flushed on
+// shutdown. A failed write keeps the change pending, is retried and is reported by intelStorePersistence(); no
+// in-memory change is dropped. The files are read again only when nothing is pending and another process changed them.
+// Reading, hashing, cloning and rewriting the ~3 MB file on every observation cost ~75 ms per batch (2026-10-23).
+const PERSIST_DELAY_MS = 1000, PERSIST_RETRY_MS = 5000;
+let cache: { key: string; signature: [string, string]; store: IntelStore } | undefined;
+let revisionMemo: { store: IntelStore; prior: string | undefined; revision: Promise<string> } | undefined;
+let persistTimer: ReturnType<typeof setTimeout> | undefined, persistRun: Promise<void> | undefined, curatedPending = false;
+let persistStartedAt: number | null = null;
+const persistence = { pending: false, failures: 0, error: null as string | null, lastWrittenAt: null as string | null };
+
+function fileSignature(file: string) {
+  return fs.stat(file).then((s) => `${s.size}:${s.mtimeMs}`, (error) => {
+    if (error?.code === "ENOENT") return "missing";
+    throw error;
+  });
 }
 
-function withStoreWrite<T>(operation: (store: IntelStore) => Promise<T> | T): Promise<T> {
-  const run = writeChain.then(async () => {
-    const store = await readStore();
-    const result = await operation(store);
-    await writeStore(store);
-    return result;
+async function readStore(check: () => void = () => {}): Promise<IntelStore> {
+  const key = `${config.localIntelStorePath}\n${config.externalCuratedStorePath}`;
+  if (cache?.key === key && (persistence.pending || persistRun)) return cache.store;
+  const signature: [string, string] = [await fileSignature(config.localIntelStorePath), await fileSignature(config.externalCuratedStorePath)];
+  if (cache?.key !== key || cache.signature.join("|") !== signature.join("|")) {
+    const store = await readStoreFiles();
+    check(); // A timed-out load cannot overwrite a newer committed store.
+    cache = { key, signature, store };
+  }
+  return cache.store;
+}
+
+function installStore(store: IntelStore, curated: boolean) {
+  cache!.store = store;
+  persistence.pending = true;
+  curatedPending ||= curated;
+  schedulePersist(PERSIST_DELAY_MS);
+}
+
+function schedulePersist(delayMs: number) {
+  persistTimer ??= setTimeout(() => {
+    persistTimer = undefined;
+    drainPersistence().catch((error) => {
+      console.error(`[opponent-intel] history write failed (${persistence.failures}x); kept in memory and retrying`, error);
+      schedulePersist(PERSIST_RETRY_MS);
+    });
+  }, delayMs);
+}
+
+function drainPersistence(): Promise<void> {
+  // With nothing pending the run below would settle synchronously, clear persistRun in its finally, and only then be
+  // assigned to it: a settled run left installed blocks every later write and flush.
+  if (!persistRun && !persistence.pending) return Promise.resolve();
+  persistRun ??= (async () => {
+    persistStartedAt = Date.now();
+    try {
+      while (persistence.pending) {
+        const store = cache!.store, curated = curatedPending;
+        persistence.pending = false; curatedPending = false;
+        try {
+          await writeObservedStore(store);
+          if (curated) await fs.writeFile(config.externalCuratedStorePath, JSON.stringify(store.externalCurated, null, 2));
+          // Only the files written here are taken as known; another process's edit of the other is still noticed.
+          cache!.signature = [await fileSignature(config.localIntelStorePath), curated ? await fileSignature(config.externalCuratedStorePath) : cache!.signature[1]];
+          persistence.error = null; persistence.lastWrittenAt = new Date().toISOString();
+        } catch (error) {
+          persistence.pending = true; curatedPending ||= curated; persistence.failures += 1;
+          persistence.error = error instanceof Error ? error.message : String(error);
+          throw error;
+        }
+      }
+    } finally {
+      persistRun = undefined;
+      persistStartedAt = null;
+    }
+  })();
+  return persistRun;
+}
+
+/** Write every pending history change now; rejects while the files cannot be written. */
+export async function flushIntelStore(): Promise<void> {
+  await withinDeadline("history flush", 5000, async (check) => {
+    await writeChain;
+    check();
+    if (persistTimer) { clearTimeout(persistTimer); persistTimer = undefined; }
+    await persistRun?.catch(() => undefined);
+    check();
+    if (persistence.pending) await drainPersistence();
   });
+}
+
+/** Write-behind state of the history file, for status endpoints. */
+export function intelStorePersistence() {
+  const writingMs = persistStartedAt === null ? 0 : Date.now() - persistStartedAt;
+  return { ...persistence, writing: Boolean(persistRun), writingMs,
+    ...(writingMs >= 5000 ? { error: "history_persistence_stalled", pending: true } : {}) };
+}
+
+function storeRevision(store: IntelStore, prior?: MetaMovePrior): Promise<string> {
+  if (revisionMemo?.store !== store || revisionMemo.prior !== prior?.revision) {
+    const revision = withinDeadline("history revision", 3000, async () => hashCanonical(prior ? { store, metaPriorRevision: prior.revision } : store));
+    revisionMemo = { store, prior: prior?.revision, revision };
+    void revision.catch(() => { if (revisionMemo?.revision === revision) revisionMemo = undefined; });
+  }
+  return revisionMemo.revision;
+}
+
+async function writeObservedStore(store: IntelStore) {
+  await ensureStoreDirs();
+  const temporaryPath = `${config.localIntelStorePath}.pending-${process.pid}`;
+  const persisted: PersistedIntelStore = { version: store.version, updatedAt: store.updatedAt, species: store.species, battles: store.battles,
+    ...(store.canonicalBattles ? { canonicalBattles: store.canonicalBattles } : {}) };
+  try {
+    await fs.writeFile(temporaryPath, JSON.stringify(persisted, null, 2));
+    await fs.rename(temporaryPath, config.localIntelStorePath);
+  } finally {
+    await fs.rm(temporaryPath, { force: true }).catch(() => undefined);
+  }
+}
+
+function withStoreWrite<T>(operation: (store: IntelStore) => Promise<T> | T, parentCheck: () => void = () => {}): Promise<T> {
+  const run = writeChain.then(() => withinDeadline("history transaction", 3000, async (check) => {
+    const fence = () => { check(); parentCheck(); };
+    fence();
+    const store = structuredClone(await readStore(fence));
+    fence();
+    const result = await operation(store);
+    fence();
+    store.updatedAt = new Date().toISOString();
+    installStore(store, true);
+    return result;
+  }));
   writeChain = run.then(() => undefined, () => undefined);
   return run;
 }
@@ -554,6 +679,8 @@ function attackerContextKey(pokemon: PokemonSnapshot | null | undefined) {
     `ability:${normalizeContextToken(pokemon.ability)}`,
     `tera:${pokemon.terastallized ? normalizeContextToken(pokemon.teraType) : "none"}`,
     `status:${normalizeContextToken(pokemon.status)}`,
+    `paradox:${pokemon.paradoxBoostedStat === undefined ? "unknown" : pokemon.paradoxBoostedStat ?? "inactive"}`,
+    ...(normalizedAbilityId(pokemon.ability) === "slowstart" ? [`slowstart:${pokemon.slowStartActive ?? "unknown"}`] : []),
     boostContextKey(pokemon)
   ].join("|");
 }
@@ -565,6 +692,8 @@ function defenderContextKey(pokemon: PokemonSnapshot | null | undefined) {
     `ability:${normalizeContextToken(pokemon.ability)}`,
     `tera:${pokemon.terastallized ? normalizeContextToken(pokemon.teraType) : "none"}`,
     `status:${normalizeContextToken(pokemon.status)}`,
+    `paradox:${pokemon.paradoxBoostedStat === undefined ? "unknown" : pokemon.paradoxBoostedStat ?? "inactive"}`,
+    ...(normalizedAbilityId(pokemon.ability) === "slowstart" ? [`slowstart:${pokemon.slowStartActive ?? "unknown"}`] : []),
     defensiveBoostContextKey(pokemon)
   ].join("|");
 }
@@ -574,7 +703,9 @@ function combatContextKey(
   defender: PokemonSnapshot | null | undefined,
   fieldContext = "weather:none|terrain:none|pseudo:none|your:none|opp:none"
 ) {
-  return `${attackerContextKey(attacker)}|def:${defenderContextKey(defender)}|field:${fieldContext}`;
+  const stats = (pokemon: PokemonSnapshot | null | undefined) => JSON.stringify([pokemon?.level,
+    ...["hp", "atk", "def", "spa", "spd", "spe"].map((stat) => pokemon?.stats?.[stat] ?? null)]);
+  return `${attackerContextKey(attacker)}|stats:${stats(attacker)}|def:${defenderContextKey(defender)}|stats:${stats(defender)}|field:${fieldContext}`;
 }
 
 function hasNeutralAttackerContext(pokemon: PokemonSnapshot | null | undefined) {
@@ -611,6 +742,7 @@ function allowAggregateObservedRange(
   attacker: PokemonSnapshot | null | undefined,
   defender: PokemonSnapshot | null | undefined
 ) {
+  if (snapshot?.canonicalEvidence) return false; // Cross-spread aggregate HP percentages are descriptive, not exact mechanics.
   return hasNeutralDamageField(snapshot)
     && hasNeutralAttackerContext(attacker)
     && hasNeutralDefenderContext(defender);
@@ -679,6 +811,9 @@ export async function importExternalCuratedTeamPriors(params: SampleTeamPriorImp
       teamsImported: params.teams.length,
       sourceUrl: params.sourceUrl
     };
+  }).then(async (result) => {
+    await flushIntelStore();  // an import is durable when it returns (its CLI exits next)
+    return result;
   });
 }
 
@@ -1164,6 +1299,9 @@ function hasSpeedConfounders(snapshot: BattleSnapshot) {
   return getSpeedConfounders(snapshot).length > 0;
 }
 
+/** getSpeedConfounders entries that effectiveSpeed applies exactly to a known stat or range. */
+const EXACT_SPEED_MODIFIER = /^(?:your|opponent) (?:Tailwind|paralysis|Speed boosts|Choice Scarf|Iron Ball|Quick Feet)$/;
+
 function getSpeedConfounders(snapshot: BattleSnapshot) {
   const notes: string[] = [];
   const pseudoWeather = snapshot.field.pseudoWeather.map((value) => String(value).toLowerCase());
@@ -1194,6 +1332,15 @@ function getSpeedConfounders(snapshot: BattleSnapshot) {
   );
   if (yourPossibleFieldSpeedAbility) notes.push(yourPossibleFieldSpeedAbility);
   if (opponentPossibleFieldSpeedAbility) notes.push(opponentPossibleFieldSpeedAbility);
+  for (const [label, pokemon] of [["your", snapshot.yourSide.active], ["opponent", snapshot.opponentSide.active]] as const) {
+    const range = speedAbilityMultiplierRange(pokemon?.ability, snapshot.field, pokemon?.removedItem, pokemon?.paradoxBoostedStat, pokemon?.slowStartActive);
+    if (range.max > 1) {
+      notes.push(`${range.min !== range.max ? "possible " : ""}${label} ${pokemon?.ability} Speed boost`);
+    }
+    if (normalizedAbilityId(pokemon?.ability) === "slowstart" && pokemon?.slowStartActive !== false) {
+      notes.push(`${label} Slow Start ${pokemon?.slowStartActive === true ? "active" : "activation unknown"}`);
+    }
+  }
   return notes;
 }
 
@@ -1203,6 +1350,7 @@ function extractMoveNameFromLog(line: string) {
 }
 
 function extractLastTurnMoveOrder(snapshot: BattleSnapshot) {
+  if (snapshot.canonicalEvidence) return null; // Prose cannot establish canonical move-order evidence.
   const yourActive = snapshot.yourSide.active;
   const opponentActive = snapshot.opponentSide.active;
   const yourNames = namesForPokemon(yourActive);
@@ -1523,42 +1671,16 @@ function effectiveSpeedRangeForPokemon(
   sideConditions: string[],
   field: BattleSnapshot["field"]
 ) {
-  if (!range || !pokemon) return null;
-  let multiplier = speedStageMultiplier(Number(pokemon.boosts?.spe ?? 0));
-  const itemId = normalizedItemId(pokemon.item);
-  const abilityId = normalizedAbilityId(pokemon.ability);
-  if (pokemon.status === "par" && abilityId !== "quickfeet") {
-    multiplier *= paralysisSpeedMultiplier(generationFromFormat(format));
-  }
-  if (pokemon.status && abilityId === "quickfeet") {
-    multiplier *= 1.5;
-  }
-  if (itemId === "choicescarf") {
-    multiplier *= 1.5;
-  }
-  if (itemId === "ironball") {
-    multiplier *= 0.5;
-  }
-  if (sideConditions.some((value) => /tailwind/i.test(value))) {
-    multiplier *= 2;
-  }
-  const revealedFieldSpeedAbility = matchingFieldSpeedAbilityRule(abilityId, field);
-  if (revealedFieldSpeedAbility) {
-    multiplier *= revealedFieldSpeedAbility.multiplier;
-  }
-  // Unburden: 2× after item consumption (definite if ability is revealed)
-  multiplier *= unburdenSpeedMultiplier(abilityId, pokemon.removedItem);
-  // Booster Energy (non-field): 1.5× when Paradox ability consumed Booster Energy
-  multiplier *= boosterEnergySpeedMultiplier(abilityId, pokemon.removedItem, field);
-  const possibleFieldSpeedMultiplier = possibleFieldSpeedAbilityRules(format, pokemon, field)
-    .reduce((maxMultiplier, rule) => Math.max(maxMultiplier, rule.multiplier), 1);
-  return {
-    min: Math.floor(range.min * multiplier),
-    max: Math.floor(range.max * multiplier * possibleFieldSpeedMultiplier)
-  };
+  if (!range || !pokemon || pokemon.fainted || (pokemon.hpPercent ?? 100) <= 0) return null;
+  const gen = generationFromFormat(format);
+  const base = effectiveSpeedRange(gen, range, pokemon, sideConditions, field);
+  if (!base) return null;
+  const possibleRules = possibleFieldSpeedAbilityRules(format, pokemon, field);
+  const possible = possibleRules.map((rule) => effectiveSpeedRange(gen, range, { ...pokemon, ability: rule.label }, sideConditions, field));
+  return { min: base.min, max: Math.max(base.max, ...possible.map((candidate) => candidate?.max ?? base.max)) };
 }
 
-function effectiveShownSpeed(format: string, pokemon: PokemonSnapshot | null | undefined, sideConditions: string[]) {
+function effectiveShownSpeed(format: string, pokemon: PokemonSnapshot | null | undefined, sideConditions: string[], field: BattleSnapshot["field"]) {
   const shown = pokemon?.stats?.spe;
   if (!Number.isFinite(shown)) return null;
   return effectiveSpeedRangeForPokemon(
@@ -1566,13 +1688,7 @@ function effectiveShownSpeed(format: string, pokemon: PokemonSnapshot | null | u
     { min: Number(shown), max: Number(shown) },
     pokemon,
     sideConditions,
-    {
-      weather: null,
-      terrain: null,
-      pseudoWeather: [],
-      yourSideConditions: [],
-      opponentSideConditions: []
-    }
+    field
   );
 }
 
@@ -1584,6 +1700,123 @@ function speedRelation(
   if (yourSpeed.min > opponentSpeed.max) return "faster";
   if (yourSpeed.max < opponentSpeed.min) return "slower";
   return "overlap";
+}
+
+/** Possible abilities that change priority-0 order or Speed under these conditions. A known ability is applied
+ * exactly by effectiveSpeed; an unknown one is acceptable only when no candidate of the species changes Speed. */
+function orderAbilityUnsupported(format: string, mon: PokemonSnapshot, field: BattleSnapshot["field"]) {
+  const known = normalizedAbilityId(mon.ability);
+  const candidates = known ? [known] : Object.values(lookupSpecies(gens.get(generationFromFormat(format)), mon.canonicalSpecies ?? mon.species)?.abilities ?? {}).map(normalizedAbilityId);
+  if (!candidates.length) return true;
+  return candidates.some((id) => {
+    if (["galewings", "triage", "stall", "quickdraw"].includes(id)) return true;
+    const range = speedAbilityMultiplierRange(id, field, mon.removedItem, mon.paradoxBoostedStat, mon.slowStartActive);
+    if (range.min !== range.max) return true;
+    return !known && (range.min !== 1 || (id === "quickfeet" && Boolean(mon.status)) || (id === "unburden" && Boolean(mon.unburdenActive)));
+  });
+}
+
+type InBattleOrderSample = { turn: number; relation: "first" | "second"; atLeast: boolean; threshold: number; otherSpecies: string;
+  pokemon: PokemonSnapshot; field: BattleSnapshot["field"]; factIds: string[] };
+
+/** Item the opponent held when an order happened. A hidden item is the one its next item fact reveals (Knock Off,
+ * consumption, Frisk; the item the other side receives in a Trick); with no later item fact it is the current item. */
+function itemHeldAtOrder(evidence: NonNullable<BattleSnapshot["canonicalEvidence"]>, opponent: PokemonSnapshot, sample: PokemonSnapshot, factIndex: number) {
+  if (sample.item || sample.removedItem) return sample.item;
+  const facts = evidence.facts, index = facts.findIndex((fact, i) => i > factIndex && fact.ownerInstanceId === opponent.instanceId && ["-item", "-enditem"].includes(fact.kind));
+  const next = facts[index];
+  if (!next) return opponent.item ?? null;
+  if (next.kind === "-enditem") return next.args[1] ?? null;
+  if (!next.args.some((arg) => /^\[from\] move: (?:trick|switcheroo)$/i.test(arg))) return next.args[1] ?? null;
+  const given = facts.slice(Math.max(0, index - 2), index + 3).find((fact) => fact.kind === "-item" && fact.ownerInstanceId !== opponent.instanceId
+    && fact.args.some((arg) => /^\[from\] move: (?:trick|switcheroo)$/i.test(arg)));
+  return given?.args[1] ?? null;
+}
+
+/** A forme change keeps a Speed sample only when base Speed is unchanged (Mimikyu's Disguise busting mid-turn did not). */
+function sameBaseSpeed(gen: ReturnType<typeof gens.get>, left: string | null | undefined, right: string | null | undefined) {
+  if (normalizeName(left) === normalizeName(right)) return true;
+  const a = lookupSpecies(gen, left), b = lookupSpecies(gen, right);
+  return Boolean(a && b && a.baseStats.spe === b.baseStats.spe);
+}
+
+/** Priority-0, non-status move orders of the current opponent Pokemon (every stint: raw Speed cannot change), each
+ * with your effective Speed and its own stage/status/Tailwind/held item at that time; Trick Room flips the
+ * inequality. A forme with a different base Speed is skipped. Current modifiers are applied later. */
+function inBattleOrderSamples(snapshot: BattleSnapshot): InBattleOrderSample[] {
+  const evidence = snapshot.canonicalEvidence, opponent = snapshot.opponentSide.active;
+  if (!evidence || !opponent?.instanceId || !opponent.appearanceId) return [];
+  const gen = gens.get(generationFromFormat(snapshot.format));
+  const factsById = new Map(evidence.facts.map((fact) => [fact.id, fact]));
+  const factIndex = new Map(evidence.facts.map((fact, index) => [fact.id, index]));
+  const samples: InBattleOrderSample[] = [];
+  for (const contribution of evidence.contributions) {
+    const sample = contribution.speed;
+    if (contribution.metric !== "speed" || contribution.eligibility !== "active" || !sample || !contribution.factIds.length
+        || contribution.instanceId !== opponent.instanceId || sample.pokemon.instanceId !== opponent.instanceId
+        || !sameBaseSpeed(gen, sample.pokemon.species, opponent.species)) continue;
+    const facts = contribution.factIds.map((id) => factsById.get(id));
+    if (facts.some((fact) => !fact || fact.source.channel === "recovery")) continue;
+    const turnFacts = facts.filter((fact): fact is NonNullable<typeof fact> => fact!.turn === sample.turn);
+    const moveFacts = turnFacts.filter((fact) => fact.kind === "move");
+    if (moveFacts.length !== (sample.unacted ? 1 : 2) || moveFacts.some((fact) => fact.args.some((arg) => arg.startsWith("[from]")))
+        || turnFacts.some((fact) => fact.args.some((arg) => /quick claw|custap|quick draw|lagging tail|full incense/i.test(arg)))) continue;
+    const moves = (sample.unacted ? [sample.moveName] : [sample.moveName, sample.otherMoveName]).map((name) => lookupMove(gen, name));
+    if (moves.some((move) => !move || move.category === "Status" || move.priority !== 0 || ["grassyglide", "round"].includes(normalizeName(move.name)))) continue;
+    if (sample.unacted && !unactedOrderBounds(gen, sample.other)) continue;
+    if ([sample.pokemon, sample.other].some((mon) => ["quickclaw", "custapberry", "laggingtail", "fullincense"].includes(normalizedItemId(mon.item)))) continue;
+    const field = effectiveSpeedField(sample.field, [sample.pokemon, sample.other]);
+    if (orderAbilityUnsupported(snapshot.format, sample.pokemon, field) || orderAbilityUnsupported(snapshot.format, sample.other, field)) continue;
+    const yours = effectiveShownSpeed(snapshot.format, sample.other, field.yourSideConditions, field);
+    if (!yours || yours.min !== yours.max) continue;
+    const trickRoom = field.pseudoWeather.some((name) => /trick room/i.test(name));
+    const ownMove = moveFacts.find((fact) => fact.ownerInstanceId === opponent.instanceId);
+    const held = itemHeldAtOrder(evidence, opponent, sample.pokemon, ownMove ? factIndex.get(ownMove.id) ?? -1 : -1);
+    if (["quickclaw", "custapberry", "laggingtail", "fullincense"].includes(normalizedItemId(held))) continue;
+    samples.push({ turn: sample.turn, relation: sample.relation, atLeast: (sample.relation === "first") !== trickRoom, threshold: yours.min,
+      otherSpecies: sample.other.canonicalSpecies ?? sample.other.species ?? "your active", pokemon: { ...sample.pokemon, item: held }, field, factIds: contribution.factIds });
+  }
+  return samples.sort((a, b) => a.turn - b.turn);
+}
+
+/** Our active fainted to a priority-0 move before acting: it chose a move (a switch comes first), and that move had
+ * priority 0 unless its request could have held a lower-priority one. Only then is the KO a Speed order (an item-free
+ * Armarouge that KOs a 353-Speed Thundurus first must hold a Choice Scarf). Our own moves are known exactly. */
+function unactedOrderBounds(gen: ReturnType<typeof gens.get>, own: PokemonSnapshot) {
+  if (!own.knownMoves.length || normalizedAbilityId(own.ability) === "myceliummight") return false;
+  return own.knownMoves.every((name) => { const move = lookupMove(gen, name); return move && move.priority >= 0 && !move.flags.recharge; });
+}
+
+/** Raw (pre-modifier) Speed interval consistent with every sample, ties allowed. `item` undefined keeps each
+ * sample's own known item (none when hidden); a name assumes that held item. Empty interval: null. */
+function boundedRawSpeed(format: string, rawRange: { min: number; max: number } | null, samples: InBattleOrderSample[], item?: string) {
+  if (!rawRange) return null;
+  const genNum = generationFromFormat(format);
+  let { min, max } = rawRange;
+  for (const sample of samples) {
+    const mon = item === undefined ? sample.pokemon : { ...sample.pokemon, item, removedItem: null };
+    const paradox = speedAbilityMultiplierRange(mon.ability, sample.field, mon.removedItem, mon.paradoxBoostedStat, mon.slowStartActive).min === 1.5;
+    const fits = (raw: number) => {
+      const speed = effectiveSpeed(genNum, raw, mon, sample.field.opponentSideConditions, sample.field, paradox);
+      return speed !== null && (sample.atLeast ? speed >= sample.threshold : speed <= sample.threshold);
+    };
+    // Effective Speed is monotone in raw Speed: binary-search the feasible edge.
+    let lo = min, hi = max;
+    if (sample.atLeast) {
+      if (!fits(max)) return null;
+      while (lo < hi) { const mid = Math.floor((lo + hi) / 2); if (fits(mid)) hi = mid; else lo = mid + 1; }
+      min = lo;
+    } else {
+      if (!fits(min)) return null;
+      while (lo < hi) { const mid = Math.ceil((lo + hi) / 2); if (fits(mid)) lo = mid; else hi = mid - 1; }
+      max = lo;
+    }
+  }
+  return { min, max };
+}
+
+function formatOrderSamples(samples: InBattleOrderSample[]) {
+  return samples.map((sample) => `T${sample.turn} ${sample.relation === "first" ? "before" : "after"} ${sample.otherSpecies} ${sample.threshold}`).join("; ");
 }
 
 function relationSummary(relation: "faster" | "slower" | "overlap" | "unknown", trickRoomActive: boolean) {
@@ -1627,20 +1860,28 @@ function possibleItemAdjustedSpeedRange(params: {
   sideConditions: string[];
   field: BattleSnapshot["field"];
   likelyItems: LikelihoodEntry[] | undefined;
+  /** In-battle order makes Choice Scarf decidable even without a prior. */
+  extraItems?: string[] | undefined;
+  /** Raw range consistent with in-battle order under an assumed item; null rules the item out. */
+  neutralFor?: ((item: string) => { min: number; max: number } | null) | undefined;
 }) {
   if (!params.neutralRange || !params.currentRange || !params.pokemon || params.pokemon.item || params.pokemon.removedItem) {
     return null;
   }
 
-  const candidates = likelySpeedItemEntries(params.likelyItems);
+  const candidates = [...likelySpeedItemEntries(params.likelyItems).map((entry) => entry.name), ...(params.extraItems ?? [])]
+    .filter((name, index, all) => all.findIndex((other) => normalizedItemId(other) === normalizedItemId(name)) === index)
+    .map((name) => ({ name }));
   if (candidates.length === 0) return null;
 
   let range: { min: number; max: number } | null = null;
   const labels: string[] = [];
   for (const candidate of candidates) {
+    const neutral = params.neutralFor ? params.neutralFor(candidate.name) : params.neutralRange;
+    if (!neutral) continue;
     const adjusted = effectiveSpeedRangeForPokemon(
       params.format,
-      params.neutralRange,
+      neutral,
       {
         ...params.pokemon,
         item: candidate.name,
@@ -1673,6 +1914,8 @@ function buildCurrentSpeedIntel(
   formatRecord: IntelFormatRecord,
   likelyItems?: LikelihoodEntry[]
 ) {
+  const observedField = snapshot.field;
+  snapshot = { ...snapshot, field: effectiveSpeedField(observedField, [snapshot.yourSide.active, snapshot.opponentSide.active]) };
   const opponentActive = snapshot.opponentSide.active;
   if (!opponentActive || normalizeName(speciesNameFromSnapshot(opponentActive)) !== normalizeName(speciesName)) {
     return {
@@ -1687,49 +1930,69 @@ function buildCurrentSpeedIntel(
   }
 
   const trickRoomActive = snapshot.field.pseudoWeather.some((value) => /trick room/i.test(value));
-  const confounders = getSpeedConfounders(snapshot);
+  // The relation below applies these exactly (effectiveSpeed: paralysis, stages, Tailwind, revealed Scarf/Iron Ball, Quick
+  // Feet); they confound only the legacy raw-stat path. Listing them made every guard read "may move first" (e.g. a
+  // paralysed Serperior at 117–178 vs a 459-Speed Arcanine). Possible abilities stay: their range is shown widened.
+  const confounders = getSpeedConfounders(snapshot).filter((entry) => !EXACT_SPEED_MODIFIER.test(entry));
   const activeYourSpecies = snapshot.yourSide.active?.species ?? snapshot.yourSide.active?.displayName;
-  const observation = extractLastTurnMoveOrder(snapshot);
-  const neutralRange = narrowRangeWithCurrentObservation(
-    narrowRangeWithHistory(
-      speedRangeForSpecies(snapshot.format, speciesName, opponentActive.level),
-      formatRecord,
-      activeYourSpecies
-    ),
-    snapshot,
-    speciesName,
-    activeYourSpecies
-  );
+  const speciesRange = speedRangeForSpecies(snapshot.format, speciesName, opponentActive.level);
+  // Canonical snapshots: one bound per opponent active stint from its observed priority-0 order. The legacy
+  // prose/aggregate narrowing below only serves non-canonical /api snapshots.
+  const orderSamples = snapshot.canonicalEvidence ? inBattleOrderSamples(snapshot) : [];
+  const observation = snapshot.canonicalEvidence ? null : extractLastTurnMoveOrder(snapshot);
+  const itemHidden = !opponentActive.item && !opponentActive.removedItem && orderSamples.every((sample) => !sample.pokemon.item && !sample.pokemon.removedItem);
+  // Choice Scarf stays a hypothesis only while the item is hidden and no stint has used two moves.
+  const scarfPossible = itemHidden && !choiceRefutedByStint(opponentActive);
+  const orderBound = orderSamples.length ? boundedRawSpeed(snapshot.format, speciesRange, orderSamples) : null;
+  const scarfBound = orderSamples.length && scarfPossible ? boundedRawSpeed(snapshot.format, speciesRange, orderSamples, "Choice Scarf") : null;
+  const impliedItem = orderSamples.length && !orderBound && scarfBound ? "Choice Scarf" : null;
+  const conflict = orderSamples.length > 0 && !orderBound && !impliedItem;
+  const neutralRange = snapshot.canonicalEvidence
+    ? (impliedItem ? scarfBound : orderBound) ?? speciesRange
+    : narrowRangeWithCurrentObservation(narrowRangeWithHistory(speciesRange, formatRecord, activeYourSpecies), snapshot, speciesName, activeYourSpecies);
+  const rangeMon = impliedItem ? { ...opponentActive, item: impliedItem } : opponentActive;
   const opponentRange = effectiveSpeedRangeForPokemon(
     snapshot.format,
     neutralRange,
-    opponentActive,
+    rangeMon,
     snapshot.field.opponentSideConditions,
     snapshot.field
   );
-  const possibleItemRange = possibleItemAdjustedSpeedRange({
+  const possibleItemRange = impliedItem || conflict ? null : possibleItemAdjustedSpeedRange({
     format: snapshot.format,
     neutralRange,
     currentRange: opponentRange,
     pokemon: opponentActive,
     sideConditions: snapshot.field.opponentSideConditions,
     field: snapshot.field,
-    likelyItems
+    likelyItems,
+    ...(orderSamples.length ? { extraItems: scarfPossible ? ["Choice Scarf"] : [], neutralFor: (item: string) => boundedRawSpeed(snapshot.format, speciesRange, orderSamples, item) } : {})
   });
-  const activeSpeed = effectiveShownSpeed(snapshot.format, snapshot.yourSide.active, snapshot.field.yourSideConditions);
-  const relation = speedRelation(activeSpeed, opponentRange);
+  const activeSpeed = effectiveShownSpeed(snapshot.format, snapshot.yourSide.active, snapshot.field.yourSideConditions, snapshot.field);
+  const relation = conflict ? "unknown" : speedRelation(activeSpeed, opponentRange);
+  if (conflict) confounders.push("observed order contradicts the supported Speed range; unresolved modifier");
   const activeSpeedText = formatRange(activeSpeed);
   const opponentSpeedText = formatRange(opponentRange);
   const historyFaster = activeYourSpecies ? formatRecord.speedFirstVs[activeYourSpecies] ?? 0 : 0;
   const historySlower = activeYourSpecies ? formatRecord.speedSecondVs[activeYourSpecies] ?? 0 : 0;
-  const hasYourShownSpeed = Number.isFinite(snapshot.yourSide.active?.stats?.spe ?? null);
+  const yourActiveFainted = Boolean(snapshot.yourSide.active && (snapshot.yourSide.active.fainted || (snapshot.yourSide.active.hpPercent ?? 100) <= 0));
+  const hasYourShownSpeed = !yourActiveFainted && Number.isFinite(snapshot.yourSide.active?.stats?.spe ?? null);
   const speedEvidence: SpeedEvidenceTag[] = [];
-  const usedCurrentTurnObservation = Boolean(
+  const orderText = formatOrderSamples(orderSamples);
+  const orderFactIds = uniqueStrings(orderSamples.flatMap((sample) => sample.factIds));
+  if (orderSamples.length && !conflict) {
+    speedEvidence.push(impliedItem
+      ? { kind: "item_ability_assumption", label: `${impliedItem} implied (${orderText})`, detail: "Observed order exceeds the item-free Speed range; the item stays unrevealed.", factIds: orderFactIds }
+      : { kind: "current_turn_order", label: `Observed order: ${orderText}`, detail: `Raw Speed ${formatRange(neutralRange)} after applying the order.`, factIds: orderFactIds });
+    if (!impliedItem && scarfPossible && !scarfBound) speedEvidence.push({ kind: "item_ability_assumption", label: "Choice Scarf ruled out by observed order", factIds: orderFactIds });
+  }
+  const usedLegacyObservation = Boolean(
     observation &&
     normalizeName(observation.opponentSpecies) === normalizeName(speciesName) &&
     normalizeName(observation.yourSpecies) === normalizeName(activeYourSpecies)
   );
-  if (usedCurrentTurnObservation) {
+  const usedCurrentTurnObservation = (orderSamples.length > 0 && !conflict) || usedLegacyObservation;
+  if (usedLegacyObservation) {
     speedEvidence.push({
       kind: "current_turn_order",
       label: observation?.relation === "first" ? "Opponent moved first this turn" : "You moved first this turn",
@@ -1780,15 +2043,16 @@ function buildCurrentSpeedIntel(
   if (!hasYourShownSpeed) {
     speedEvidence.push({
       kind: "capture_gap",
-      label: "Your active Speed stat is missing from the captured snapshot",
-      detail: "State capture could not compare your exact live Speed against the opponent range yet."
+      label: yourActiveFainted ? "Your active has fainted" : "Your active Speed stat is missing from the captured snapshot",
+      detail: yourActiveFainted ? "Use the living replacement Speed comparisons." : "State capture could not compare your exact live Speed against the opponent range yet."
     });
   }
   if (confounders.length > 0) {
     speedEvidence.push({
       kind: "confounded",
-      label: "Current turn order is confounded",
-      detail: confounders.join(", ")
+      label: conflict ? "Observed order conflicts with the supported Speed range" : "Current turn order is confounded",
+      detail: conflict ? `${confounders.join(", ")} (${orderText})` : confounders.join(", "),
+      ...(conflict ? { factIds: orderFactIds } : {})
     });
   }
   if (speedEvidence.length === 0) {
@@ -1810,9 +2074,9 @@ function buildCurrentSpeedIntel(
             : "base_range";
   const currentSpeedSummary = opponentSpeedText
     ? [
-        activeSpeedText ? `You ${activeSpeedText}; live ${opponentSpeedText}.` : `Live ${opponentSpeedText}.`,
+        activeSpeedText ? `You ${activeSpeedText}; ${conflict ? "conditional model" : "live"} ${opponentSpeedText}.` : `Live ${opponentSpeedText}.`,
         possibleItemRange ? `Item range ${formatRange(possibleItemRange.range)} via ${possibleItemRange.labels.join(", ")}.` : null,
-        !activeSpeedText ? "Your Speed is missing." : null,
+        !activeSpeedText ? (yourActiveFainted ? "Compare living replacements." : "Your Speed is missing.") : null,
         trickRoomActive ? "Trick Room flips order." : null,
         confounders.length > 0 ? `Confounded by ${confounders.join(", ")}.` : null
       ].filter(Boolean).join(" ")
@@ -1821,11 +2085,16 @@ function buildCurrentSpeedIntel(
   const switchSpeedMatchups: SwitchSpeedMatchup[] = snapshot.yourSide.team
     .filter((pokemon) => !pokemon.fainted)
     .map((pokemon) => {
-      const speed = effectiveShownSpeed(snapshot.format, pokemon, snapshot.field.yourSideConditions);
+      const entry = !pokemon.active ? projectSwitchEntry(snapshot, pokemon, "your") : null;
+      const entering = entry?.pokemon ?? pokemon;
+      const switchedField = effectiveSpeedField(observedField, [entering, opponentActive]);
+      const speed = entry && (!entry.speedCertain || entry.fainted) ? null : effectiveShownSpeed(snapshot.format, entering, switchedField.yourSideConditions, switchedField);
+      const switchedOpponentRange = effectiveSpeedRangeForPokemon(snapshot.format, neutralRange, rangeMon, switchedField.opponentSideConditions, switchedField);
       return {
+        instanceId: pokemon.instanceId,
         species: pokemon.species ?? pokemon.displayName ?? "Unknown",
-        effectiveSpeed: speed?.min ?? null,
-        relation: speedRelation(speed, opponentRange)
+        effectiveSpeed: speed && speed.min === speed.max ? speed.min : null,
+        relation: conflict ? "unknown" : speedRelation(speed, switchedOpponentRange)
       };
     })
     .filter((entry) => entry.effectiveSpeed !== null || entry.relation !== "unknown")
@@ -1838,7 +2107,7 @@ function buildCurrentSpeedIntel(
     switchSpeedMatchups: switchSpeedMatchups.length > 0 ? switchSpeedMatchups : undefined,
     neutralRange: neutralRange ?? undefined,
     activeRelation: relation,
-    activeSpeed: activeSpeed?.min ?? undefined,
+    activeSpeed: activeSpeed && activeSpeed.min === activeSpeed.max ? activeSpeed.min : undefined,
     speedEvidence: speedEvidence,
     speedConfounders: confounders,
     speedReason
@@ -1846,15 +2115,28 @@ function buildCurrentSpeedIntel(
 }
 
 function pickThreatMoves(entry: OpponentIntelEntry | undefined) {
-  if (!entry) return [];
+  if (!entry) return { moves: [], omitted: [] };
   const knownMoves = entry.revealedMoves.map((name) => ({ name, source: "known" as const }));
-  if (knownMoves.length >= 4) return knownMoves.slice(0, 4);
+  const key = (name: string) => name.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const seen = new Set(knownMoves.map((move) => key(move.name)));
+  const omitted: NonNullable<LocalIntelSnapshot["opponentThreatCoverage"]>["omittedMoves"] = [];
   const likelyMoves = entry.likelyMoves
-    .filter((move) => move.sampleCount > 0 || move.confidenceTier !== "thin" || move.share >= 0.45)
-    .filter((move) => !entry.revealedMoves.includes(move.name))
-    .slice(0, Math.max(0, 4 - knownMoves.length))
+    .filter((move) => {
+      if (seen.has(key(move.name))) return false;
+      const admitted = move.sampleCount > 0 || move.confidenceTier !== "thin" || move.share >= 0.45;
+      if (!admitted) omitted.push({ name: move.name, reason: "admission_threshold" });
+      return admitted;
+    })
     .map((move) => ({ name: move.name, source: "likely" as const }));
-  return [...knownMoves, ...likelyMoves];
+  const moves: Array<{ name: string; source: "known" | "likely" }> = knownMoves.slice(0, 4);
+  for (const move of [...likelyMoves, ...(entry.metaMovePrior?.moves ?? []).map((move) => ({ name: move.name, source: "likely" as const }))]) {
+    if (seen.has(key(move.name))) continue;
+    seen.add(key(move.name));
+    if (moves.length < 4) moves.push(move);
+    else omitted.push({ name: move.name, reason: "move_slot_limit" });
+  }
+  // A monthly candidate can supersede a zero-sample fallback's rejection.
+  return { moves, omitted: omitted.filter((entry) => !moves.some((move) => key(move.name) === key(entry.name))) };
 }
 
 function summarizeObservedThreats(
@@ -1903,8 +2185,7 @@ function summarizeObservedThreatsWithContext(
   return result;
 }
 
-export async function updateLocalIntelFromSnapshot(snapshot: BattleSnapshot): Promise<void> {
-  await withStoreWrite(async (store) => {
+function applySnapshotToStore(store: IntelStore, snapshot: BattleSnapshot): void {
     const battle = ensureBattleLedger(store, snapshot);
     maybeResolvePendingPrediction(snapshot, battle);
     maybeRecordOpponentLead(store, battle, snapshot);
@@ -1984,11 +2265,379 @@ export async function updateLocalIntelFromSnapshot(snapshot: BattleSnapshot): Pr
       opponentActive: snapshot.opponentSide.active ? clonePokemonSnapshot(snapshot.opponentSide.active) : null,
       field: cloneFieldSnapshot(snapshot.field)
     };
+}
+
+export async function updateLocalIntelFromSnapshot(snapshot: BattleSnapshot): Promise<void> {
+  await withStoreWrite((store) => applySnapshotToStore(store, snapshot));
+}
+
+export interface IntelEvaluationContext {
+  readonly revision: string;
+  readonly store: Readonly<IntelStore>;
+  readonly movePriors?: MetaMovePrior;
+  readonly analysisMode?: "policy-only";
+}
+
+// Only server private fields used by the mechanics projection support a damage
+// context. Client-added presentation fields cannot conflict with that support.
+function privateHistorySupport(request: any) {
+  const fields = ["ident", "details", "condition", "active", "stats", "item", "ability", "baseAbility", "boosts", "teraType", "moves", "reviving"];
+  return { rqid: request?.rqid ?? null, side: request?.side?.id ?? null,
+    pokemon: (request?.side?.pokemon ?? []).map((entry: any) => Object.fromEntries(fields.filter((key) => entry[key] !== undefined).map((key) => [key, entry[key]]))) };
+}
+
+/** Empty observed/curated pools and optional explicit monthly move priors.
+ * Memory-only: never reads or writes the user's history or curated files. */
+export async function createEphemeralIntelEvaluationContext(prior?: MetaMovePrior): Promise<IntelEvaluationContext> {
+  const movePriors = prior === undefined ? undefined : detachMetaMovePrior(prior);
+  const store = structuredClone(EMPTY_STORE);
+  return { revision: await hashCanonical(movePriors ? { store, metaPriorRevision: movePriors.revision } : store), store, ...(movePriors ? { movePriors } : {}) };
+}
+
+/** Pure canonical history projection shared by ingestion and offline matches.
+ * The input context and snapshots stay pinned. Time and persistence belong to
+ * the caller; repeated input has the same revision, including empty input. */
+export async function projectCanonicalSnapshots(
+  snapshots: readonly BattleSnapshot[], context: IntelEvaluationContext
+): Promise<IntelEvaluationContext> {
+  const movePriors = context.movePriors;
+  const store = await projectCanonicalStore(snapshots, context.store, context.analysisMode !== "policy-only");
+  return { revision: await hashCanonical(movePriors ? { store, metaPriorRevision: movePriors.revision } : store), store,
+    ...(movePriors ? { movePriors } : {}), ...(context.analysisMode ? { analysisMode: context.analysisMode } : {}) };
+}
+
+/** The projection on a new store object. Only the projected rooms' records are copied: every other part is shared
+ * with `source`, which is never modified. */
+async function projectCanonicalStore(snapshots: readonly BattleSnapshot[], source: Readonly<IntelStore>, includeContributions = true): Promise<IntelStore> {
+  const store: IntelStore = { ...source, canonicalBattles: { ...(source.canonicalBattles ?? {}) } };
+  for (const snapshot of snapshots) {
+    if (!snapshot.canonicalEvidence) throw new Error("Canonical history requires fact-derived contributions.");
+    // A private recovery epoch cannot establish missing public identity or
+    // lifecycle. Keep the last trusted history context until capture resets.
+    if (snapshot.canonicalEvidence.limitations.includes("recovery_public_continuity_unknown")) continue;
+    store.canonicalBattles ??= {};
+    const previous = store.canonicalBattles[snapshot.roomId];
+    const confirmedFacts = { ...(previous?.confirmedFacts ?? {}) };
+    const signatures = new Map(await Promise.all(snapshot.canonicalEvidence.facts.map(async (fact) =>
+      [fact.id, await hashCanonical(fact.kind === "request" ? privateHistorySupport(JSON.parse(fact.args.join("|"))) : { kind: fact.kind, args: fact.args })] as const)));
+    const lineageConflict = snapshot.canonicalEvidence.facts.some((fact) => fact.kind !== "request" && confirmedFacts[fact.id] && confirmedFacts[fact.id] !== signatures.get(fact.id));
+    // A capture holding the protocol |init| covers the whole battle (e.g. a page reload re-joining it), so it supersedes
+    // an earlier record of that room. Unaligned partial captures still cannot replace confirmed history.
+    const fromStart = snapshot.canonicalEvidence.facts.some((fact) => fact.kind === "init" && fact.source.channel === "protocol");
+    if (lineageConflict && !fromStart) {
+      if (previous) store.canonicalBattles[snapshot.roomId] = { ...previous, lineageConflict: true };
+      continue;
+    }
+    if (lineageConflict) for (const id of Object.keys(confirmedFacts)) delete confirmedFacts[id];
+    for (const fact of snapshot.canonicalEvidence.facts) if (fact.source.channel !== "recovery") confirmedFacts[fact.id] = signatures.get(fact.id)!;
+    const contributions = new Map((includeContributions ? ((lineageConflict ? undefined : previous?.contributions) ?? []) : []).map((entry) => [entry.id, entry]));
+    for (const prior of contributions.values()) {
+      const direct = snapshot.canonicalEvidence.facts.find((fact) => (`${fact.id}:${prior.metric}` === prior.id || prior.id.startsWith(`${fact.id}:${prior.metric}:`)));
+      if (direct?.source.channel === "protocol" && direct.identityStatus !== "resolved") contributions.set(prior.id, { ...prior, eligibility: "quarantined" });
+    }
+    for (const contribution of includeContributions ? snapshot.canonicalEvidence.contributions : []) {
+      if (!contribution.instanceId.includes(`:${snapshot.opponentSide.slot}:`)) continue;
+      // Recovery can reuse exactly confirmed semantic support; lower coverage
+      // alone must never erase an earlier verified contribution.
+      if (contribution.factIds.every((id) => Boolean(confirmedFacts[id]) && confirmedFacts[id] === signatures.get(id))) contributions.set(contribution.id, { ...structuredClone(contribution), eligibility: "active" });
+    }
+    store.canonicalBattles[snapshot.roomId] = { format: snapshot.format, confirmedFacts,
+      contributions: [...contributions.values()].sort((a, b) => a.id.localeCompare(b.id)) };
+  }
+  return store;
+}
+
+/** Stage every canonical snapshot in one store view and install it as the observed history (written behind, see
+ * installStore). All fallible context construction precedes installation. */
+export function commitCanonicalSnapshots(snapshots: BattleSnapshot[], movePriors?: MetaMovePrior, parentCheck: () => void = () => {}): Promise<IntelEvaluationContext> {
+  const prior = movePriors === undefined ? undefined : detachMetaMovePrior(movePriors);
+  const run = writeChain.then(() => withinDeadline("canonical history commit", 3000, async (check) => {
+    const fence = () => { check(); parentCheck(); };
+    fence();
+    const source = await readStore(fence);
+    fence();
+    let store = source;
+    if (snapshots.length) {
+      store = await projectCanonicalStore(snapshots, source);
+      store.updatedAt = new Date().toISOString();
+    }
+    const context: IntelEvaluationContext = { revision: await storeRevision(store, prior), store, ...(prior ? { movePriors: prior } : {}) };
+    fence();
+    if (store !== source) installStore(store, false);
+    return context;
+  }));
+  writeChain = run.then(() => undefined, () => undefined);
+  return run;
+}
+
+/** Capture observed history and curated priors once for reproducible evaluation. */
+export async function captureIntelEvaluationContext(): Promise<IntelEvaluationContext> {
+  await writeChain;
+  return withinDeadline("history context", 3000, async (check) => {
+    const store = await readStore(check);
+    return { revision: await storeRevision(store), store };
   });
 }
 
-export async function buildLocalIntelSnapshot(snapshot: BattleSnapshot): Promise<LocalIntelSnapshot> {
-  const store = await readStore();
+/** Only provenance-backed contributions enter the canonical observed pool.
+ * Old aggregate-only rows are retained on disk for inspection/legacy tooling,
+ * but cannot silently become verified canonical priors. Rebuilding buckets
+ * also permits correct retraction of future damage extrema. */
+function canonicalHistoryView(source: Readonly<IntelStore>): IntelStore {
+  // The owner's pre-canonical battles (legacy ledger) still describe real opponents' sets: seed their set counts.
+  // Damage and speed observations stay canonical-only (they need the canonical ledger's integrity checks).
+  const species: IntelStore["species"] = {};
+  for (const [key, record] of Object.entries(source.species ?? {})) {
+    species[key] = { species: record.species, formats: Object.fromEntries(Object.entries(record.formats ?? {}).map(([format, legacy]) => {
+      const counts = normalizeFormatRecord(structuredClone(legacy));
+      return [format, { ...createFormatRecord(), battlesSeen: counts.battlesSeen, leadCount: counts.leadCount,
+        moves: counts.moves, items: counts.items, abilities: counts.abilities, teraTypes: counts.teraTypes }];
+    })) };
+  }
+  const view: IntelStore = { ...source, species, battles: {} };
+  for (const [roomId, projection] of Object.entries(source.canonicalBattles ?? {})) {
+    const battle: BattleLedger = { roomId, format: projection.format, updatedAt: source.updatedAt, species: {}, instances: {} };
+    view.battles[roomId] = battle;
+    for (const contribution of projection.contributions) {
+      if (contribution.eligibility !== "active") continue;
+      const { speciesKey, formatRecord } = ensureSpeciesFormat(view, contribution.species, projection.format);
+      const ledger = battle.species[speciesKey] ??= createBattleSpeciesLedger();
+      if (contribution.metric === "damage" && contribution.damage) {
+        const instance = battle.instances![contribution.instanceId] ??= createBattleSpeciesLedger();
+        const sample = contribution.damage;
+        const incoming = sample.attacker.instanceId === contribution.instanceId;
+        const other = incoming ? sample.defender : sample.attacker;
+        const observation: PosteriorBattleDamageObservation = { key: contribution.id, direction: incoming ? "incoming" : "outgoing", ...sample, factIds: contribution.factIds };
+        const privateStatsKnown = ["hp", "atk", "def", "spa", "spd", "spe"].every((stat) => Number.isFinite(other.stats?.[stat]));
+        if (privateStatsKnown) (incoming ? instance.incomingDamage : instance.outgoingDamage).push(observation);
+        const key = `${sample.moveName}|${other.canonicalSpecies ?? other.species}`;
+        const byContext = `${key}|${combatContextKey(sample.attacker, sample.defender, fieldDamageContextFromField(sample.field))}`;
+        // Aggregate ranges are illustrative. Exact context ranges and posterior
+        // observations retain the actual private stats and field at impact.
+        updateObservedDamageRecord(incoming ? formatRecord.observedDamage : formatRecord.observedTakenDamage, key, sample.percent);
+        if (privateStatsKnown) updateObservedDamageRecord(incoming ? formatRecord.observedDamageByContext : formatRecord.observedTakenDamageByContext, byContext, sample.percent);
+      } else if (contribution.metric === "speed") {
+        const sample = contribution.speed;
+        if (!sample) continue;
+        const facts = contribution.factIds.map((id) => projection.confirmedFacts[id]);
+        if (facts.some((signature) => !signature)) continue;
+        const observation = canonicalSpeedObservation(contribution, projection.format);
+        if (observation) {
+          const instance = battle.instances![contribution.instanceId] ??= createBattleSpeciesLedger();
+          instance.speedObservations.push(observation);
+        }
+      } else if (contribution.metric === "battle-seen") {
+        if (!ledger.battleRecorded) { ledger.battleRecorded = true; formatRecord.battlesSeen++; }
+      } else if (contribution.metric !== "damage") {
+        const field = { move: "moves", item: "items", ability: "abilities", tera: "teraTypes" }[contribution.metric] as "moves" | "items" | "abilities" | "teraTypes";
+        maybeRecordCount(formatRecord[field], ledger[field], contribution.value);
+      }
+    }
+  }
+  return view;
+}
+
+/** An observed action order is not a strict Speed inequality. Initially use
+ * only known ordering modifiers; unsupported/hidden contexts remain raw facts. */
+function canonicalSpeedObservation(contribution: NonNullable<BattleSnapshot["canonicalEvidence"]>["contributions"][number], format: string): PosteriorBattleSpeedObservation | null {
+  const sample = contribution.speed;
+  if (!sample || !contribution.factIds.length || sample.field.pseudoWeather.some((name) => /trick room|magic room/i.test(name))) return null;
+  // Prankster and Mycelium Might act only on status moves, which are excluded below.
+  const unsupportedAbilities = new Set(["galewings", "triage", "stall", "quickdraw", "slowstart", "klutz", "neutralizinggas", "cloudnine", "airlock"]);
+  const unsupportedItems = new Set(["quickclaw", "custapberry", "laggingtail", "fullincense", "quickpowder", "machobrace", "poweranklet", "powerband", "powerbelt", "powerbracer", "powerlens", "powerweight"]);
+  for (const mon of [sample.pokemon, sample.other]) {
+    // The opponent's hidden item is a posterior hypothesis (Choice Scarf can explain the order); a hidden ability
+    // is acceptable only when no ability the species can have changes Speed or priority-0 order here.
+    const opponent = mon === sample.pokemon;
+    const hiddenAbilityOk = opponent && !mon.ability && !orderAbilityUnsupported(format, mon, effectiveSpeedField(sample.field, [sample.pokemon, sample.other]));
+    if ((!mon.ability && !hiddenAbilityOk) || (!opponent && !mon.item && !mon.removedItem) || unsupportedAbilities.has(normalizeName(mon.ability)) || unsupportedItems.has(normalizeName(mon.item)) || unsupportedItems.has(normalizeName(mon.removedItem))) return null;
+    if (normalizeName(mon.ability) === "unburden" && mon.unburdenActive === undefined) return null;
+    const range = speedAbilityMultiplierRange(mon.ability, sample.field, mon.removedItem, mon.paradoxBoostedStat);
+    if (range.min !== range.max) return null;
+  }
+  for (const moveName of sample.unacted ? [sample.moveName] : [sample.moveName, sample.otherMoveName]) {
+    const move = lookupMove(gens.get(generationFromFormat(format)), moveName);
+    if (!move || move.category === "Status" || move.priority !== 0 || ["grassyglide", "round"].includes(normalizeName(move.name))) return null;
+  }
+  if (sample.unacted && !unactedOrderBounds(gens.get(generationFromFormat(format)), sample.other)) return null;
+  const speed = effectiveShownSpeed(format, sample.other, sample.field.yourSideConditions, sample.field);
+  if (!speed || speed.min !== speed.max || speed.min <= 0) return null;
+  return { key: contribution.id, turn: sample.turn, relation: sample.relation,
+    yourSpecies: sample.other.canonicalSpecies ?? sample.other.species ?? "Unknown", yourSpeedStat: speed.min,
+    opponent: sample.pokemon, field: sample.field, factIds: contribution.factIds };
+}
+
+/** How one of our living Pokémon answers an opposing one, from the engine's own calcs: it outspeeds every Speed the
+ * opponent can have (Trick Room excluded) and KOs it at the likely band's minimum, or it survives every considered hit
+ * and then KOs it. A bench Pokémon is projected through entry hazards; an uncertain projection is no answer. */
+export interface OwnAnswer { kind: "outspeeds_ko" | "survives_ko"; move: string; ko: { min: number; max: number }; yourSpeed?: number; theirMaxSpeed?: number }
+export function ownAnswerTo(snapshot: BattleSnapshot, intel: LocalIntelSnapshot, own: PokemonSnapshot, opponent: PokemonSnapshot): OwnAnswer | null {
+  if (own.fainted || opponent.fainted || !Number.isFinite(opponent.hpPercent) || (opponent.hpPercent ?? 0) <= 0) return null;
+  const entry = own.active ? null : projectSwitchEntry(snapshot, own, "your");
+  if (entry && (entry.fainted || !entry.hpCertain || !entry.speedCertain || !entry.damageQualified)) return null;
+  const mon = { ...(entry?.pokemon ?? own), active: true };
+  const them = { ...opponent, active: true, ...(opponent.active ? {} : { boosts: {} }) };
+  if (!Number.isFinite(mon.hpPercent) || (mon.hpPercent ?? 0) <= 0) return null;
+  const info = intel.opponents.find((candidate) => candidate.instanceId ? candidate.instanceId === opponent.instanceId : normalizeName(candidate.species) === normalizeName(speciesNameFromSnapshot(opponent)));
+  const gen = gens.get(generationFromFormat(snapshot.format));
+  const moves = uniqueStrings((own.knownMoves ?? []).map((name) => lookupMove(gen, name)?.name ?? "").filter((name) => name && lookupMove(gen, name)?.category !== "Status"));
+  if (!moves.length) return null;
+  const versus = { ...snapshot, yourSide: { ...snapshot.yourSide, active: mon, team: [mon] }, opponentSide: { ...snapshot.opponentSide, active: them } };
+  const likelyItems = liveLikelyHeldItems(snapshot.format, them, info?.likelyItems, snapshot.recentLog);
+  const damage = buildDamagePreview({ ...versus, legalActions: moves.map((name, index) => ({ id: `answer:${index}`, kind: "move" as const, label: name, moveName: name, moveSlot: index + 1, choice: `move ${index + 1}` })) }, {
+    likelyDefenderItems: likelyItems, likelyDefenderAbilities: info?.likelyAbilities.map((item) => item.name) ?? [], defenderPosterior: info?.posterior });
+  const kos = damage.map((preview) => ({ move: preview.moveName, band: preview.bands.find((band) => band.label === "likely") }))
+    .filter(({ band }) => band && (band.outcome ?? "damage") === "damage" && Number.isFinite(band.minPercent) && band.minPercent! >= opponent.hpPercent!)
+    .sort((a, b) => b.band!.minPercent! - a.band!.minPercent!);
+  const ko = kos[0];
+  if (!ko) return null;
+  const koBand = { min: ko.band!.minPercent!, max: ko.band!.maxPercent! };
+  const trickRoom = snapshot.field.pseudoWeather.some((value) => /trick room/i.test(value));
+  const field = effectiveSpeedField(snapshot.field, [mon, them]);
+  const yours = effectiveShownSpeed(snapshot.format, mon, field.yourSideConditions, field);
+  let theirMax: number | null = null;
+  if (opponent.active && opponent.instanceId === snapshot.opponentSide.active?.instanceId && intel.speedPreview?.effectiveRange && intel.speedPreview.activeRelation !== "unknown") {
+    theirMax = Math.max(intel.speedPreview.effectiveRange.max, intel.speedPreview.possibleRange?.max ?? 0);
+  } else {
+    const neutral = speedRangeForSpecies(snapshot.format, speciesNameFromSnapshot(them), them.level);
+    const current = effectiveSpeedRangeForPokemon(snapshot.format, neutral, them, field.opponentSideConditions, field);
+    const possible = possibleItemAdjustedSpeedRange({ format: snapshot.format, neutralRange: neutral, currentRange: current, pokemon: them,
+      sideConditions: field.opponentSideConditions, field, likelyItems: info?.likelyItems });
+    theirMax = current ? Math.max(current.max, possible?.range.max ?? 0) : null;
+  }
+  if (!trickRoom && yours && yours.min === yours.max && theirMax !== null && yours.min > theirMax) {
+    return { kind: "outspeeds_ko", move: ko.move, ko: koBand, yourSpeed: yours.min, theirMaxSpeed: theirMax };
+  }
+  const threats = buildThreatPreview(versus, {
+    moveCandidates: info ? pickThreatMoves(info).moves : (opponent.knownMoves ?? []).map((name) => ({ name, source: "known" as const })),
+    likelyAttackerItems: likelyItems, likelyAttackerAbilities: info?.likelyAbilities.map((item) => item.name) ?? [],
+    likelyAttackerProfile: info?.ladderAttackProfile, attackerPosterior: info?.posterior });
+  if (!threats.length) return null;
+  const survives = threats.every((threat) => {
+    const band = threat.currentTarget.bands.find((candidate) => candidate.label === "likely");
+    if (!band) return false;
+    return (band.outcome ?? "damage") !== "damage" || (Number.isFinite(band.maxPercent) && band.maxPercent! < mon.hpPercent!);
+  });
+  return survives ? { kind: "survives_ko", move: ko.move, ko: koBand } : null;
+}
+
+/** The order verdict under Showdown's controls. While the item is hidden and a Choice item is still possible (no stint
+ * with two moves), a Choice Scarf can flip "faster": the engine's item range when it has one, else Scarf on the current
+ * maximum (a Scarf Hydreigon can outspeed a 353-Speed Thundurus while its item-free range is "208-324"). Item evidence
+ * (Scarf implied or ruled out by order) or a revealed or proven item ends that caveat (Boots proven by Stealth Rock must
+ * drop "unless Choice Scarf"). The relation is on raw Speed: under Trick Room the slower Pokémon moves first. Speed says
+ * nothing about priority: possible priority moves are named. */
+export function speedVerdict(speed: SpeedPreview, opponent: PokemonSnapshot | null | undefined, trickRoom = false): NonNullable<SpeedPreview["verdict"]> {
+  const you = speed.yourActiveEffectiveSpeed, them = speed.effectiveRange ?? speed.neutralRange ?? speed.possibleRange;
+  const range = (value: { min: number; max: number }) => value.min === value.max ? `${Math.round(value.min)}` : `${Math.round(value.min)}-${Math.round(value.max)}`;
+  const nums = Number.isFinite(you) && them ? ` (you ${Math.round(you!)} vs ${range(them)})` : "";
+  const scarfOpen = Boolean(opponent && !opponent.item && !opponent.removedItem && !choiceRefutedByStint(opponent))
+    && !speed.evidence.some((entry) => entry.kind === "item_ability_assumption");
+  const scarfMax = speed.possibleRange?.max ?? (scarfOpen && them && Number.isFinite(them.max) ? Math.floor(them.max * 1.5) : null);
+  const known = new Set((opponent?.knownMoves ?? []).map(normalizeName));
+  const priority = (speed.priorityMoves ?? []).map((name) => `they ${known.has(normalizeName(name)) ? "have" : "may have"} ${name} (priority)`).join("; ");
+  const suffix = priority ? `; ${priority}` : "";
+  if (!trickRoom && speed.activeRelation === "faster" && Number.isFinite(you) && scarfMax && you! <= scarfMax) {
+    return { text: `You move first unless Choice Scarf (their max ${Math.round(scarfMax)})${nums}${suffix}`, tone: "overlap" };
+  }
+  const order = !trickRoom ? speed.activeRelation : speed.activeRelation === "faster" ? "slower" : speed.activeRelation === "slower" ? "faster" : speed.activeRelation;
+  const verdict = { faster: "You move first", slower: "They move first", overlap: "Speed uncertain", unknown: "Speed unknown" }[order];
+  return { text: `${verdict}${trickRoom ? " (Trick Room)" : ""}${nums}${suffix}`, tone: priority && order === "faster" ? "overlap" : order };
+}
+
+/** Each of our moves against every opposing Pokémon seen so far, shown when hovering over the move. The active's band is the damage section's own; a benched one is
+ * computed as if it were in now: its current HP, no boosts, its revealed or likely set and posterior, its Tera once used. */
+export function buildMoveTargetPreview(snapshot: BattleSnapshot, opponents: OpponentIntelEntry[], activeRows: DamagePreview[], events: InferenceEvent[]): MoveTargetPreview[] {
+  const moves = snapshot.legalActions.filter((action) => action.kind === "move" && action.moveName && !action.terastallize);
+  const you = snapshot.yourSide.active, active = snapshot.opponentSide.active;
+  if (!moves.length || !you || you.fainted) return [];
+  const likely = (bands: DamageAssumptionBand[] | undefined) => {
+    const band = bands?.find((entry) => entry.label === "likely") ?? bands?.[0];
+    if (!band) return null;
+    // A damaging move that rolls 0 everywhere has no effect (typing or an immunity the calc applied).
+    const none = !band.outcome && band.maxPercent === 0;
+    return { ...band, detail: undefined, ...(none ? { outcome: "immune" as const } : {}) };
+  };
+  const rows = new Map(moves.map((action) => [action.id, [] as MoveTargetPreview["targets"]]));
+  for (const mon of snapshot.opponentSide.team) {
+    if (mon.identityStatus !== "resolved" || mon.fainted || !((mon.hpPercent ?? 100) > 0)) continue;
+    const isActive = Boolean(active && mon.instanceId === active.instanceId);
+    const info = opponents.find((entry) => entry.instanceId ? entry.instanceId === mon.instanceId : normalizeName(entry.species) === normalizeName(speciesNameFromSnapshot(mon)));
+    const them: PokemonSnapshot = { ...mon, active: true, boosts: isActive ? mon.boosts : {} };
+    const damage = isActive ? activeRows : buildDamagePreview({ ...snapshot, legalActions: moves, opponentSide: { ...snapshot.opponentSide, active: them } }, {
+      likelyDefenderItems: liveLikelyHeldItems(snapshot.format, them, info?.likelyItems, snapshot.recentLog, events.filter((event) => event.instanceId === mon.instanceId)),
+      likelyDefenderAbilities: info?.likelyAbilities.map((entry) => entry.name) ?? [], defenderPosterior: info?.posterior });
+    for (const action of moves) {
+      const row = damage.find((entry) => entry.actionId === action.id);
+      rows.get(action.id)!.push({ ...(mon.instanceId ? { instanceId: mon.instanceId } : {}), species: speciesNameFromSnapshot(mon) ?? "Unknown", active: isActive,
+        hpPercent: mon.hpPercent ?? null, ...(mon.terastallized && mon.teraType ? { teraType: mon.teraType } : {}), band: row && !row.delayed ? likely(row.bands) : null });
+    }
+  }
+  return moves.map((action) => ({ actionId: action.id, moveName: action.moveName!, targets: rows.get(action.id)! }));
+}
+
+/** Sections of the deterministic evaluation, in the order they complete. Each partial result is the full result's own
+ * fields (the same objects and values), so a later stage only adds to an earlier one. */
+export const INTEL_STAGES = ["board", "damage", "threats"] as const;
+export type IntelStage = typeof INTEL_STAGES[number];
+export type IntelStageListener = (stage: IntelStage, partial: LocalIntelSnapshot) => void | Promise<void>;
+// Each stage is synchronous CPU; yielding between them lets the server send what is ready, and the model worker's reply
+// be read, before the next stage runs.
+const yieldToEventLoop = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+/** An opposing appearance that is only possibly an Illusion user in disguise: it shows a team-preview instance (presumed)
+ * and is the sole identity gap. Advice then uses the shown species, says so, and adds the Illusion user's own view.
+ * Driven by the Illusion ability and Team Preview (canonical ledger), never by species. */
+export async function illusionPresumption(snapshot: BattleSnapshot) {
+  const shown = snapshot.opponentSide.active;
+  const ambiguities = snapshot.canonicalEvidence?.ambiguities ?? [];
+  if (!shown?.presumedInstanceId || !ambiguities.length || ambiguities.some((id) => id !== shown.appearanceId)) return undefined;
+  const candidates = snapshot.opponentSide.team.filter((mon) => mon.instanceId && mon.instanceId !== shown.presumedInstanceId
+    && shown.candidateInstanceIds?.includes(mon.instanceId));
+  if (!candidates.length) return undefined;
+  // An Illusion user uses its own moves: one it cannot learn, used in this stint (not called by another move), rules it
+  // out. With every candidate ruled out, the shown species is proven (users is empty: no caveat).
+  const used = uniqueStrings((snapshot.canonicalEvidence?.facts ?? []).filter((fact) => fact.kind === "move" && fact.subject.appearanceId === shown.appearanceId
+    && !fact.args.some((arg) => arg.startsWith("[from]"))).map((fact) => fact.args[1])).filter((move) => normalizeName(move) !== "struggle");
+  const users: PokemonSnapshot[] = [];
+  for (const candidate of candidates) {
+    if ((await Promise.all(used.map((move) => mayLearn(snapshot.format, candidate.species ?? "", move)))).every(Boolean)) users.push(candidate);
+  }
+  return { shown, users, used };
+}
+/** Whether a species (or its pre-evolutions) can know a move in this generation; unknown data never rules it out. */
+async function mayLearn(format: string, speciesName: string, moveName: string) {
+  const gen = String(generationFromFormat(format)), move = normalizeName(moveName);
+  for (let species = Dex.species.get(speciesName), depth = 0; species?.exists && depth < 4; species = Dex.species.get(species.prevo ?? ""), depth++) {
+    const learnset = await Dex.learnsets.get(species.id) ?? (species.baseSpecies !== species.name ? await Dex.learnsets.get(normalizeName(species.baseSpecies)) : undefined);
+    if (!learnset?.exists || !learnset.learnset) return true;
+    if ((learnset.learnset[move] ?? []).some((source) => source.startsWith(gen))) return true;
+    if (!species.prevo) return false;
+  }
+  return true;
+}
+
+/** The board as it would be if the Illusion user were the one on the field: its own species with the shown state. */
+function illusionUserView(snapshot: BattleSnapshot, user: PokemonSnapshot, used: string[]): BattleSnapshot {
+  const shown = snapshot.opponentSide.active!;
+  const active: PokemonSnapshot = { ...structuredClone(user), active: true, identityStatus: "resolved", hpPercent: shown.hpPercent,
+    conditionText: shown.conditionText, status: shown.status, fainted: shown.fainted, boosts: structuredClone(shown.boosts),
+    knownMoves: uniqueStrings([...user.knownMoves, ...used]), terastallized: shown.terastallized,
+    teraType: shown.terastallized ? shown.teraType : user.teraType, ...(shown.turnsSinceEntry !== undefined ? { turnsSinceEntry: shown.turnsSinceEntry } : {}) };
+  return { ...snapshot, opponentSide: { ...snapshot.opponentSide, active,
+    team: snapshot.opponentSide.team.map((mon) => mon.instanceId === user.instanceId ? active : mon.presumedInstanceId ? { ...mon, active: false } : mon) },
+    ...(snapshot.canonicalEvidence ? { canonicalEvidence: { ...snapshot.canonicalEvidence, ambiguities: [] } } : {}) };
+}
+const ALTERNATIVE_DONE = Symbol("illusion alternative complete");
+
+export async function buildLocalIntelSnapshot(snapshot: BattleSnapshot, context?: IntelEvaluationContext, onStage?: IntelStageListener): Promise<LocalIntelSnapshot> {
+  if (context?.analysisMode === "policy-only") return {
+    generatedAt: "", note: "Policy-only collection; advisory analysis omitted.", opponents: []
+  };
+  const illusion = await illusionPresumption(snapshot);
+  if (snapshot.canonicalEvidence?.ambiguities.length && !illusion) return { generatedAt: new Date().toISOString(), note: "identity_ambiguous: species-dependent advice withheld", opponents: [] };
+  const capturedStore = (context ?? await captureIntelEvaluationContext()).store;
+  const store = snapshot.canonicalEvidence ? canonicalHistoryView(capturedStore) : capturedStore;
   const activeBattle = store.battles[snapshot.roomId];
   const mergedOpponents = new Map<
     string,
@@ -2012,8 +2661,9 @@ export async function buildLocalIntelSnapshot(snapshot: BattleSnapshot): Promise
   for (const pokemon of observedOpponentTeam) {
     const speciesName = speciesNameFromSnapshot(pokemon);
     if (!speciesName) continue;
-    const speciesKey = normalizeName(speciesName);
-    const existing = mergedOpponents.get(speciesKey);
+    if (pokemon.identityStatus && pokemon.identityStatus !== "resolved" && !(illusion && pokemon.presumedInstanceId)) continue;
+    const instanceKey = pokemon.instanceId ?? normalizeName(speciesName);
+    const existing = mergedOpponents.get(instanceKey);
     const preferredSpecies =
       existing?.species && !existing.species.includes("*")
         ? existing.species
@@ -2036,33 +2686,39 @@ export async function buildLocalIntelSnapshot(snapshot: BattleSnapshot): Promise
     if (!merged.revealedItem && revealedItemName(pokemon)) merged.revealedItem = revealedItemName(pokemon);
     if (!merged.revealedAbility && pokemon.ability) merged.revealedAbility = pokemon.ability;
     if (!merged.revealedTeraType && pokemon.teraType) merged.revealedTeraType = pokemon.teraType;
-    mergedOpponents.set(speciesKey, merged);
+    mergedOpponents.set(instanceKey, merged);
   }
 
   const allInferenceEvents = parseInferenceEvents(snapshot);
 
-  const opponents: OpponentIntelEntry[] = await Promise.all([...mergedOpponents.entries()].map(async ([speciesKey, merged]) => {
+  const posteriors = new Map<OpponentIntelEntry, () => OpponentIntelEntry["posterior"]>();
+  const opponents: OpponentIntelEntry[] = await Promise.all([...mergedOpponents.values()].map(async (merged) => {
+    const speciesKey = normalizeName(merged.species);
     const speciesRecord = store.species[speciesKey];
     const formatRecord = normalizeFormatRecord(speciesRecord?.formats?.[snapshot.format]);
     const curatedFormatRecord = externalCuratedFormatRecord(store, speciesKey, snapshot.format);
     const confidenceSamples = effectivePriorConfidenceSamples(formatRecord.battlesSeen, curatedFormatRecord.teamCount);
     const speciesInferenceEvents = allInferenceEvents.filter(
-      (e) => e.side === "opponent" && normalizeName(e.species) === speciesKey
+      (e) => e.side === "opponent" && (merged.pokemon.instanceId ? e.instanceId === merged.pokemon.instanceId : normalizeName(e.species) === speciesKey)
     );
     const revealedMoves = [...merged.revealedMoves];
+    const sampledItems = summarizeEntries({
+      observedRecord: formatRecord.items,
+      observedSamples: formatRecord.battlesSeen,
+      curatedRecord: curatedFormatRecord.items,
+      curatedSamples: curatedFormatRecord.teamCount,
+      exclude: merged.revealedItem ? [merged.revealedItem] : []
+    });
+    // Monthly ladder usage is an additional, provenance-tagged source after the owner's observed/curated entries.
+    const withMonthly = (sampled: LikelihoodEntry[], kind: "items" | "abilities" | "teraTypes", revealed: string | null) => !context?.movePriors ? sampled
+      : [...sampled, ...metaSetPriorEntries(context.movePriors, snapshot.format, merged.species, kind, [...(revealed ? [revealed] : []), ...sampled.map((entry) => entry.name)])];
     const likelyItems = filterLiveLikelyHeldItemEntries(
       snapshot.format,
       merged.pokemon,
-      summarizeEntries({
-        observedRecord: formatRecord.items,
-        observedSamples: formatRecord.battlesSeen,
-        curatedRecord: curatedFormatRecord.items,
-        curatedSamples: curatedFormatRecord.teamCount,
-        exclude: merged.revealedItem ? [merged.revealedItem] : []
-      }),
+      withMonthly(sampledItems, "items", merged.revealedItem),
       { recentLog: snapshot.recentLog, inferenceEvents: speciesInferenceEvents }
     );
-    const likelyAbilities = summarizeEntries(
+    const likelyAbilities = withMonthly(summarizeEntries(
       {
         observedRecord: formatRecord.abilities,
         observedSamples: formatRecord.battlesSeen,
@@ -2070,11 +2726,15 @@ export async function buildLocalIntelSnapshot(snapshot: BattleSnapshot): Promise
         curatedSamples: curatedFormatRecord.teamCount,
         exclude: merged.revealedAbility ? [merged.revealedAbility] : []
       }
-    );
+    ), "abilities", merged.revealedAbility);
     const currentSpeedIntel = buildCurrentSpeedIntel(snapshot, merged.species, formatRecord, likelyItems);
-    const battleSpecies = normalizeBattleSpeciesLedger(activeBattle?.species?.[speciesKey]);
+    // A presumed disguise uses its shown instance's own (resolved) battle evidence.
+    const historyInstance = merged.pokemon.presumedInstanceId ?? merged.pokemon.instanceId;
+    const battleSpecies = normalizeBattleSpeciesLedger(historyInstance ? activeBattle?.instances?.[historyInstance] : activeBattle?.species?.[speciesKey]);
     const importInfo = store.externalCurated.imports[snapshot.format] ?? null;
-    const posterior = buildOpponentPosterior({
+    // The posterior is the costly part (all skeletons x archetypes x observations): built for the active opponent first,
+    // the others after the damage and threat stages.
+    const posterior = () => buildOpponentPosterior({
       format: snapshot.format,
       opponent: merged.pokemon,
       battleSnapshot: snapshot,
@@ -2088,7 +2748,9 @@ export async function buildLocalIntelSnapshot(snapshot: BattleSnapshot): Promise
         curatedMoves: curatedFormatRecord.moves,
         curatedItems: curatedFormatRecord.items,
         curatedAbilities: curatedFormatRecord.abilities,
-        curatedTeraTypes: curatedFormatRecord.teraTypes
+        curatedTeraTypes: curatedFormatRecord.teraTypes,
+        ...(context?.movePriors ? { ladderItems: metaSetPriorEntries(context.movePriors, snapshot.format, merged.species, "items", [], 12),
+          ladderMoves: metaMoveInclusion(context.movePriors, snapshot.format, merged.species) } : {})
       },
       battleEvidence: {
         incomingDamage: battleSpecies.incomingDamage,
@@ -2106,13 +2768,20 @@ export async function buildLocalIntelSnapshot(snapshot: BattleSnapshot): Promise
           curatedSamples: curatedFormatRecord.teamCount,
           exclude: revealedMoves
         });
+    const metaMovePrior = context?.movePriors ? metaMovePriorView(context.movePriors, snapshot.format, merged.species, revealedMoves) : undefined;
+    // The ladder's modal attacking spread, and its most used item still live for this Pokémon (none once one is known).
+    const ladderSpreads = context?.movePriors ? metaAttackProfile(context.movePriors, snapshot.format, merged.species) : undefined;
+    const ladderItem = context?.movePriors ? metaSetPriorEntries(context.movePriors, snapshot.format, merged.species, "items", [], 8)
+      .find((entry) => filterLiveLikelyHeldItemNames(snapshot.format, merged.pokemon, [entry.name], { recentLog: snapshot.recentLog, inferenceEvents: speciesInferenceEvents }).length)?.name : undefined;
+    const ladderAttackProfile = ladderSpreads || ladderItem ? { ...ladderSpreads, ...(ladderItem ? { item: ladderItem } : {}) } : undefined;
     const likelyMoves = revealedMoves.length >= 4
       ? []
       : likelyMovesFromHistory.length > 0
       ? likelyMovesFromHistory
       : await fallbackLikelyMoveEntries(snapshot.format, merged.species, revealedMoves, 4);
 
-    return {
+    const entry = {
+      instanceId: merged.pokemon.instanceId,
       species: merged.species,
       displayName: merged.displayName,
       battlesSeen: formatRecord.battlesSeen,
@@ -2135,9 +2804,11 @@ export async function buildLocalIntelSnapshot(snapshot: BattleSnapshot): Promise
       revealedAbility: merged.revealedAbility,
       revealedTeraType: merged.revealedTeraType,
       likelyMoves,
+      ...(metaMovePrior ? { metaMovePrior } : {}),
+      ...(ladderAttackProfile ? { ladderAttackProfile } : {}),
       likelyItems,
       likelyAbilities,
-      likelyTeraTypes: summarizeEntries(
+      likelyTeraTypes: withMonthly(summarizeEntries(
         {
           observedRecord: formatRecord.teraTypes,
           observedSamples: formatRecord.battlesSeen,
@@ -2145,7 +2816,7 @@ export async function buildLocalIntelSnapshot(snapshot: BattleSnapshot): Promise
           curatedSamples: curatedFormatRecord.teamCount,
           exclude: merged.revealedTeraType ? [merged.revealedTeraType] : []
         }
-      ),
+      ), "teraTypes", merged.revealedTeraType),
       neutralSpeedRange: currentSpeedIntel.neutralRange,
       currentSpeedRange: currentSpeedIntel.currentSpeedRange,
       possibleSpeedRange: currentSpeedIntel.possibleSpeedRange,
@@ -2161,17 +2832,23 @@ export async function buildLocalIntelSnapshot(snapshot: BattleSnapshot): Promise
         snapshot.yourSide.active?.species ?? snapshot.yourSide.active?.displayName,
         snapshot.yourSide.active?.stats?.spe ?? null
       ),
-      posterior
-    };
+    } satisfies OpponentIntelEntry as OpponentIntelEntry;
+    posteriors.set(entry, posterior);
+    return entry;
   }));
+  const withPosterior = (entry: OpponentIntelEntry | undefined) => {
+    const build = entry && posteriors.get(entry);
+    if (build) { posteriors.delete(entry); entry.posterior = build(); }
+    return Boolean(build);
+  };
 
   const activeOpponentSpecies = snapshot.opponentSide.active?.species ?? snapshot.opponentSide.active?.displayName ?? null;
-  const activeOpponentEntry = opponents.find((entry) => normalizeName(entry.species) === normalizeName(activeOpponentSpecies));
+  const activeOpponentEntry = opponents.find((entry) => snapshot.opponentSide.active?.instanceId ? entry.instanceId === snapshot.opponentSide.active.instanceId : normalizeName(entry.species) === normalizeName(activeOpponentSpecies));
   const activeSpeciesKey = normalizeName(activeOpponentSpecies);
   const activeSpeciesRecord = activeSpeciesKey ? store.species[activeSpeciesKey] : undefined;
   const activeFormatRecord = normalizeFormatRecord(activeSpeciesRecord?.formats?.[snapshot.format]);
   const activeOpponentInferenceEvents = allInferenceEvents.filter(
-    (e) => e.side === "opponent" && normalizeName(e.species) === activeSpeciesKey
+    (e) => e.side === "opponent" && (snapshot.opponentSide.active?.instanceId ? e.instanceId === snapshot.opponentSide.active.instanceId : normalizeName(e.species) === activeSpeciesKey)
   );
   const activeFieldContext = fieldDamageContextKey(snapshot);
   const allowThreatAggregate = allowAggregateObservedRange(snapshot, snapshot.opponentSide.active, snapshot.yourSide.active);
@@ -2192,6 +2869,13 @@ export async function buildLocalIntelSnapshot(snapshot: BattleSnapshot): Promise
     activeFieldContext,
     allowPlayerAggregate
   );
+  const priorityMoves = activeOpponentEntry ? uniqueStrings([...activeOpponentEntry.revealedMoves, ...activeOpponentEntry.likelyMoves.map((entry) => entry.name),
+    ...(activeOpponentEntry.metaMovePrior?.moves.map((move) => move.name) ?? [])]).filter((name) => {
+    const move = lookupMove(gens.get(generationFromFormat(snapshot.format)), name);
+    if (!move || move.category === "Status" || (move.priority ?? 0) <= 0) return false;
+    // Fake Out / First Impression only work on the first turn of a stint.
+    return !["fakeout", "firstimpression"].includes(normalizeName(move.name)) || (snapshot.opponentSide.active?.turnsSinceEntry ?? 0) <= 1;
+  }) : [];
   const speedPreview: SpeedPreview | undefined = activeOpponentEntry
     ? {
         opponentSpecies: activeOpponentEntry.species,
@@ -2200,19 +2884,53 @@ export async function buildLocalIntelSnapshot(snapshot: BattleSnapshot): Promise
         possibleRange: activeOpponentEntry.possibleSpeedRange,
         yourActiveEffectiveSpeed: activeOpponentEntry.activeYourEffectiveSpeed,
         activeRelation: activeOpponentEntry.activeSpeedRelation ?? "unknown",
-        activeSummary: activeOpponentEntry.currentSpeedSummary,
+        activeSummary: [activeOpponentEntry.currentSpeedSummary, priorityMoves.length ? `Priority possible: ${priorityMoves.join(", ")}.` : null].filter(Boolean).join(" ") || undefined,
         reason: activeOpponentEntry.speedReason ?? "unknown",
         evidence: activeOpponentEntry.speedEvidence ?? [],
         confounders: activeOpponentEntry.speedConfounders ?? [],
         switchMatchups: activeOpponentEntry.switchSpeedMatchups ?? [],
-        historyNotes: activeOpponentEntry.speedNotes
+        historyNotes: activeOpponentEntry.speedNotes,
+        ...(priorityMoves.length ? { priorityMoves } : {})
       }
     : undefined;
-  const threatMoves = pickThreatMoves(activeOpponentEntry);
+  if (speedPreview) speedPreview.verdict = speedVerdict(speedPreview, snapshot.opponentSide.active, snapshot.field.pseudoWeather.some((value) => /trick room/i.test(value)));
+  const hazardSummary = [
+    snapshot.field.yourSideConditions.length > 0 ? `Your side: ${summarizeSideConditions(snapshot.field.yourSideConditions).join(", ")}` : null,
+    snapshot.field.opponentSideConditions.length > 0 ? `Opponent side: ${summarizeSideConditions(snapshot.field.opponentSideConditions).join(", ")}` : null
+  ].filter(Boolean).join(" | ") || undefined;
+  const note = "Observed history, priors, and current inferences.";
+  // Board: speed and the revealed/likely sets need no damage calculation and no posterior.
+  const illusionCaveat = illusion?.users.length ? { shown: illusion.shown.species ?? illusion.shown.displayName ?? "the shown Pokémon",
+    possible: illusion.users.map((user) => user.species ?? user.displayName ?? "an Illusion user") } : undefined;
+  const board: LocalIntelSnapshot = { generatedAt: "", note, speedPreview, hazardSummary, opponents, ...(illusionCaveat ? { illusion: illusionCaveat } : {}) };
+  if (onStage) { await onStage("board", board); await yieldToEventLoop(); }
+  withPosterior(activeOpponentEntry);
+  // Your damage into an opponent's Substitute is not modeled; speed and their threats to you are unaffected.
+  const opponentSubstitute = Boolean(snapshot.canonicalEvidence?.limitations.includes("opponent_substitute_active"));
+  const playerDamagePreview = opponentSubstitute ? [] : buildDamagePreview(snapshot, {
+    likelyDefenderItems: liveLikelyHeldItems(snapshot.format, snapshot.opponentSide.active, activeOpponentEntry?.likelyItems, snapshot.recentLog, activeOpponentInferenceEvents),
+    likelyDefenderAbilities: activeOpponentEntry?.likelyAbilities.map((entry) => entry.name) ?? [],
+    defenderPosterior: activeOpponentEntry?.posterior,
+    observedPlayerDamage: playerObservedDamage,
+    observedPlayerDamageResolver: (moveName, attacker, defender) =>
+      summarizeObservedThreatsWithContext(
+        activeFormatRecord.observedTakenDamage,
+        activeFormatRecord.observedTakenDamageByContext,
+        attacker,
+        defender,
+        activeFieldContext,
+        allowAggregateObservedRange(snapshot, attacker, defender)
+      )[`${moveName}|${attacker.species ?? attacker.displayName ?? "Unknown"}`]
+  });
+  const survivalCaveats = [...new Set(playerDamagePreview.flatMap((entry) => entry.survivalCaveats.map((caveat) => caveat.note)))];
+  if (onStage) { await onStage("damage", { ...board, playerDamagePreview, survivalCaveats }); await yieldToEventLoop(); }
+  const threatSelection = pickThreatMoves(activeOpponentEntry);
+  const threatMoves = threatSelection.moves;
   const opponentThreatPreview = buildThreatPreview(snapshot, {
     moveCandidates: threatMoves,
     likelyAttackerItems: liveLikelyHeldItems(snapshot.format, snapshot.opponentSide.active, activeOpponentEntry?.likelyItems, snapshot.recentLog, activeOpponentInferenceEvents),
     likelyAttackerAbilities: activeOpponentEntry?.likelyAbilities.map((entry) => entry.name) ?? [],
+    likelyAttackerProfile: activeOpponentEntry?.ladderAttackProfile,
     attackerPosterior: activeOpponentEntry?.posterior,
     observedThreats: opponentObservedThreats,
     observedThreatResolver: (moveName, attacker, defender) =>
@@ -2232,24 +2950,20 @@ export async function buildLocalIntelSnapshot(snapshot: BattleSnapshot): Promise
     },
     switchTargets: preview.switchTargets.map((target) => ({
       ...target,
-      relation: speedPreview?.switchMatchups.find((matchup) => matchup.species === target.species)?.relation ?? "unknown"
+      relation: speedPreview?.switchMatchups.find((matchup) => target.instanceId ? matchup.instanceId === target.instanceId : matchup.species === target.species)?.relation ?? "unknown"
     }))
   }));
-  const playerDamagePreview = buildDamagePreview(snapshot, {
-    likelyDefenderItems: liveLikelyHeldItems(snapshot.format, snapshot.opponentSide.active, activeOpponentEntry?.likelyItems, snapshot.recentLog, activeOpponentInferenceEvents),
-    likelyDefenderAbilities: activeOpponentEntry?.likelyAbilities.map((entry) => entry.name) ?? [],
-    defenderPosterior: activeOpponentEntry?.posterior,
-    observedPlayerDamage: playerObservedDamage,
-    observedPlayerDamageResolver: (moveName, attacker, defender) =>
-      summarizeObservedThreatsWithContext(
-        activeFormatRecord.observedTakenDamage,
-        activeFormatRecord.observedTakenDamageByContext,
-        attacker,
-        defender,
-        activeFieldContext,
-        allowAggregateObservedRange(snapshot, attacker, defender)
-      )[`${moveName}|${attacker.species ?? attacker.displayName ?? "Unknown"}`]
-  });
+  const opponentThreatCoverage: NonNullable<LocalIntelSnapshot["opponentThreatCoverage"]> = {
+    consideredMoves: threatMoves,
+    omittedMoves: threatSelection.omitted,
+    uncomputedMoves: threatMoves.filter((move) => !opponentThreatPreview.some((preview) => preview.moveName === move.name))
+      .map((move) => ({ name: move.name, reason: "no_damage_forecast" })),
+    unrevealedSlots: Math.max(0, 4 - (activeOpponentEntry?.revealedMoves.length ?? 0)),
+    note: "Selected move hypotheses only; missing rows do not establish safety. Monthly inclusion is not next-action probability. Damage bands are conditional on supported stat/item/ability/Tera assumptions, not exhaustive upper bounds."
+  };
+  if (onStage) { await onStage("threats", { ...board, playerDamagePreview, survivalCaveats, opponentThreatPreview, opponentThreatCoverage }); await yieldToEventLoop(); }
+  // The other posteriors are the rest of the cost; yield between them so a model reply or a send is not held up.
+  for (const entry of opponents) if (withPosterior(entry) && onStage) await yieldToEventLoop();
   const opponentActionPrediction = buildOpponentActionPrediction({
     snapshot,
     activeOpponentEntry,
@@ -2263,7 +2977,8 @@ export async function buildLocalIntelSnapshot(snapshot: BattleSnapshot): Promise
     playerDamagePreview,
     opponentThreatPreview,
     speedPreview,
-    opponentActionPrediction
+    opponentActionPrediction,
+    threatCoverageIncomplete: opponentThreatCoverage.unrevealedSlots > 0 || opponentThreatCoverage.omittedMoves.length > 0
   });
   const opponentLeadPrediction = buildOpponentLeadPrediction({
     snapshot,
@@ -2279,43 +2994,37 @@ export async function buildLocalIntelSnapshot(snapshot: BattleSnapshot): Promise
     Object.values(store.battles).flatMap((battle) => battle.predictionHistory ?? [])
   );
 
-  if (
-    opponentActionPrediction
-    && snapshot.phase === "turn"
-    && snapshot.opponentSide.active
-    && !hasOpponentActionInCurrentTurn(snapshot)
-  ) {
-    await withStoreWrite(async (store) => {
-      const battle = ensureBattleLedger(store, snapshot);
-      battle.pendingPrediction = {
-        turn: snapshot.turn,
-        predictedClass: opponentActionPrediction.topActionClass,
-        predictedLabel: opponentActionPrediction.topActions[0]?.label ?? null,
-        predictedAt: snapshot.capturedAt
-      };
-    });
+  // The Illusion user's own speed, damage and threats, as if it were the one on the field (its first view only).
+  let illusionAlternative: LocalIntelSnapshot["illusionAlternative"];
+  if (illusion?.users.length) {
+    const user = illusion.users[0]!;
+    try {
+      await buildLocalIntelSnapshot(illusionUserView(snapshot, user, illusion.used), context, async (stage, partial) => {
+        if (stage !== "threats") return;
+        illusionAlternative = { species: user.species ?? user.displayName ?? "an Illusion user", speedPreview: partial.speedPreview,
+          playerDamagePreview: partial.playerDamagePreview ?? [], opponentThreatPreview: partial.opponentThreatPreview ?? [] };
+        throw ALTERNATIVE_DONE;  // the rest (other posteriors, predictions) is not needed for this view
+      });
+    } catch (error) { if (error !== ALTERNATIVE_DONE) throw error; }
   }
-
+  // Hover detail, built last (a few ms) so it delays no other section. Behind a Substitute the active has no band.
+  const moveTargetPreview = buildMoveTargetPreview(snapshot, opponents, playerDamagePreview, allInferenceEvents);
   return {
     generatedAt: new Date().toISOString(),
-    note: "Observed history, priors, and current inferences.",
+    note,
+    ...(illusionCaveat ? { illusion: illusionCaveat } : {}),
+    ...(illusionAlternative ? { illusionAlternative } : {}),
     playerDamagePreview,
+    moveTargetPreview,
     opponentThreatPreview,
+    opponentThreatCoverage,
     opponentActionPrediction,
     opponentLeadPrediction,
     playerLeadRecommendation,
     selfActionRecommendation,
     speedPreview,
-    hazardSummary: [
-      snapshot.field.yourSideConditions.length > 0 ? `Your side: ${summarizeSideConditions(snapshot.field.yourSideConditions).join(", ")}` : null,
-      snapshot.field.opponentSideConditions.length > 0 ? `Opponent side: ${summarizeSideConditions(snapshot.field.opponentSideConditions).join(", ")}` : null
-    ].filter(Boolean).join(" | ") || undefined,
-    survivalCaveats: [
-      ...new Set(
-        playerDamagePreview
-          .flatMap((entry) => entry.survivalCaveats.map((caveat) => caveat.note))
-      )
-    ],
+    hazardSummary,
+    survivalCaveats,
     debug: {
       format: snapshot.format,
       roomId: snapshot.roomId,
@@ -2379,4 +3088,21 @@ export async function buildLocalIntelSnapshot(snapshot: BattleSnapshot): Promise
     },
     opponents
   };
+}
+
+/** Explicit feedback after a prediction was actually displayed, never a query side effect. */
+export async function recordShownPrediction(snapshot: BattleSnapshot, localIntel: LocalIntelSnapshot, identity: DecisionIdentity, assertCurrent?: (() => Promise<unknown>), check?: () => void) {
+  if (!sameDecision(identity, await createDecisionIdentity(snapshot))) throw new Error("Prediction feedback identity mismatch.");
+  const prediction = localIntel.opponentActionPrediction;
+  if (!prediction || snapshot.phase !== "turn" || !snapshot.opponentSide.active || hasOpponentActionInCurrentTurn(snapshot)) return;
+  await withStoreWrite(async (store) => {
+    await assertCurrent?.();
+    const battle = ensureBattleLedger(store, snapshot);
+    battle.pendingPrediction = {
+      turn: snapshot.turn,
+      predictedClass: prediction.topActionClass,
+      predictedLabel: prediction.topActions[0]?.label ?? null,
+      predictedAt: snapshot.capturedAt
+    };
+  }, check);
 }

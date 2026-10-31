@@ -3,13 +3,13 @@
   "private": true,
   "version": "0.1.0",
   "license": "MIT",
-  "description": "Local Pokemon Showdown assistant using Codex or Claude CLI subscriptions",
+  "description": "Local Pokemon Showdown Gen 9 UU advisor: Metamon's pick with deterministic damage, speed, threat and likely-set notes",
   "workspaces": [
     "apps/companion",
     "apps/pokemon-mcp"
   ],
   "engines": {
-    "node": ">=20.10.0"
+    "node": ">=22.18.0"
   },
   "scripts": {
     "companion:dev": "npm run dev --workspace @showdnass/companion",
@@ -17,9 +17,9 @@
     "companion:start": "npm run start --workspace @showdnass/companion",
     "mcp:serve": "npm run mcp:serve --workspace @showdnass/pokemon-mcp",
     "mcp:build": "npm run build --workspace @showdnass/pokemon-mcp",
-    "test": "node --test apps/extension/lib/*.test.js && node --import tsx --test apps/companion/src/test/*.test.ts",
+    "test": "npm run test:parser && npm run test:companion",
     "test:parser": "node --test apps/extension/lib/*.test.js",
-    "test:companion": "node --import tsx --test apps/companion/src/test/*.test.ts",
+    "test:companion": "node --import tsx --test --test-concurrency=2 apps/companion/src/test/*.test.ts",
     "sample-teams:import": "node --import tsx scripts/import-sample-teams.ts",
     "replay:extract": "node --import tsx scripts/replay-extract.ts",
     "replay:eval": "node --import tsx scripts/replay-eval.ts",
@@ -32,11 +32,14 @@
     "smoke:codex": "npm run smoke:codex --workspace @showdnass/companion",
     "smoke:claude": "npm run smoke:claude --workspace @showdnass/companion",
     "smoke:gemini": "npm run smoke:gemini --workspace @showdnass/companion",
-    "smoke:mock": "npm run smoke:mock --workspace @showdnass/companion"
+    "smoke:mock": "npm run smoke:mock --workspace @showdnass/companion",
+    "battle-agent:decide": "node --import tsx apps/companion/src/tools/battle-agent-decide.ts",
+    "battle-agent:sim": "node --import tsx apps/companion/src/tools/battle-agent-sim.ts"
   },
   "devDependencies": {
-    "tsx": "^4.19.2",
-    "typescript": "^5.6.3"
+    "tsx": "4.22.0",
+    "typescript": "^5.6.3",
+    "pokemon-showdown": "0.11.11"
   },
   "type": "module"
 }

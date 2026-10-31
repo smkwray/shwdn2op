@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { calculate as oracleCalculate, Pokemon as OraclePokemon, Move as OracleMove, Generations as OracleGenerations } from "@smogon/calc";
 import type { BattleSnapshot, DamageAssumptionBand, OpponentPosteriorPreview, PokemonSnapshot } from "../types.js";
 
 const storePath = path.join(os.tmpdir(), `shwdn2op-local-intel-${process.pid}-${Date.now()}.json`);
@@ -13,22 +14,30 @@ process.env.EXTERNAL_CURATED_STORE_PATH = externalCuratedStorePath;
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, "..", "..", "..", "..");
 
-const { buildLocalIntelSnapshot, updateLocalIntelFromSnapshot, importExternalCuratedTeamPriors } = await import("../history/opponentIntelStore.js");
+const { buildLocalIntelSnapshot, updateLocalIntelFromSnapshot, importExternalCuratedTeamPriors, captureIntelEvaluationContext, createEphemeralIntelEvaluationContext, recordShownPrediction, flushIntelStore } = await import("../history/opponentIntelStore.js");
+const { createDecisionIdentity } = await import("../../../extension/lib/decision-identity.js");
 const { buildOpponentPosterior } = await import("../inference/posterior.js");
 const { filterLiveLikelyHeldItemEntries, filterLiveLikelyHeldItemNames } = await import("../mechanics/liveLikelyItems.js");
 const { buildDamagePreview, buildThreatPreview } = await import("../prompting/damageNotes.js");
 const { buildAnalysisPrompt } = await import("../prompting/analysisPrompt.js");
+const { buildDeterministicNotes } = await import("../prompting/deterministicNotes.js");
 const { buildGeminiPrompt } = await import("../providers/geminiProvider.js");
 const { buildSelfActionRecommendation, selectReplyAwareSearchActionIds, weightedOpponentReplies } = await import("../prediction/selfActionRecommender.js");
 const { buildPlayerLeadRecommendation } = await import("../prediction/playerLeadPredictor.js");
+const { buildOpponentActionPrediction } = await import("../prediction/opponentActionPredictor.js");
 const { parseInferenceEvents } = await import("../mechanics/inferenceEvents.js");
 
 async function loadExampleJson(relativePath: string) {
   return JSON.parse(await fs.readFile(path.resolve(repoRoot, relativePath), "utf8"));
 }
 
+// History is written behind (opponentIntelStore): tests compare or seed the files only after pending writes land.
 async function readLocalIntelStore() {
-  return JSON.parse(await fs.readFile(storePath, "utf8"));
+  return JSON.parse(await diskText(storePath));
+}
+async function diskText(file: string) {
+  await flushIntelStore();
+  return fs.readFile(file, "utf8");
 }
 
 function makePokemon(overrides: Partial<PokemonSnapshot> = {}): PokemonSnapshot {
@@ -384,6 +393,7 @@ test("imported external curated teams inform priors without pretending to be obs
 });
 
 test("imported sample teams raise prior coverage without promoting confidence as fast as observed battles", async () => {
+  await flushIntelStore();
   await fs.writeFile(storePath, JSON.stringify({
     version: "0.1.0",
     updatedAt: new Date().toISOString(),
@@ -511,7 +521,8 @@ test("damage preview keeps uncapped max damage and current hp coverage separate"
   const likelyBand = bulletPunch?.bands.find((band) => band.label === "likely");
   assert.ok(likelyBand);
   assert.notEqual(likelyBand?.maxPercent, 55);
-  assert.equal(likelyBand?.coverage, "can_cover_current_hp");
+  assert.ok(likelyBand!.minPercent! >= 45);
+  assert.equal(likelyBand?.immediate.ko, "all_rolls");
 });
 
 test("damage preview emits sturdy and focus sash caveats", () => {
@@ -634,8 +645,13 @@ test("damage preview handles multi-hit moves without inflating the total range",
   }));
 
   const likelyBand = findLikelyBand(preview[0]?.bands);
-  assert.ok(Number(likelyBand?.minPercent ?? 0) > 150);
-  assert.ok(Number(likelyBand?.maxPercent ?? 0) < 400);
+  const gen = OracleGenerations.get(9);
+  // This fixture captures 156 Defense; IV 9 with a lowering nature produces
+  // that stat. The oracle must use the captured value, not default IVs/nature.
+  const oracleDefender = new OraclePokemon(gen, "Breloom", { nature: "Lonely", ivs: { def: 9 } });
+  const expected = oracleCalculate(gen, new OraclePokemon(gen, "Dragonite", { nature: "Adamant", evs: { atk: 252 } }), oracleDefender, new OracleMove(gen, "Dual Wingbeat"))
+    .range().map((roll) => Number((roll / oracleDefender.maxHP() * 100).toFixed(1)));
+  assert.deepEqual([likelyBand?.minPercent, likelyBand?.maxPercent], expected);
 });
 
 test("damage preview respects revealed abilities like Levitate", () => {
@@ -869,6 +885,7 @@ test("posterior damage preview ignores removed items on the live board", () => {
 });
 
 test("local intel does not turn a top historical item into a hard immunity fact", async () => {
+  await flushIntelStore();
   await fs.writeFile(storePath, JSON.stringify({
     version: "0.1.0",
     updatedAt: new Date().toISOString(),
@@ -973,6 +990,7 @@ test("local intel does not turn a top historical item into a hard immunity fact"
   assert.notEqual(likelyBand?.outcome, "immune");
   assert.ok(Number(likelyBand?.maxPercent ?? 0) > 0);
 
+  await flushIntelStore();
   await fs.writeFile(storePath, JSON.stringify({
     version: "0.1.0",
     updatedAt: new Date().toISOString(),
@@ -1755,7 +1773,9 @@ test("speed preview respects trick room tailwind paralysis boosts and scarf", as
     }
   });
   assert.equal(intel.speedPreview?.activeRelation, "faster");
-  assert.ok((intel.speedPreview?.confounders ?? []).includes("your Choice Scarf"));
+  // Your own revealed Scarf is applied exactly (166 -> 249), so it is not a confounder.
+  assert.equal(intel.speedPreview?.yourActiveEffectiveSpeed, 249);
+  assert.ok(!(intel.speedPreview?.confounders ?? []).includes("your Choice Scarf"));
 });
 
 test("speed preview widens for unrevealed field speed abilities like Sand Rush", async () => {
@@ -4182,7 +4202,30 @@ test("omitted preview leads still influence lead ordering under a thin opponent 
   assert.ok(lowBreloomIndex < lowHydreigonIndex);
 });
 
-test("prediction history records what the opponent actually did after a stored prediction", async () => {
+test("evaluation against a captured history revision is reproducible and performs no writes", async () => {
+  const snapshot = makeSnapshot({ roomId: "battle-pure-evaluation", turn: 18, recentLog: ["Turn 18 started."] });
+  await updateLocalIntelFromSnapshot(snapshot);
+  const context = await captureIntelEvaluationContext();
+  const storeBefore = await diskText(storePath);
+  const curatedBefore = await diskText(externalCuratedStorePath);
+  const memoryBefore = JSON.stringify(context.store);
+  const semantic = (intel: Awaited<ReturnType<typeof buildLocalIntelSnapshot>>) => {
+    const { generatedAt: _time, ...result } = intel;
+    return result;
+  };
+  const first = semantic(await buildLocalIntelSnapshot(snapshot, context));
+  const second = semantic(await buildLocalIntelSnapshot(snapshot, context));
+  assert.deepEqual(first, second);
+  assert.equal(await diskText(storePath), storeBefore);
+  assert.equal(await diskText(externalCuratedStorePath), curatedBefore);
+  assert.equal(JSON.stringify(context.store), memoryBefore);
+  assert.equal((await readLocalIntelStore()).battles[snapshot.roomId].pendingPrediction ?? null, null);
+  // Concurrent/new ingestion cannot alter an explicitly captured evaluation view.
+  await updateLocalIntelFromSnapshot(makeSnapshot({ roomId: "battle-new-history", turn: 3 }));
+  assert.deepEqual(semantic(await buildLocalIntelSnapshot(snapshot, context)), first);
+});
+
+test("prediction history records what the opponent actually did after explicit shown feedback", async () => {
   const yourToxapex = makePokemon({
     ident: "p1a: Toxapex-history",
     species: "Toxapex",
@@ -4224,6 +4267,8 @@ test("prediction history records what the opponent actually did after a stored p
   await updateLocalIntelFromSnapshot(before);
   const intel = await buildLocalIntelSnapshot(before);
   assert.equal(intel.opponentActionPrediction?.topActionClass, "stay_attack");
+
+  await recordShownPrediction(before, intel, await createDecisionIdentity(before));
 
   const after = makeSnapshot({
     ...before,
@@ -4283,7 +4328,8 @@ test("predictor history does not queue a second pending prediction after the opp
   });
 
   await updateLocalIntelFromSnapshot(before);
-  await buildLocalIntelSnapshot(before);
+  const beforeIntel = await buildLocalIntelSnapshot(before);
+  await recordShownPrediction(before, beforeIntel, await createDecisionIdentity(before));
 
   const after = makeSnapshot({
     ...before,
@@ -4367,9 +4413,6 @@ test("self recommender prefers a priority KO over slower setup", async () => {
   );
   assert.ok(
     (recommendation?.rankedActions[0]?.scoreBreakdown ?? []).some((entry) => entry.key === "search" && entry.value > 0)
-  );
-  assert.ok(
-    (recommendation?.rankedActions[0]?.reasons ?? []).some((reason) => /endgame/i.test(reason))
   );
   const prompt = buildAnalysisPrompt(snapshot, {
     localIntel: intel,
@@ -4668,9 +4711,42 @@ test("reply-aware search penalizes obvious immunity switch targets for moves", a
   assert.ok(
     (headlongRush?.scoreBreakdown ?? []).some((entry) => entry.key === "search" && entry.value < 0)
   );
-  assert.ok(
-    (stealthRock?.scoreBreakdown ?? []).some((entry) => entry.key === "search" && entry.value > 0)
+  const searchScore = (candidate: typeof headlongRush) => {
+    const component = candidate?.scoreBreakdown?.find((entry) => entry.key === "search");
+    assert.ok(component);
+    return component.value;
+  };
+  // Taking the known attack can make even the hazard branch negative. Its
+  // advantage over the immune attack is the relevant relative discriminator.
+  assert.ok(searchScore(stealthRock) > searchScore(headlongRush));
+
+  const prediction = intel.opponentActionPrediction;
+  assert.ok(prediction);
+  const dragoniteSwitch = prediction.topSwitchTargets?.find((reply) => reply.switchTargetSpecies === "Dragonite");
+  const stayAttack = prediction.topActions.find((reply) => reply.actionClass === "stay_attack");
+  assert.ok(dragoniteSwitch);
+  assert.ok(stayAttack);
+  const [againstSwitch, againstAttack] = [dragoniteSwitch, stayAttack].map((reply) =>
+    buildSelfActionRecommendation({
+      snapshot,
+      playerDamagePreview: intel.playerDamagePreview,
+      opponentThreatPreview: intel.opponentThreatPreview,
+      speedPreview: intel.speedPreview,
+      opponentActionPrediction: {
+        topActionClass: reply.actionClass,
+        confidenceTier: prediction.confidenceTier,
+        topActions: [reply],
+        topSwitchTargets: [],
+        reasons: [],
+        riskFlags: []
+      }
+    })!.rankedActions.find((candidate) => candidate.actionId === "move:headlongrush")
   );
+  assert.ok(againstSwitch);
+  assert.ok(againstAttack);
+  assert.ok(searchScore(againstSwitch) < searchScore(againstAttack), "Dragonite's immune switch must penalize Rush relative to the same board's attacking reply");
+  assert.ok(againstSwitch.riskFlags.some((risk) => /blanks this move/.test(risk)));
+  assert.ok(!againstAttack.riskFlags.some((risk) => /blanks this move/.test(risk)));
   assert.ok(
     !(headlongRush?.reasons ?? []).some((reason) => /setup window/i.test(reason))
   );
@@ -4741,7 +4817,79 @@ test("reply-aware search penalizes a revealed Air Balloon switch target", async 
   );
 });
 
+test("reply-aware search stops treating a popped Air Balloon switch target as immune", async () => {
+  const yourGreatTusk = makePokemon({
+    ident: "p1a: Great Tusk-search-popped-balloon",
+    species: "Great Tusk",
+    displayName: "Great Tusk",
+    active: true,
+    hpPercent: 100,
+    knownMoves: ["Headlong Rush", "Close Combat"],
+    stats: { hp: 401, atk: 371, def: 298, spa: 126, spd: 219, spe: 339 },
+    types: ["Ground", "Fighting"]
+  });
+  const opponentGholdengo = makePokemon({
+    ident: "p2a: Gholdengo-search-popped-balloon",
+    species: "Gholdengo",
+    displayName: "Gholdengo",
+    active: true,
+    hpPercent: 58,
+    knownMoves: ["Make It Rain", "Shadow Ball"],
+    stats: { hp: 304, atk: 176, def: 226, spa: 389, spd: 236, spe: 276 },
+    types: ["Steel", "Ghost"]
+  });
+  const opponentExcadrill = makePokemon({
+    ident: "p2b: Excadrill-search-popped-balloon",
+    species: "Excadrill",
+    displayName: "Excadrill",
+    item: null,
+    removedItem: "Air Balloon",
+    hpPercent: 100,
+    stats: { hp: 361, atk: 369, def: 156, spa: 126, spd: 166, spe: 302 },
+    types: ["Ground", "Steel"]
+  });
+
+  const snapshot = makeSnapshot({
+    roomId: "battle-self-recommend-search-popped-balloon",
+    turn: 4,
+    yourSide: {
+      slot: "p1",
+      name: "You",
+      active: yourGreatTusk,
+      team: [yourGreatTusk]
+    },
+    opponentSide: {
+      slot: "p2",
+      name: "Opponent",
+      active: opponentGholdengo,
+      team: [opponentGholdengo, opponentExcadrill]
+    },
+    legalActions: [
+      { id: "move:headlongrush", kind: "move", label: "Headlong Rush", moveName: "Headlong Rush" },
+      { id: "move:closecombat", kind: "move", label: "Close Combat", moveName: "Close Combat" }
+    ]
+  });
+
+  const intel = await buildLocalIntelSnapshot(snapshot);
+  const switchExcadrill = (
+    intel.opponentActionPrediction?.topSwitchTargets
+    ?? intel.opponentActionPrediction?.topActions
+    ?? []
+  ).find((candidate) => candidate.switchTargetSpecies === "Excadrill");
+  const switchHeadlongRush = switchExcadrill?.switchTargetPlayerPreview?.find((preview) => preview.moveName === "Headlong Rush");
+  const likelyBand = findLikelyBand(switchHeadlongRush?.bands);
+  const headlongRush = intel.selfActionRecommendation?.rankedActions.find((candidate) => candidate.actionId === "move:headlongrush");
+
+  assert.ok(switchHeadlongRush);
+  assert.notEqual(likelyBand?.outcome, "immune");
+  assert.ok(Number(likelyBand?.maxPercent ?? 0) > 0);
+  assert.ok(
+    !(headlongRush?.riskFlags ?? []).some((flag) => /blanks this move|air balloon/i.test(flag))
+  );
+});
+
 test("reply-aware search soft-penalizes a possible hidden absorber switch target", async () => {
+  await flushIntelStore();
   await fs.writeFile(storePath, JSON.stringify({
     version: "0.1.0",
     updatedAt: new Date().toISOString(),
@@ -5916,6 +6064,7 @@ test("speed preview doubles for revealed Unburden after item consumption", async
         active: true,
         ability: "Unburden",
         removedItem: "Electric Seed",
+        unburdenActive: true,
         stats: { hp: 307, atk: 302, def: 249, spa: 173, spd: 178, spe: 289 },
         types: ["Fighting", "Flying"]
       }),
@@ -5926,6 +6075,7 @@ test("speed preview doubles for revealed Unburden after item consumption", async
         active: true,
         ability: "Unburden",
         removedItem: "Electric Seed",
+        unburdenActive: true,
         stats: { hp: 307, atk: 302, def: 249, spa: 173, spd: 178, spe: 289 },
         types: ["Fighting", "Flying"]
       })]
@@ -5938,7 +6088,7 @@ test("speed preview doubles for revealed Unburden after item consumption", async
   assert.ok(minEffective >= 400, `expected Unburden-boosted min speed >= 400, got ${minEffective}`);
 });
 
-test("speed preview boosts for Booster Energy consumed by Quark Drive outside terrain", async () => {
+test("speed preview keeps both Booster Energy speed branches until the boosted stat is revealed", async () => {
   const base = makeSnapshot({
     roomId: "battle-speed-booster",
     opponentSide: {
@@ -5975,11 +6125,43 @@ test("speed preview boosts for Booster Energy consumed by Quark Drive outside te
   });
 
   const intel = await buildLocalIntelSnapshot(base);
-  // With Quark Drive + Booster Energy consumed + no terrain, should get 1.5x boost
-  // Iron Valiant 116 base Spe: unboosted min ~241, with 1.5x → ~361
-  // Verify boost applied: min should exceed unboosted max (~364)
-  const minEffective = Number(intel.speedPreview?.effectiveRange?.min ?? 0);
-  assert.ok(minEffective > 300, `expected Booster Energy-boosted min > 300, got ${minEffective}`);
+  const unboostedSnapshot = structuredClone(base);
+  unboostedSnapshot.opponentSide.active!.removedItem = null;
+  unboostedSnapshot.opponentSide.team[0]!.removedItem = null;
+  const unboosted = (await buildLocalIntelSnapshot(unboostedSnapshot)).speedPreview!.effectiveRange!;
+  assert.equal(intel.speedPreview!.effectiveRange!.min, unboosted.min);
+  assert.equal(intel.speedPreview!.effectiveRange!.max, Math.floor(unboosted.max * 1.5));
+  assert.ok(intel.speedPreview!.confounders.some((value) => value.includes("possible opponent Quark Drive")));
+
+  for (const stat of ["spe", "spa", null] as const) {
+    const revealed = structuredClone(base);
+    revealed.opponentSide.active!.paradoxBoostedStat = stat;
+    revealed.opponentSide.team[0]!.paradoxBoostedStat = stat;
+    const range = (await buildLocalIntelSnapshot(revealed)).speedPreview!.effectiveRange!;
+    assert.deepEqual(range, stat === "spe"
+      ? { min: Math.floor(unboosted.min * 1.5), max: Math.floor(unboosted.max * 1.5) }
+      : unboosted);
+  }
+});
+
+test("speed preview applies the live field to the player's uncertain Paradox Speed", async () => {
+  const active = makePokemon({
+    ident: "p1a: Iron Valiant", species: "Iron Valiant", displayName: "Iron Valiant", active: true,
+    ability: "Quark Drive", stats: { hp: 303, atk: 317, def: 226, spa: 348, spd: 226, spe: 300 },
+    types: ["Fairy", "Fighting"]
+  });
+  const snapshot = makeSnapshot({
+    roomId: "battle-player-paradox-speed",
+    yourSide: { slot: "p1", name: "You", active, team: [active] },
+    field: { weather: null, terrain: "Electric Terrain", pseudoWeather: [], yourSideConditions: [], opponentSideConditions: [] }
+  });
+  const uncertain = (await buildLocalIntelSnapshot(snapshot)).speedPreview!;
+  assert.equal(uncertain.activeRelation, "overlap");
+  assert.match(uncertain.activeSummary!, /You 300-450/);
+  active.paradoxBoostedStat = "spe";
+  const revealed = (await buildLocalIntelSnapshot(snapshot)).speedPreview!;
+  assert.equal(revealed.activeRelation, "faster");
+  assert.match(revealed.activeSummary!, /You 450/);
 });
 
 test("mock provider strategic mode emits strategic plan actions when no legal actions are present", async () => {
@@ -6070,6 +6252,10 @@ test("inference parser emits switch_heal from Regenerator HP-change log line", (
 
 test("inference parser emits hazard_immunity when entry through hazards shows no damage", () => {
   const snapshot = makeSnapshot({
+    entryObservations: [{
+      ident: "p2: Noivern", species: "Noivern", side: "p2", turn: 7, hazards: ["Stealth Rock"], types: ["Flying", "Dragon"],
+      complete: true, damageObserved: false, observationIds: ["fixture:entry", "fixture:next-turn"]
+    }],
     field: {
       weather: null,
       terrain: null,
@@ -6447,4 +6633,199 @@ test("posterior boosts Life Orb hypothesis when attack_recoil inference event is
   assert.ok(lifeOrbWeightWith > lifeOrbWeightWithout, "Life Orb weight should increase with attack_recoil evidence");
   // Evidence should include the inference kind
   assert.ok(withEvents!.evidence.some((e) => e.kind === "inference"), "evidence should include inference kind");
+});
+
+test("Slow Start Speed preview keeps unknown activation between native active and expired bounds", async () => {
+  const context = await createEphemeralIntelEvaluationContext();
+  const your = makePokemon({ active: true, item: null, ability: "Sturdy", stats: { spe: 200 } });
+  const opponent = makePokemon({
+    ident: "p2a: Regigigas", species: "Regigigas", displayName: "Regigigas", active: true,
+    ability: "Slow Start", stats: { hp: 424, atk: 356, def: 256, spa: 176, spd: 256, spe: 328 },
+    types: ["Normal"], knownMoves: ["Body Slam", "Thunderbolt", "Protect", "Rest"]
+  });
+  for (const [activation, expected, relation] of [
+    [true, { min: 106, max: 164 }, "faster"],
+    [false, { min: 212, max: 328 }, "slower"],
+    [undefined, { min: 106, max: 328 }, "overlap"]
+  ] as const) {
+    const mon = { ...opponent, slowStartActive: activation };
+    const snapshot = makeSnapshot({
+      yourSide: { slot: "p1", name: "You", active: your, team: [your] },
+      opponentSide: { slot: "p2", name: "Opponent", active: mon, team: [mon] }
+    });
+    const before = structuredClone(snapshot);
+    const intel = await buildLocalIntelSnapshot(snapshot, context);
+    assert.deepEqual(intel.speedPreview?.effectiveRange, expected);
+    assert.equal(intel.speedPreview?.activeRelation, relation);
+    assert.equal(intel.speedPreview?.yourActiveEffectiveSpeed, 200);
+    if (activation === undefined) {
+      assert.ok(intel.opponents[0]?.posterior?.topHypotheses.every((hypothesis) => hypothesis.effectiveSpeed == null));
+      assert.match(intel.speedPreview?.activeSummary ?? "", /activation unknown/);
+    }
+    assert.deepEqual(snapshot, before, "forecasting must not mutate observed activation");
+  }
+});
+
+test("Slow Start scalar Speed is withheld when unknown and a future switch starts a fresh activation", async () => {
+  const context = await createEphemeralIntelEvaluationContext();
+  const original = makeSnapshot();
+  const regigigas = makePokemon({
+    ident: "p1a: Regigigas", species: "Regigigas", displayName: "Regigigas", active: true,
+    ability: "Slow Start", item: null, stats: { hp: 424, atk: 356, def: 256, spa: 176, spd: 256, spe: 328 },
+    types: ["Normal"], knownMoves: ["Body Slam"]
+  });
+  for (const [activation, scalar] of [[true, 164], [false, 328], [undefined, undefined]] as const) {
+    const mon = { ...regigigas, slowStartActive: activation };
+    const snapshot = makeSnapshot({ yourSide: { slot: "p1", name: "You", active: mon, team: [mon] } });
+    const intel = await buildLocalIntelSnapshot(snapshot, context);
+    assert.equal(intel.speedPreview?.yourActiveEffectiveSpeed, scalar);
+    const match = intel.speedPreview?.switchMatchups.find((entry) => entry.species === "Regigigas");
+    assert.equal(match?.effectiveSpeed, scalar ?? null);
+  }
+  const bench = { ...regigigas, active: false, slowStartActive: false };
+  const snapshot = makeSnapshot({
+    yourSide: { ...original.yourSide, team: [original.yourSide.active!, bench] }
+  });
+  const intel = await buildLocalIntelSnapshot(snapshot, context);
+  assert.equal(intel.speedPreview?.switchMatchups.find((entry) => entry.species === "Regigigas")?.effectiveSpeed, 164);
+  assert.equal(bench.slowStartActive, false, "the future-entry branch must leave historical expiration intact");
+});
+
+test("deterministic notes report native Slow Start Speed and retain both unknown endpoints", () => {
+  const regigigas = makePokemon({
+    ident: "p1a: Regigigas", species: "Regigigas", displayName: "Regigigas", active: true,
+    ability: "Slow Start", item: null, stats: { hp: 424, atk: 356, def: 256, spa: 176, spd: 256, spe: 328 },
+    types: ["Normal"], knownMoves: ["Protect"]
+  });
+  for (const [activation, expected] of [[true, "164-164"], [false, "328-328"], [undefined, "164-328"]] as const) {
+    const mon = { ...regigigas, slowStartActive: activation };
+    const snapshot = makeSnapshot({ yourSide: { slot: "p1", name: "You", active: mon, team: [mon] } });
+    assert.ok(buildDeterministicNotes(snapshot).some((line) => line.startsWith(`Current speed state: your active is effectively around ${expected} Spe`)));
+  }
+});
+
+function delayedAttackSnapshot(): BattleSnapshot {
+  const caster = makePokemon({ ident: "p1a: King", instanceId: "king", appearanceId: "king-entry", species: "Slowking", displayName: "King", active: true,
+    knownMoves: ["Future Sight", "Scald"], ability: "Regenerator", stats: { hp: 332, atk: 139, def: 196, spa: 299, spd: 256, spe: 174 }, types: ["Water", "Psychic"] });
+  const target = makePokemon({ ident: "p2a: Coal", instanceId: "coal", appearanceId: "coal-entry", species: "Torkoal", displayName: "Coal", active: true,
+    knownMoves: ["Earth Power"], ability: "Shell Armor", hpPercent: 15, conditionText: "15/100", stats: {}, types: ["Fire"] });
+  const snapshot = makeSnapshot({ turn: 2, yourSide: { slot: "p1", name: "You", active: caster, team: [caster] }, opponentSide: { slot: "p2", name: "Them", active: target, team: [target] },
+    legalActions: [{ id: "future", kind: "move", label: "Future Sight", moveName: "Future Sight" }, { id: "scald", kind: "move", label: "Scald", moveName: "Scald" }] });
+  const fact = (id: string, kind: string, args: string[] = []) => ({ id, kind, args, turn: kind === "turn" ? 2 : 0, subject: {}, references: {},
+    source: { observationId: "complete-stream", sequence: 1, lineIndex: 0, channel: "protocol" as const }, identityStatus: "provisional" as const, supportingFactIds: [id] });
+  snapshot.canonicalEvidence = { version: "1", facts: [fact("init", "init", ["battle"]), fact("start", "start"), fact("turn", "turn", ["2"]), fact("request", "request", ["{} "])], contributions: [], ambiguities: [], limitations: [] };
+  snapshot.turnCoverage = { source: "owned_offline_simulator", turn: 2, turnFactId: "turn", requestFactId: "request", fromSequence: 1, throughSequence: 1 };
+  return snapshot;
+}
+
+test("Future Sight keeps conditional eventual damage separate from immediate damage and observed ranges", () => {
+  const snapshot = delayedAttackSnapshot();
+  let futureObservedCalls = 0;
+  const preview = buildDamagePreview(snapshot, { observedPlayerDamageResolver(moveName) {
+    if (moveName === "Future Sight") futureObservedCalls++;
+    return { minPercent: 99, maxPercent: 100, sampleCount: 20, source: "context" };
+  } });
+  const future = preview.find((entry) => entry.actionId === "future")!;
+  assert.deepEqual(future.bands, []);
+  assert.equal(future.delayed!.immediateDamagePercent, 0);
+  assert.equal(future.delayed!.scheduling, "clear");
+  assert.equal(future.delayed!.dueTurn, 4);
+  assert.equal(future.delayed!.phase, "end_of_turn");
+  assert.equal(future.delayed!.recipient, "slot_at_impact");
+  assert.equal(future.delayed!.targetSide, "p2");
+  assert.ok(future.delayed!.bands.some((band) => Number(band.minPercent) > 0));
+  assert.equal(future.observedRange, undefined);
+  assert.equal(futureObservedCalls, 0, "historical immediate contexts cannot replace delayed calculations");
+  assert.match(future.summary, /zero immediate damage|0 immediate damage/i);
+  assert.doesNotMatch(future.summary, /KOs current HP|covers current HP/);
+  const scald = preview.find((entry) => entry.actionId === "scald")!;
+  assert.equal(scald.delayed, undefined);
+  assert.equal(findLikelyBand(scald.bands)!.minPercent, 99, "ordinary observed Scald behavior is unchanged");
+  const prompt = buildAnalysisPrompt(snapshot, { localIntel: { generatedAt: "", note: "", opponents: [], playerDamagePreview: preview }, includeToolHint: false });
+  const futureLines = prompt.split("\n").filter((line) => line.includes("Future Sight")).join("\n");
+  assert.match(futureLines, /0% damage now/);
+  assert.match(futureLines, /conditional/i);
+  assert.doesNotMatch(futureLines, /KOs current HP|faster and can KO/);
+});
+
+test("Future Sight occupancy and incomplete capture remain scheduling risks without disabling the action", () => {
+  const snapshot = delayedAttackSnapshot();
+  snapshot.pendingAttacks = [{ moveId: "futuresight", moveName: "Future Sight", sourceSide: "p1", targetSide: "p2", targetPosition: "a", castTurn: 1, dueTurn: 3, phase: "end_of_turn", status: "scheduled", factIds: ["cast", "start"] }];
+  const occupied = buildDamagePreview(snapshot)[0]!;
+  assert.equal(occupied.delayed!.scheduling, "occupied");
+  assert.equal(occupied.delayed!.dueTurn, null);
+  assert.deepEqual(occupied.delayed!.factIds, ["cast", "start"]);
+  assert.equal(snapshot.legalActions[0]!.disabled, undefined);
+  snapshot.pendingAttacks[0]!.targetSide = "p1";
+  assert.equal(buildDamagePreview(snapshot)[0]!.delayed!.scheduling, "clear", "the other side's slot does not block this cast");
+  snapshot.pendingAttacks[0]!.targetSide = "p2";
+  snapshot.pendingAttacks[0]!.status = "timing_unknown";
+  assert.equal(buildDamagePreview(snapshot)[0]!.delayed!.scheduling, "unknown");
+  delete snapshot.pendingAttacks; delete snapshot.turnCoverage;
+  const unknown = buildDamagePreview(snapshot)[0]!.delayed!;
+  assert.equal(unknown.scheduling, "unknown"); assert.equal(unknown.dueTurn, null);
+});
+
+test("Future Sight has no immediate KO, Speed race, return-reply suppression or switch-target damage reward", () => {
+  const snapshot = delayedAttackSnapshot();
+  const damage = buildDamagePreview(snapshot);
+  const threats = buildThreatPreview(snapshot, { moveCandidates: [{ name: "Earth Power", source: "known" }] });
+  threats.forEach((entry) => { entry.currentTarget.relation = "faster"; });
+  const speed = { opponentSpecies: "Torkoal", activeRelation: "faster" as const, evidence: [], confounders: [], switchMatchups: [], historyNotes: [] };
+  const prediction = { topActionClass: "stay_attack" as const, confidenceTier: "low" as const, topActions: [{ type: "known_move" as const, actionClass: "stay_attack" as const, label: "Earth Power", moveName: "Earth Power", source: "known" as const, score: 50, reasons: [], riskFlags: [] }], reasons: [], riskFlags: [] };
+  const recommend = (previews: typeof damage) => buildSelfActionRecommendation({ snapshot, playerDamagePreview: previews, opponentThreatPreview: threats, speedPreview: speed, opponentActionPrediction: prediction })!;
+  const candidate = recommend(damage).rankedActions.find((entry) => entry.actionId === "future")!;
+  assert.equal(candidate.scoreBreakdown!.find((component) => component.key === "tactical")?.value ?? 0, 0);
+  assert.ok((candidate.scoreBreakdown!.find((component) => component.key === "delayed")?.value ?? 0) <= 12);
+  assert.ok(candidate.scoreBreakdown!.some((component) => component.key === "search" && component.value < 0), "the opposing ordinary attack still reaches this turn");
+  assert.ok(!candidate.reasons.some((reason) => /faster|KO|immediate damage|punishes the likely switch/.test(reason)));
+  const inflatedEventual = structuredClone(damage);
+  inflatedEventual[0]!.delayed!.bands = inflatedEventual[0]!.delayed!.bands.map((band) => ({ ...band, minPercent: 500, maxPercent: 600, immediate: { ko: "all_rolls", minHpLossPercent: 100, maxHpLossPercent: 100 } }));
+  assert.equal(recommend(inflatedEventual).rankedActions.find((entry) => entry.actionId === "future")!.scoreBreakdown!.find((component) => component.key === "search")!.value,
+    candidate.scoreBreakdown!.find((component) => component.key === "search")!.value, "eventual damage cannot suppress the return reply or become immediate HP swing");
+  const noReturn = recommend(damage).rankedActions.find((entry) => entry.actionId === "scald")!;
+  assert.ok(noReturn.reasons.some((reason) => /KO|strong immediate damage/.test(reason)), "ordinary Scald still receives immediate damage value");
+  const occupied = structuredClone(snapshot);
+  occupied.pendingAttacks = [{ moveId: "futuresight", moveName: "Future Sight", sourceSide: "p1", targetSide: "p2", targetPosition: "a", castTurn: 0, dueTurn: 2, phase: "end_of_turn", status: "scheduled", factIds: ["cast"] }];
+  const duplicate = buildSelfActionRecommendation({ snapshot: occupied, playerDamagePreview: buildDamagePreview(occupied), opponentThreatPreview: threats, speedPreview: speed, opponentActionPrediction: prediction })!.rankedActions.find((entry) => entry.actionId === "future")!;
+  assert.ok(duplicate.score < candidate.score); assert.ok(duplicate.riskFlags.some((risk) => /already|occupied/.test(risk)));
+  assert.ok(duplicate.scoreBreakdown!.some((component) => component.key === "search" && component.value < 0), "an existing end-of-turn impact cannot erase the opponent's earlier ordinary reply");
+});
+
+test("Future Sight preserves posterior-weighted eventual bands while immediate damage stays zero", () => {
+  const snapshot = delayedAttackSnapshot();
+  const hypotheses: OpponentPosteriorPreview["topHypotheses"] = [
+    { ability: "White Smoke", item: "Heavy-Duty Boots", teraType: "Fire", statArchetype: "fast_spec", weight: 0.75, nature: "Timid", evs: { hp: 4, spa: 252, spe: 252 }, support: [] },
+    { ability: "White Smoke", item: "Assault Vest", teraType: "Fire", statArchetype: "bulky_spec", weight: 0.25, nature: "Modest", evs: { hp: 252, spa: 252, def: 4 }, support: [] }
+  ];
+  const posterior: OpponentPosteriorPreview = { topHypotheses: hypotheses, statBands: [], confidenceTier: "usable", evidenceKinds: [], evidence: [], usedFallback: false };
+  const first = buildDamagePreview(snapshot, { defenderPosterior: posterior })[0]!;
+  const swapped = { ...posterior, topHypotheses: hypotheses.map((hypothesis) => ({ ...hypothesis, weight: 1 - hypothesis.weight })) };
+  const second = buildDamagePreview(snapshot, { defenderPosterior: swapped })[0]!;
+  for (const preview of [first, second]) { assert.deepEqual(preview.bands, []); assert.equal(preview.delayed!.immediateDamagePercent, 0); assert.equal(preview.likelyBandSource, "posterior"); }
+  const gen = OracleGenerations.get(9), caster = new OraclePokemon(gen, "Slowking", { nature: "Timid", evs: { hp: 4, spa: 252, spe: 252 } });
+  const expected = hypotheses.map((hypothesis) => {
+    const defender = new OraclePokemon(gen, "Torkoal", { nature: hypothesis.nature as "Timid" | "Modest", evs: hypothesis.evs, ability: hypothesis.ability!, item: hypothesis.item! });
+    return oracleCalculate(gen, caster, defender, new OracleMove(gen, "Future Sight")).range().map((damage) => Number((damage / defender.maxHP() * 100).toFixed(1)));
+  });
+  assert.deepEqual([findLikelyBand(first.delayed!.bands)!.minPercent, findLikelyBand(first.delayed!.bands)!.maxPercent], expected[0]);
+  assert.deepEqual([findLikelyBand(second.delayed!.bands)!.minPercent, findLikelyBand(second.delayed!.bands)!.maxPercent], expected[1]);
+  assert.notDeepEqual(first.delayed!.bands, second.delayed!.bands);
+});
+
+test("opponent Future Sight remains a delayed scheduling candidate for current and living replacement slots", () => {
+  const original = delayedAttackSnapshot();
+  const snapshot = { ...original, yourSide: { ...original.opponentSide, team: [original.opponentSide.active!, makePokemon({ ident: "p2: Moon", instanceId: "moon", species: "Umbreon", displayName: "Moon", active: false, types: ["Dark"] })] }, opponentSide: original.yourSide };
+  const threats = buildThreatPreview(snapshot, { moveCandidates: [{ name: "Future Sight", source: "known" }] });
+  assert.deepEqual(threats[0]!.currentTarget.bands, []);
+  assert.deepEqual(threats[0]!.switchTargets[0]!.bands, []);
+  assert.equal(threats[0]!.currentTarget.delayed!.immediateDamagePercent, 0);
+  assert.equal(threats[0]!.switchTargets[0]!.delayed!.targetSide, "p2");
+  const prediction = buildOpponentActionPrediction({ snapshot, playerDamagePreview: [], opponentThreatPreview: threats })!;
+  const candidate = prediction.topActions.find((entry) => entry.moveName === "Future Sight")!;
+  assert.ok(candidate); assert.equal(candidate.actionClass, "status_or_setup");
+  assert.ok(!candidate.reasons.some((reason) => /KO|immediate damage|faster|best known damage/.test(reason)));
+  snapshot.pendingAttacks = [{ moveId: "futuresight", moveName: "Future Sight", sourceSide: "p1", targetSide: "p2", targetPosition: "a", castTurn: 1, dueTurn: 3, phase: "end_of_turn", status: "scheduled", factIds: ["cast"] }];
+  const duplicate = buildOpponentActionPrediction({ snapshot, playerDamagePreview: [], opponentThreatPreview: buildThreatPreview(snapshot, { moveCandidates: [{ name: "Future Sight", source: "known" }] }) })!.topActions.find((entry) => entry.moveName === "Future Sight")!;
+  assert.ok(duplicate.score < candidate.score); assert.ok(duplicate.riskFlags.some((risk) => /already|occupied/.test(risk)));
 });

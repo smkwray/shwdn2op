@@ -1,5 +1,8 @@
+import { projectSwitchEntry } from "../mechanics/switchEntry.js";
 import { Dex } from "@pkmn/dex";
 import { Generations } from "@pkmn/data";
+import { snapshotForAction } from "../mechanics/actions.js";
+import { buildDelayedDamagePreview, buildThreatPreview } from "../prompting/damageNotes.js";
 
 import type {
   ActionScoreComponent,
@@ -83,7 +86,21 @@ function lookupSpecies(gen: ReturnType<typeof dataGen>, name: string | null | un
 
 function likelyBand(bands: DamageAssumptionBand[] | null | undefined) {
   if (!Array.isArray(bands) || bands.length === 0) return null;
-  return bands.find((band) => band.label === "likely") ?? bands[0] ?? null;
+  const selected = bands.find((band) => band.label === "likely") ?? bands[0]!;
+  // Raw likely pressure remains heuristic. Immediate claims require support
+  // across every represented profile, not just the median/likely raw band.
+  const outcomes = bands.map((band) => band.immediate?.ko ?? "unknown");
+  const ko = outcomes.every((value) => value === "all_rolls") ? "all_rolls"
+    : outcomes.every((value) => value === "no_ko") ? "no_ko"
+      : outcomes.some((value) => value === "unknown") ? "unknown"
+        : outcomes.every((value) => value === "all_rolls" || value === "some_rolls") ? "some_rolls" : "conditional";
+  const lower = bands.map((band) => band.immediate?.minHpLossPercent);
+  const upper = bands.map((band) => band.immediate?.maxHpLossPercent);
+  return { ...selected, immediate: { ...selected.immediate, ko,
+    ...(ko !== selected.immediate?.ko ? { note: "Immediate KO varies across represented profiles." } : {}),
+    minHpLossPercent: ko !== "unknown" && lower.every((value) => typeof value === "number" && Number.isFinite(value)) ? Math.min(...lower as number[]) : null,
+    maxHpLossPercent: ko !== "unknown" && upper.every((value) => typeof value === "number" && Number.isFinite(value)) ? Math.max(...upper as number[]) : null
+  } } as DamageAssumptionBand;
 }
 
 function bandAveragePercent(band: DamageAssumptionBand | null | undefined) {
@@ -92,20 +109,31 @@ function bandAveragePercent(band: DamageAssumptionBand | null | undefined) {
   return (Number(band.minPercent) + Number(band.maxPercent)) / 2;
 }
 
-function bandMaxPercent(band: DamageAssumptionBand | null | undefined) {
-  if (!band || (band.outcome && band.outcome !== "damage")) return 0;
-  return Number.isFinite(band.maxPercent) ? Number(band.maxPercent) : 0;
+function bandHpLossMax(band: DamageAssumptionBand | null | undefined) {
+  const value = band?.immediate?.ko !== "unknown" ? band?.immediate?.maxHpLossPercent : null;
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
-function bandCoverageScore(band: DamageAssumptionBand | null | undefined) {
+function bandHpLossMin(band: DamageAssumptionBand | null | undefined) {
+  const value = band?.immediate?.ko !== "unknown" ? band?.immediate?.minHpLossPercent : null;
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function bandKoScore(band: DamageAssumptionBand | null | undefined) {
   if (!band || (band.outcome && band.outcome !== "damage")) return 0;
-  if (band.coverage === "covers_current_hp") return 2;
-  if (band.coverage === "can_cover_current_hp") return 1;
+  if (band.immediate?.ko === "all_rolls") return 2;
+  if (band.immediate?.ko === "some_rolls") return 1;
   return 0;
 }
 
+function bandThreatScore(band: DamageAssumptionBand | null | undefined) {
+  return bandKoScore(band) * 1000 + (bandHpLossMax(band) ?? 0) * 2
+    + Math.min(100, bandAveragePercent(band)) * 0.01;
+}
+
 function isImmuneOrBlockedBand(band: DamageAssumptionBand | null | undefined) {
-  return band?.outcome === "immune" || band?.outcome === "blocked";
+  return Boolean((band?.outcome === "immune" || band?.outcome === "blocked")
+    && band.immediate?.ko === "no_ko" && bandHpLossMax(band) === 0);
 }
 
 function isStatusBand(band: DamageAssumptionBand | null | undefined) {
@@ -151,7 +179,7 @@ function moveOrderRelation(snapshot: BattleSnapshot, speedPreview: SpeedPreview 
 
 function currentBattleTypes(gen: ReturnType<typeof dataGen>, pokemon: PokemonSnapshot | null | undefined) {
   if (!pokemon) return [];
-  if (pokemon.terastallized && pokemon.teraType) {
+  if (pokemon.terastallized && pokemon.teraType && pokemon.teraType !== "Stellar") {
     return [pokemon.teraType];
   }
   if (Array.isArray(pokemon.types) && pokemon.types.length > 0) {
@@ -161,47 +189,8 @@ function currentBattleTypes(gen: ReturnType<typeof dataGen>, pokemon: PokemonSna
   return species?.types ?? [];
 }
 
-function hazardLayerCount(conditions: string[], name: string) {
-  return conditions.filter((value) => normalizeName(value) === normalizeName(name)).length;
-}
-
-function groundedForSpikes(snapshot: BattleSnapshot, pokemon: PokemonSnapshot) {
-  if (snapshot.field.pseudoWeather.some((value) => /gravity/i.test(String(value ?? "")))) {
-    return true;
-  }
-  const gen = dataGen(snapshot.format);
-  const types = currentBattleTypes(gen, pokemon);
-  if (types.includes("Flying")) return false;
-  if (normalizeName(pokemon.item) === "airballoon") return false;
-  if (normalizeName(pokemon.ability) === "levitate") return false;
-  return true;
-}
-
 function estimateSwitchEntryHazards(snapshot: BattleSnapshot, pokemon: PokemonSnapshot) {
-  if (normalizeName(pokemon.item) === "heavydutyboots") {
-    return { damagePercent: 0, stickyWeb: false };
-  }
-
-  const gen = dataGen(snapshot.format);
-  const conditions = snapshot.field.yourSideConditions ?? [];
-  const types = currentBattleTypes(gen, pokemon);
-  let damagePercent = 0;
-
-  if (hazardLayerCount(conditions, "Stealth Rock") > 0 && types.length > 0) {
-    const rockEffectiveness = gen.types.totalEffectiveness("Rock" as any, types as any);
-    damagePercent += 12.5 * Number(rockEffectiveness);
-  }
-
-  const spikesLayers = hazardLayerCount(conditions, "Spikes");
-  if (spikesLayers > 0 && groundedForSpikes(snapshot, pokemon)) {
-    damagePercent += spikesLayers >= 3 ? 25 : spikesLayers === 2 ? 16.7 : 12.5;
-  }
-
-  const stickyWeb = hazardLayerCount(conditions, "Sticky Web") > 0 && groundedForSpikes(snapshot, pokemon);
-  return {
-    damagePercent: Number(damagePercent.toFixed(1)),
-    stickyWeb
-  };
+  return projectSwitchEntry(snapshot, pokemon, "your");
 }
 
 function summarizeBestThreat(threats: ThreatPreview[]) {
@@ -210,7 +199,7 @@ function summarizeBestThreat(threats: ThreatPreview[]) {
 
   for (const entry of threats) {
     const band = likelyBand(entry.currentTarget?.bands);
-    const score = bandCoverageScore(band) * 100 + bandAveragePercent(band) * 2 + bandMaxPercent(band);
+    const score = bandThreatScore(band);
     if (score > bestScore) {
       bestScore = score;
       best = { entry, target: entry.currentTarget, band };
@@ -238,7 +227,7 @@ function summarizeBestDamage(previews: DamagePreview[]) {
 
   for (const entry of previews) {
     const band = likelyBand(entry.bands);
-    const score = bandCoverageScore(band) * 100 + bandAveragePercent(band) * 2 + bandMaxPercent(band);
+    const score = bandThreatScore(band);
     if (score > bestScore) {
       bestScore = score;
       best = { entry, band };
@@ -298,6 +287,13 @@ function livingReserveCount(team: PokemonSnapshot[], excludeActive = true) {
 }
 
 function classProbabilities(prediction: OpponentActionPrediction | undefined) {
+  if (prediction?.replyTiming) {
+    const stayAttack = prediction.replyTiming.status === "pending" ? Math.max(0, prediction.classScores?.stayAttack ?? 0) : 0;
+    const statusOrSetup = prediction.replyTiming.status === "pending" ? Math.max(0, prediction.classScores?.statusOrSetup ?? 0) : 0;
+    const total = stayAttack + statusOrSetup;
+    return total > 0 ? { stayAttack: stayAttack / total, switchOut: 0, statusOrSetup: statusOrSetup / total }
+      : { stayAttack: 0, switchOut: 0, statusOrSetup: 0 };
+  }
   if (prediction?.classScores) {
     const rawStay = Math.max(0.01, Number(prediction.classScores.stayAttack ?? 0));
     const rawSwitch = Math.max(0.01, Number(prediction.classScores.switchOut ?? 0));
@@ -348,12 +344,14 @@ function scoreComponentsForOutput(components: ActionScoreComponent[]) {
 }
 
 export function weightedOpponentReplies(prediction: OpponentActionPrediction | undefined) {
+  if (prediction?.replyTiming && prediction.replyTiming.status !== "pending") return [];
   const combined = [
     ...(prediction?.topActions ?? []),
     ...(prediction?.topSwitchTargets ?? [])
   ];
   const seen = new Set<string>();
   const actions = combined.filter((candidate) => {
+    if (prediction?.replyTiming && candidate.actionClass === "switch") return false;
     const key = `${candidate?.actionClass ?? "unknown"}|${candidate?.moveName ?? ""}|${candidate?.switchTargetSpecies ?? ""}|${candidate?.label ?? ""}`;
     if (seen.has(key)) return false;
     seen.add(key);
@@ -410,9 +408,11 @@ function hazardPressureOnYourSide(snapshot: BattleSnapshot) {
 
 function likelyKoLine(
   band: DamageAssumptionBand | null | undefined,
-  orderRelation: ReturnType<typeof moveOrderRelation>
+  orderRelation: ReturnType<typeof moveOrderRelation>,
+  move: ReturnType<typeof lookupMove>
 ) {
-  return bandCoverageScore(band) === 2 && (orderRelation === "faster" || orderRelation === "priority");
+  return bandKoScore(band) === 2 && (orderRelation === "faster" || orderRelation === "priority")
+    && (move?.accuracy === true || Number(move?.accuracy) >= 100);
 }
 
 function activePreservationValue(params: {
@@ -421,7 +421,7 @@ function activePreservationValue(params: {
   speedPreview?: SpeedPreview | undefined;
 }) {
   const active = params.snapshot.yourSide.active;
-  if (!active) return 0;
+  if (!active || active.fainted || Number(active.hpPercent ?? 100) <= 0) return 0;
   const currentHp = Number(active.hpPercent ?? 100);
   const reserveCount = livingReserveCount(params.snapshot.yourSide.team);
   const bestAttack = summarizeBestDamage(params.playerDamagePreview);
@@ -444,7 +444,7 @@ function activePreservationValue(params: {
   if (params.speedPreview?.activeRelation === "faster") {
     value += 2;
   }
-  if (bestAttack?.band && (bandCoverageScore(bestAttack.band) >= 1 || bandAveragePercent(bestAttack.band) >= 55)) {
+  if (bestAttack?.band && (bandKoScore(bestAttack.band) >= 1 || bandAveragePercent(bestAttack.band) >= 55)) {
     value += 3;
   }
 
@@ -466,7 +466,7 @@ function activeSackTolerance(params: {
   else if (currentHp <= 30) tolerance += 2;
   if (reserveCount >= 3) tolerance += 2;
   if (params.speedPreview?.activeRelation === "slower") tolerance += 2;
-  if (bestAttack?.band && bandCoverageScore(bestAttack.band) === 2) tolerance -= 3;
+  if (bestAttack?.band && bandKoScore(bestAttack.band) === 2) tolerance -= 3;
   return Math.max(0, tolerance);
 }
 
@@ -479,17 +479,15 @@ function activePreservePressure(params: {
 }
 
 function switchFeelsSafe(band: DamageAssumptionBand | null | undefined) {
-  return Boolean(
-    isImmuneOrBlockedBand(band)
-      || (band && band.coverage === "misses_current_hp" && bandMaxPercent(band) <= 50)
-  );
+  return Boolean(band?.immediate?.ko === "no_ko" &&
+    (isImmuneOrBlockedBand(band) || (bandHpLossMax(band) !== null && bandHpLossMax(band)! <= 50)));
+
 }
 
 function switchFeelsGreat(band: DamageAssumptionBand | null | undefined) {
-  return Boolean(
-    isImmuneOrBlockedBand(band)
-      || (band && band.coverage === "misses_current_hp" && bandMaxPercent(band) <= 35)
-  );
+  return Boolean(band?.immediate?.ko === "no_ko" &&
+    (isImmuneOrBlockedBand(band) || (bandHpLossMax(band) !== null && bandHpLossMax(band)! <= 35)));
+
 }
 
 function predictionUncertaintyPenalty(prediction: OpponentActionPrediction | undefined, predictionSensitive: boolean) {
@@ -524,7 +522,7 @@ function moveLineIsTeraSensitive(params: {
   const gen = dataGen(params.snapshot.format);
   const effectiveness = moveEffectivenessAgainstTarget(gen, params.move, params.snapshot.opponentSide.active);
   if (effectiveness !== null && effectiveness !== 1) return true;
-  if (bandCoverageScore(params.likely) >= 1) return true;
+  if (bandKoScore(params.likely) >= 1) return true;
   if (isImmuneOrBlockedBand(params.likely)) return true;
   return false;
 }
@@ -561,6 +559,7 @@ function switchTargetMatchScore(actionTargets: string[], pokemon: PokemonSnapsho
 }
 
 function switchTargetForAction(snapshot: BattleSnapshot, action: LegalAction) {
+  if (snapshot.canonicalEvidence) return snapshot.yourSide.team.find((pokemon) => pokemon.instanceId === action.targetInstanceId && !pokemon.fainted && !pokemon.active) ?? null;
   const actionTargets = normalizedSwitchTargets(action);
   let best: PokemonSnapshot | null = null;
   let bestScore = 0;
@@ -577,11 +576,7 @@ function switchTargetForAction(snapshot: BattleSnapshot, action: LegalAction) {
 }
 
 function damagePreviewForAction(action: LegalAction, previews: DamagePreview[]) {
-  const actionId = normalizeName(action.id);
-  const moveId = normalizeName(action.moveName ?? action.label);
-  return previews.find((entry) => normalizeName(entry.actionId) === actionId)
-    ?? previews.find((entry) => normalizeName(entry.moveName) === moveId)
-    ?? null;
+  return previews.find((entry) => entry.actionId === action.id) ?? null;
 }
 
 function interactionHintLabels(hints: Array<{ label: string }> | null | undefined) {
@@ -607,12 +602,12 @@ function hasSideCondition(conditions: string[], sideCondition: string | null | u
   return (conditions ?? []).some((value) => normalizeName(value) === expected);
 }
 
-function switchThreatSummaryForSpecies(threats: ThreatPreview[], species: string | null | undefined) {
+function switchThreatSummaryForSpecies(threats: ThreatPreview[], species: string | null | undefined, instanceId?: string) {
   const normalizedSpecies = normalizeName(species);
   if (!normalizedSpecies) return [] as Array<{ entry: ThreatPreview; target: ThreatTargetPreview; band: DamageAssumptionBand | null }>;
   return threats
     .map((entry) => {
-      const target = (entry.switchTargets ?? []).find((candidate) => normalizeName(candidate.species) === normalizedSpecies);
+      const target = (entry.switchTargets ?? []).find((candidate) => instanceId ? candidate.instanceId === instanceId : normalizeName(candidate.species) === normalizedSpecies);
       if (!target) return null;
       return {
         entry,
@@ -623,12 +618,12 @@ function switchThreatSummaryForSpecies(threats: ThreatPreview[], species: string
     .filter(Boolean) as Array<{ entry: ThreatPreview; target: ThreatTargetPreview; band: DamageAssumptionBand | null }>;
 }
 
-function bestSwitchThreat(threats: ThreatPreview[], species: string | null | undefined) {
-  const entries = switchThreatSummaryForSpecies(threats, species);
+function bestSwitchThreat(threats: ThreatPreview[], species: string | null | undefined, instanceId?: string) {
+  const entries = switchThreatSummaryForSpecies(threats, species, instanceId);
   let best: { entry: ThreatPreview; target: ThreatTargetPreview; band: DamageAssumptionBand | null } | null = null;
   let bestScore = Number.NEGATIVE_INFINITY;
   for (const candidate of entries) {
-    const score = bandCoverageScore(candidate.band) * 100 + bandAveragePercent(candidate.band) * 2 + bandMaxPercent(candidate.band);
+    const score = bandThreatScore(candidate.band);
     if (score > bestScore) {
       bestScore = score;
       best = candidate;
@@ -637,18 +632,32 @@ function bestSwitchThreat(threats: ThreatPreview[], species: string | null | und
   return best;
 }
 
-function switchThreatForMove(threats: ThreatPreview[], moveName: string | null | undefined, species: string | null | undefined) {
+function switchThreatForMove(threats: ThreatPreview[], moveName: string | null | undefined, species: string | null | undefined, instanceId?: string) {
   const normalizedMove = normalizeName(moveName);
   const normalizedSpecies = normalizeName(species);
   if (!normalizedMove || !normalizedSpecies) return null;
   const threat = threats.find((entry) => normalizeName(entry.moveName) === normalizedMove);
-  const target = threat?.switchTargets?.find((candidate) => normalizeName(candidate.species) === normalizedSpecies);
+  const target = threat?.switchTargets?.find((candidate) => instanceId ? candidate.instanceId === instanceId : normalizeName(candidate.species) === normalizedSpecies);
   if (!threat || !target) return null;
   return {
     entry: threat,
     target,
     band: likelyBand(target.bands)
   };
+}
+
+/** A known weak reply cannot certify safety against another unresolved attack. */
+function switchAttackMatchupsKnown(snapshot: BattleSnapshot, threats: ThreatPreview[], target: PokemonSnapshot) {
+  if (!threats.length) return false;
+  if (!projectSwitchEntry(snapshot, target, "your").damageQualified) return false;
+  const gen = dataGen(snapshot.format);
+  return threats.every((threat) => {
+    const move = lookupMove(gen, threat.moveName);
+    if (move?.category === "Status" || move?.flags.futuremove) return true;
+    const band = switchThreatForMove(threats, threat.moveName, target.species ?? target.displayName, target.instanceId)?.band;
+    return Boolean(band && bandHpLossMax(band) !== null
+      && band.immediate?.ko !== undefined && band.immediate.ko !== "unknown");
+  });
 }
 
 function findOpponentPokemon(snapshot: BattleSnapshot, species: string | null | undefined) {
@@ -672,7 +681,7 @@ function moveEffectivenessAgainstTarget(
 }
 
 function safeIntoThreatBand(band: DamageAssumptionBand | null | undefined) {
-  return !band || isImmuneOrBlockedBand(band) || (band.coverage === "misses_current_hp" && bandMaxPercent(band) <= 45);
+  return Boolean(band?.immediate?.ko === "no_ko" && (isImmuneOrBlockedBand(band) || (bandHpLossMax(band) !== null && bandHpLossMax(band)! <= 45)));
 }
 
 type ProjectedBranchState = {
@@ -763,11 +772,12 @@ function searchContributionForMove(params: {
   const gen = dataGen(params.snapshot.format);
   const move = lookupMove(gen, params.action.moveName ?? params.action.label);
   const preview = damagePreviewForAction(params.action, params.playerDamagePreview);
-  const likely = likelyBand(preview?.bands);
+  const delayed = Boolean(move?.flags.futuremove);
+  const likely = delayed ? null : likelyBand(preview?.bands);
   const bestThreat = summarizeBestThreat(params.opponentThreatPreview);
   const bestThreatBand = bestThreat?.band ?? null;
   const priority = Number(move?.priority ?? 0);
-  const orderRelation = moveOrderRelation(params.snapshot, params.speedPreview, priority);
+  const orderRelation = delayed ? "unknown" : moveOrderRelation(params.snapshot, params.speedPreview, priority);
   const { hazardMove, hazardRemovalMove, pivotMove, recoveryMove, setupMove, targetedStatusMove } = moveRole(move);
   const existingHazard = hasSideCondition(params.snapshot.field.opponentSideConditions, String(move?.sideCondition ?? ""));
   const immediatePressure = bandAveragePercent(likely);
@@ -780,7 +790,7 @@ function searchContributionForMove(params: {
   const reserveCount = livingReserveCount(params.snapshot.yourSide.team);
   const opponentReserveCount = livingReserveCount(params.snapshot.opponentSide.team);
   const endgameSetupWindow = setupMove && activeHp >= 55 && reserveCount <= 2;
-  const cleanKo = likelyKoLine(likely, orderRelation);
+  const cleanKo = likelyKoLine(likely, orderRelation, move);
   const searchReasons: string[] = [];
   const searchRisks: string[] = [];
   let punishedLikelySwitchTarget = false;
@@ -801,14 +811,17 @@ function searchContributionForMove(params: {
     if (reply.candidate.actionClass === "stay_attack") {
       const specificThreat = summarizeThreatForMove(params.opponentThreatPreview, reply.candidate.moveName);
       const replyThreatBand = specificThreat?.band ?? bestThreatBand;
-      const projectedEnemyDamage = cleanKo && (orderRelation === "faster" || orderRelation === "priority")
-        ? 0
-        : bandAveragePercent(replyThreatBand);
-      const projectedHpSwing = (cleanKo ? 100 : immediatePressure) - projectedEnemyDamage;
-      const projectedTempoGain = (
+      const projectedEnemyDamage = cleanKo ? 0 : bandHpLossMax(replyThreatBand);
+      const projectedOwnDamage = delayed || move?.category === "Status" ? 0 : bandHpLossMin(likely) ?? 0;
+      // Conservative supported bounds, never a midpoint of unweighted survival
+      // alternatives. Zero is also a conservative lower bound for unresolved
+      // outgoing loss; unknown incoming loss cannot create favorable HP swing.
+      const projectedHpSwing = projectedEnemyDamage !== null
+        ? projectedOwnDamage - projectedEnemyDamage : Number.NaN;
+      const projectedTempoGain = delayed ? 0 : (
         (orderRelation === "faster" || orderRelation === "priority" ? 4 : orderRelation === "overlap" ? 1 : -3)
         + (pivotMove ? 2 : 0)
-        - (replyThreatBand?.coverage === "covers_current_hp" ? 2 : 0)
+        - (replyThreatBand?.immediate?.ko === "all_rolls" ? 2 : 0)
       );
       if (cleanKo) {
         branchScore += 18;
@@ -821,23 +834,23 @@ function searchContributionForMove(params: {
       }
 
       if ((hazardMove || hazardRemovalMove || setupMove || recoveryMove) && replyThreatBand) {
-        if (replyThreatBand.coverage === "covers_current_hp" && orderRelation !== "faster" && orderRelation !== "priority") {
+        if (replyThreatBand.immediate?.ko === "all_rolls" && orderRelation !== "faster" && orderRelation !== "priority") {
           branchScore -= 18;
           punishedSpecificStayAttack = true;
-        } else if (replyThreatBand.coverage === "can_cover_current_hp" && orderRelation !== "faster" && orderRelation !== "priority") {
+        } else if (replyThreatBand.immediate?.ko === "some_rolls" && orderRelation !== "faster" && orderRelation !== "priority") {
           branchScore -= 10;
           punishedSpecificStayAttack = true;
         }
       }
 
-      if (preservePressure > 0 && reserveCount > 0 && !likelyKoLine(likely, orderRelation) && !pivotMove) {
-        if (replyThreatBand?.coverage === "covers_current_hp") {
+      if (preservePressure > 0 && reserveCount > 0 && !likelyKoLine(likely, orderRelation, move) && !pivotMove) {
+        if (replyThreatBand?.immediate?.ko === "all_rolls") {
           const penalty = recoveryMove && orderRelation === "faster"
             ? Math.max(0, 4 + preservePressure * 0.4)
             : 6 + preservePressure * 1.2;
           branchScore -= penalty;
           preserveRisk = true;
-        } else if (replyThreatBand?.coverage === "can_cover_current_hp" && activeHp <= 45 && !recoveryMove) {
+        } else if (replyThreatBand?.immediate?.ko === "some_rolls" && activeHp <= 45 && !recoveryMove) {
           branchScore -= 3 + preservePressure * 0.8;
           preserveRisk = true;
         } else if (recoveryMove && activeHp <= 45) {
@@ -855,10 +868,10 @@ function searchContributionForMove(params: {
         tempoGain: projectedTempoGain,
         cleanKo: cleanKo && safeIntoThreatBand(replyThreatBand),
         safeSetup: endgameSetupWindow && safeIntoThreatBand(replyThreatBand),
-        preserveActive: recoveryMove && activeHp <= 45 && replyThreatBand?.coverage !== "covers_current_hp",
+        preserveActive: recoveryMove && activeHp <= 45 && safeIntoThreatBand(replyThreatBand),
         activeStillPressured: preservePressure > 0 && !cleanKo && !pivotMove && (
-          replyThreatBand?.coverage === "covers_current_hp"
-          || (replyThreatBand?.coverage === "can_cover_current_hp" && activeHp <= 45 && !recoveryMove)
+          replyThreatBand?.immediate?.ko === "all_rolls"
+          || (replyThreatBand?.immediate?.ko === "some_rolls" && activeHp <= 45 && !recoveryMove)
         ),
         establishHazard: hazardMove && !existingHazard,
         removeHazards: hazardRemovalMove && hazardPressureOnYourSide(params.snapshot) > 0 && safeIntoThreatBand(replyThreatBand)
@@ -878,11 +891,9 @@ function searchContributionForMove(params: {
       }
     } else if (reply.candidate.actionClass === "switch") {
       const switchPreview = damagePreviewForAction(params.action, reply.candidate.switchTargetPlayerPreview ?? []);
-      const switchBand = likelyBand(switchPreview?.bands);
+      const switchBand = delayed ? null : likelyBand(switchPreview?.bands);
       const switchHintLabels = interactionHintLabels(switchPreview?.interactionHints);
-      const switchPunishDamage = switchBand
-        ? bandAveragePercent(switchBand)
-        : 0;
+      const switchPunishDamage = bandHpLossMin(switchBand) ?? Number.NaN;
       const projectedTempoGain = (pivotMove ? 4 : 0) + (hazardMove && !existingHazard ? 1 : 0) + (setupMove ? 2 : 0);
 
       if (switchBand) {
@@ -896,20 +907,20 @@ function searchContributionForMove(params: {
           branchScore -= 12;
           punishedLikelySwitchTarget = true;
           for (const label of switchHintLabels) possibleSwitchNullifierLabels.add(label);
-        } else if (switchBand.coverage === "misses_current_hp" && bandMaxPercent(switchBand) <= 25) {
+        } else if (switchBand.immediate?.ko === "no_ko" && bandHpLossMax(switchBand) !== null && bandHpLossMax(switchBand)! <= 25) {
           branchScore -= 18;
           punishedLikelySwitchTarget = true;
-        } else if (switchBand.coverage === "misses_current_hp" && bandMaxPercent(switchBand) <= 45) {
+        } else if (switchBand.immediate?.ko === "no_ko" && bandHpLossMax(switchBand) !== null && bandHpLossMax(switchBand)! <= 45) {
           branchScore -= 10;
           punishedLikelySwitchTarget = true;
-        } else if (switchBand.coverage === "covers_current_hp" || bandAveragePercent(switchBand) >= 65) {
+        } else if (switchBand.immediate?.ko === "all_rolls" || bandAveragePercent(switchBand) >= 65) {
           branchScore += 12;
           rewardedLikelySwitchPunish = true;
-        } else if (switchBand.coverage === "can_cover_current_hp" || bandAveragePercent(switchBand) >= 35) {
+        } else if (switchBand.immediate?.ko === "some_rolls" || bandAveragePercent(switchBand) >= 35) {
           branchScore += 6;
           rewardedLikelySwitchPunish = true;
         }
-      } else {
+      } else if (!delayed) {
         const switchTarget = findOpponentPokemon(params.snapshot, reply.candidate.switchTargetSpecies);
         const effectiveness = moveEffectivenessAgainstTarget(gen, move, switchTarget);
         if (effectiveness !== null && effectiveness <= 0) {
@@ -962,11 +973,11 @@ function searchContributionForMove(params: {
       }
     } else if (reply.candidate.actionClass === "status_or_setup") {
       const projectedTempoGain = (
-        (bandCoverageScore(likely) >= 1 || immediatePressure >= 50 ? 2 : 0)
+        (bandKoScore(likely) >= 1 || immediatePressure >= 50 ? 2 : 0)
         + (setupMove ? 2 : 0)
         + (hazardMove && !existingHazard ? 1 : 0)
       );
-      if (bandCoverageScore(likely) >= 1 || immediatePressure >= 50) {
+      if (bandKoScore(likely) >= 1 || immediatePressure >= 50) {
         branchScore += 10;
       }
       if (setupMove) {
@@ -977,7 +988,7 @@ function searchContributionForMove(params: {
       }
 
       const branchState = makeProjectedBranchState({
-        hpSwingPercent: immediatePressure * 0.4,
+        hpSwingPercent: bandHpLossMin(likely) ?? Number.NaN,
         tempoGain: projectedTempoGain,
         safeSetup: endgameSetupWindow && safeIntoThreatBand(bestThreatBand),
         establishHazard: hazardMove && !existingHazard
@@ -1064,11 +1075,13 @@ function searchContributionForSwitch(params: {
   const replies = weightedOpponentReplies(params.opponentActionPrediction);
   const target = switchTargetForAction(params.snapshot, params.action);
   if (replies.length === 0 || !target) return { score: 0, reasons: [] as string[], riskFlags: [] as string[] };
-
-  const bestIntoSwitch = bestSwitchThreat(params.opponentThreatPreview, target.species ?? target.displayName);
-  const switchBand = bestIntoSwitch?.band ?? null;
   const hazardInfo = estimateSwitchEntryHazards(params.snapshot, target);
-  const switchRelation = bestIntoSwitch?.target?.relation ?? "unknown";
+  if (hazardInfo.fainted) return { score: 0, reasons: [], riskFlags: ["entry hazards KO this switch target before any reply"] };
+
+  const bestIntoSwitch = bestSwitchThreat(params.opponentThreatPreview, target.species ?? target.displayName, target.instanceId);
+  const switchBand = hazardInfo.damageQualified ? bestIntoSwitch?.band ?? null : null;
+  const matchupsKnown = switchAttackMatchupsKnown(params.snapshot, params.opponentThreatPreview, target);
+  const switchRelation = hazardInfo.speedCertain ? bestIntoSwitch?.target?.relation ?? "unknown" : "unknown";
   const preservePressure = activePreservePressure({
     snapshot: params.snapshot,
     playerDamagePreview: params.playerDamagePreview,
@@ -1079,7 +1092,7 @@ function searchContributionForSwitch(params: {
   const opponentReserveCount = livingReserveCount(params.snapshot.opponentSide.team);
   const searchReasons: string[] = [];
   const searchRisks: string[] = [];
-  let matchedSpecificMove = false;
+  let matchedSafeSpecificMove = false;
   let specificMovePunish = false;
   let preserveReward = false;
   let expectedScore = 0;
@@ -1090,43 +1103,47 @@ function searchContributionForSwitch(params: {
       const specificThreat = switchThreatForMove(
         params.opponentThreatPreview,
         reply.candidate.moveName,
-        target.species ?? target.displayName
+        target.species ?? target.displayName, target.instanceId
       );
-      const replyBand = specificThreat?.band ?? switchBand;
-      const projectedEnemyDamage = bandAveragePercent(replyBand) + hazardInfo.damagePercent;
-      const projectedTempoGain = (switchFeelsSafe(replyBand) ? 3 : -2) + (switchRelation === "faster" ? 2 : switchRelation === "slower" ? -1 : 0);
-      if (specificThreat) matchedSpecificMove = true;
+      const replyBand = specificThreat ? specificThreat.band : switchBand;
+      // Missing immediate outcome cannot establish a favorable HP swing or matchup.
+      if (hazardInfo.damageQualified && replyBand && bandHpLossMax(replyBand) !== null
+        && replyBand.immediate?.ko !== "unknown") {
+        const projectedEnemyDamage = bandHpLossMax(replyBand)! + hazardInfo.damagePercent;
+        const projectedTempoGain = (switchFeelsSafe(replyBand) ? 3 : -2) + (switchRelation === "faster" ? 2 : switchRelation === "slower" ? -1 : 0);
+        if (specificThreat && switchFeelsSafe(replyBand)) matchedSafeSpecificMove = true;
 
-      if (switchFeelsGreat(replyBand)) {
-        branchScore += 18;
-      } else if (switchFeelsSafe(replyBand)) {
-        branchScore += 10;
-      } else if (replyBand?.coverage === "can_cover_current_hp") {
-        branchScore -= 10;
-        if (specificThreat) specificMovePunish = true;
-      } else if (replyBand?.coverage === "covers_current_hp") {
-        branchScore -= 18;
-        if (specificThreat) specificMovePunish = true;
+        if (switchFeelsGreat(replyBand)) {
+          branchScore += 18;
+        } else if (switchFeelsSafe(replyBand)) {
+          branchScore += 10;
+        } else if (replyBand?.immediate?.ko === "some_rolls") {
+          branchScore -= 10;
+          if (specificThreat) specificMovePunish = true;
+        } else if (replyBand?.immediate?.ko === "all_rolls") {
+          branchScore -= 18;
+          if (specificThreat) specificMovePunish = true;
+        }
+
+        if (preservePressure > 0 && reserveCount > 0 && switchFeelsSafe(replyBand)) {
+          branchScore += 4 + preservePressure * 1.1;
+          preserveReward = true;
+        }
+
+        const branchState = makeProjectedBranchState({
+          hpSwingPercent: -projectedEnemyDamage,
+          tempoGain: projectedTempoGain,
+          preserveActive: preservePressure > 0 && reserveCount > 0 && switchFeelsSafe(replyBand),
+          activeStillPressured: !switchFeelsSafe(replyBand) && (replyBand?.immediate?.ko === "all_rolls" || replyBand?.immediate?.ko === "some_rolls")
+        });
+        const boardValueDelta = projectedBoardValueDelta({
+          snapshot: params.snapshot,
+          yourReserveCount: reserveCount,
+          opponentReserveCount,
+          state: branchState
+        });
+        branchScore += boardValueDelta;
       }
-
-      if (preservePressure > 0 && reserveCount > 0 && switchFeelsSafe(replyBand)) {
-        branchScore += 4 + preservePressure * 1.1;
-        preserveReward = true;
-      }
-
-      const branchState = makeProjectedBranchState({
-        hpSwingPercent: -projectedEnemyDamage,
-        tempoGain: projectedTempoGain,
-        preserveActive: preservePressure > 0 && reserveCount > 0 && switchFeelsSafe(replyBand),
-        activeStillPressured: !switchFeelsSafe(replyBand) && (replyBand?.coverage === "covers_current_hp" || replyBand?.coverage === "can_cover_current_hp")
-      });
-      const boardValueDelta = projectedBoardValueDelta({
-        snapshot: params.snapshot,
-        yourReserveCount: reserveCount,
-        opponentReserveCount,
-        state: branchState
-      });
-      branchScore += boardValueDelta;
     } else if (reply.candidate.actionClass === "switch") {
       branchScore -= 10;
       if (hazardsPunishOpponentSwitches(params.snapshot)) {
@@ -1184,19 +1201,19 @@ function searchContributionForSwitch(params: {
   }
 
   const rounded = Number(expectedScore.toFixed(1));
-  if (matchedSpecificMove && !specificMovePunish) {
+  if (matchupsKnown && matchedSafeSpecificMove && !specificMovePunish) {
     searchReasons.push("lines up well into their top attacking move");
   }
   if (specificMovePunish) {
     searchRisks.push("their top attacking move still pressures this switch");
   }
-  if (preserveReward) {
+  if (matchupsKnown && preserveReward) {
     searchReasons.push("preserves a pressured active across likely replies");
   }
 
-  if (rounded >= 6) {
+  if (matchupsKnown && rounded >= 6) {
     searchReasons.push("best against the opponent's likely reply tree");
-  } else if (rounded >= 3) {
+  } else if (matchupsKnown && rounded >= 3) {
     searchReasons.push("still gains value across common replies");
   } else if (rounded <= -6) {
     searchRisks.push("reply-aware check dislikes this switch");
@@ -1231,6 +1248,7 @@ function applyReplyAwareSearch(params: {
   opponentThreatPreview: ThreatPreview[];
   speedPreview?: SpeedPreview | undefined;
   opponentActionPrediction?: OpponentActionPrediction | undefined;
+  teraContext?: { snapshot: BattleSnapshot; opponentThreatPreview: ThreatPreview[] } | undefined;
 }) {
   const topActionIds = selectReplyAwareSearchActionIds(params.candidates);
   const actionById = new Map(params.legalActions.map((action) => [action.id, action]));
@@ -1242,21 +1260,23 @@ function applyReplyAwareSearch(params: {
 
     const action = actionById.get(candidate.actionId);
     if (!action) return candidate;
+    const context = action.terastallize ? params.teraContext! : params;
+    const damagePreviews = params.playerDamagePreview.filter((preview) => Boolean(preview.terastallize) === Boolean(action.terastallize));
 
     const searchContribution = candidate.kind === "switch"
       ? searchContributionForSwitch({
           snapshot: params.snapshot,
           action,
           opponentThreatPreview: params.opponentThreatPreview,
-          playerDamagePreview: params.playerDamagePreview,
+          playerDamagePreview: params.playerDamagePreview.filter((preview) => !preview.terastallize),
           speedPreview: params.speedPreview,
           opponentActionPrediction: params.opponentActionPrediction
         })
       : searchContributionForMove({
-          snapshot: params.snapshot,
+          snapshot: context.snapshot,
           action,
-          playerDamagePreview: params.playerDamagePreview,
-          opponentThreatPreview: params.opponentThreatPreview,
+          playerDamagePreview: damagePreviews,
+          opponentThreatPreview: context.opponentThreatPreview,
           speedPreview: params.speedPreview,
           opponentActionPrediction: params.opponentActionPrediction
         });
@@ -1266,7 +1286,9 @@ function applyReplyAwareSearch(params: {
     }
 
     const nextBreakdown = [...(candidate.scoreBreakdown ?? []).filter((entry) => entry.key !== "search")];
-    pushScoreComponent(nextBreakdown, "search", "Reply-aware search", searchContribution.score);
+    const switchTarget = candidate.kind === "switch" ? switchTargetForAction(params.snapshot, action) : null;
+    const conditionalSwitch = switchTarget && !switchAttackMatchupsKnown(params.snapshot, params.opponentThreatPreview, switchTarget);
+    pushScoreComponent(nextBreakdown, "search", conditionalSwitch ? "Conditional reply-aware search (conditional on hit)" : "Reply-aware search (conditional on hit)", searchContribution.score);
 
     return {
       ...candidate,
@@ -1304,12 +1326,34 @@ function buildMoveCandidate(params: {
   const gen = dataGen(params.snapshot.format);
   const opponentCanSwitch = livingReserveCount(params.snapshot.opponentSide.team) > 0;
   const move = lookupMove(gen, params.action.moveName ?? params.action.label);
+  const delayed = params.preview?.delayed ?? buildDelayedDamagePreview(params.snapshot, move?.name ?? params.action.label, params.snapshot.opponentSide.slot === "p1" ? "p1" : "p2", []);
+  if (delayed) {
+    const pressure = delayed.scheduling === "clear" ? Math.min(12, bandAveragePercent(likelyBand(delayed.bands)) * 0.12) : 0;
+    const threat = summarizeBestThreat(params.opponentThreatPreview)?.band;
+    const riskFlags = ["zero immediate damage; the opponent still takes its ordinary action", "recipient at impact and caster state may change"];
+    let risk = delayed.scheduling === "occupied" ? -60 : delayed.scheduling === "unknown" ? -8 : 0;
+    if (delayed.scheduling === "occupied") riskFlags.unshift("target slot already has a pending attack; another cast fails");
+    if (delayed.scheduling === "unknown") riskFlags.unshift("scheduling is unknown from this capture");
+    if (threat?.immediate?.ko === "all_rolls" || threat?.immediate?.ko === "some_rolls") {
+      risk -= threat.immediate?.ko === "all_rolls" ? 26 : 14;
+      riskFlags.push("the current ordinary reply can still KO before the delayed impact");
+    }
+    if (params.action.terastallize) { risk -= 8; riskFlags.push("spends your team's once-per-battle Terastallization"); }
+    if (params.action.disabled) { risk -= 100; riskFlags.unshift("move is currently disabled"); }
+    const breakdown: ActionScoreComponent[] = [];
+    pushScoreComponent(breakdown, "delayed", "Conditional delayed pressure (heuristic; capped at 12)", pressure);
+    pushScoreComponent(breakdown, "risk", "Scheduling and immediate reply risk", risk);
+    return { actionId: params.action.id, kind: params.action.kind, label: params.action.label, moveName: params.action.moveName ?? move?.name,
+      score: clampScore(10 + pressure + risk), reasons: pressure > 0 ? ["conditional pressure at the end of a later turn"] : [],
+      riskFlags: uniqueStrings(riskFlags).slice(0, 4), scoreBreakdown: scoreComponentsForOutput(breakdown) };
+  }
   const likely = likelyBand(params.preview?.bands);
   const bestThreat = summarizeBestThreat(params.opponentThreatPreview);
   const bestThreatBand = bestThreat?.band ?? null;
   const classProb = classProbabilities(params.opponentActionPrediction);
   const reasons: string[] = [];
   const riskFlags: string[] = [];
+  if (likely?.immediate.note && (likely.immediate.ko === "conditional" || likely.immediate.ko === "unknown" || likely.immediate.ko === "no_ko")) riskFlags.push(likely.immediate.note);
   const priority = Number(move?.priority ?? 0);
   const orderRelation = moveOrderRelation(params.snapshot, params.speedPreview, priority);
   const { hazardMove, hazardRemovalMove, pivotMove, recoveryMove, setupMove, targetedStatusMove } = moveRole(move);
@@ -1332,6 +1376,13 @@ function buildMoveCandidate(params: {
   let hazardScore = 0;
   let riskScore = 0;
 
+  if (params.action.terastallize) {
+    // Transparent, uncalibrated resource cost; immediate offensive and defensive
+    // gains are evaluated separately against the projected board.
+    riskScore -= 8;
+    riskFlags.push("spends your team's once-per-battle Terastallization");
+  }
+
   if (params.action.disabled) {
     riskScore -= 100;
     riskFlags.push("move is currently disabled");
@@ -1348,18 +1399,18 @@ function buildMoveCandidate(params: {
       }
     } else {
       const avgPercent = bandAveragePercent(likely);
-      const coverage = bandCoverageScore(likely);
+      const koScore = bandKoScore(likely);
       tacticalScore += avgPercent * 0.48;
-      tacticalScore += coverage === 2 ? 38 : coverage === 1 ? 20 : 0;
+      tacticalScore += koScore === 2 ? 38 : koScore === 1 ? 20 : 0;
 
-      if (coverage === 2 && orderRelation === "faster") {
+      if (koScore === 2 && orderRelation === "faster") {
         reasons.push("faster and can KO");
-      } else if (coverage === 2 && orderRelation === "priority") {
+      } else if (koScore === 2 && orderRelation === "priority") {
         reasons.push("priority gives a clean KO line");
-      } else if (coverage === 1 && (orderRelation === "faster" || orderRelation === "priority")) {
+      } else if (koScore === 1 && (orderRelation === "faster" || orderRelation === "priority")) {
         reasons.push("faster and has a KO roll");
       } else if (avgPercent >= 55) {
-        reasons.push("strong immediate damage");
+        reasons.push("strong raw damage pressure");
       }
 
       if (params.preview.likelyBandSource && params.preview.likelyBandSource !== "calc") {
@@ -1406,10 +1457,10 @@ function buildMoveCandidate(params: {
   }
 
   if (bestThreatBand && (orderRelation === "slower" || orderRelation === "overlap" || orderRelation === "unknown")) {
-    if (bestThreatBand.coverage === "covers_current_hp") {
+    if (bestThreatBand.immediate?.ko === "all_rolls") {
       riskScore -= 26;
       riskFlags.push("opponent can KO before or during this line");
-    } else if (bestThreatBand.coverage === "can_cover_current_hp") {
+    } else if (bestThreatBand.immediate?.ko === "some_rolls") {
       riskScore -= 14;
       riskFlags.push("opponent has a live punish roll");
     }
@@ -1459,7 +1510,7 @@ function buildMoveCandidate(params: {
       hazardScore -= 8;
       riskFlags.push("hazard removal is low value with no hazards up");
     }
-    if (bestThreatBand?.coverage === "covers_current_hp" && orderRelation !== "faster" && orderRelation !== "priority") {
+    if (bestThreatBand?.immediate?.ko === "all_rolls" && orderRelation !== "faster" && orderRelation !== "priority") {
       hazardScore -= 10;
       riskFlags.push("removal line can be punished before it pays off");
     }
@@ -1470,7 +1521,8 @@ function buildMoveCandidate(params: {
 
   if (setupMove) {
     boardScore += 6;
-    const safeBoard = !bestThreatBand || (bestThreatBand.coverage === "misses_current_hp" && bandMaxPercent(bestThreatBand) <= 45);
+    const safeBoard = params.opponentThreatPreview.length > 0 && params.opponentThreatPreview.every((entry) =>
+      safeIntoThreatBand(likelyBand(entry.currentTarget.bands)));
     if (safeBoard) {
       boardScore += 12;
       reasons.push("safe enough board to set up");
@@ -1495,7 +1547,7 @@ function buildMoveCandidate(params: {
       preserveScore -= 4;
     }
     predictionScore += (1 - classProb.stayAttack) * 6;
-    if (bestThreatBand?.coverage === "covers_current_hp" && orderRelation !== "faster" && orderRelation !== "priority") {
+    if (bestThreatBand?.immediate?.ko === "all_rolls" && orderRelation !== "faster" && orderRelation !== "priority") {
       preserveScore -= 14;
       riskFlags.push("recovery can still be punished immediately");
     }
@@ -1530,8 +1582,8 @@ function buildMoveCandidate(params: {
     }
   }
 
-  const hasForcedKo = likelyKoLine(likely, orderRelation);
-  if (bestThreatBand && (bestThreatBand.coverage === "covers_current_hp" || bestThreatBand.coverage === "can_cover_current_hp") && !hasForcedKo) {
+  const hasForcedKo = likelyKoLine(likely, orderRelation, move);
+  if (bestThreatBand && (bestThreatBand.immediate?.ko === "all_rolls" || bestThreatBand.immediate?.ko === "some_rolls") && !hasForcedKo) {
     const preservePenalty = Math.max(0, preserveValue * 0.9 - sackTolerance);
     preserveScore -= preservePenalty;
     if (preservePenalty >= 4) {
@@ -1606,14 +1658,19 @@ function buildSwitchCandidate(params: {
   const target = switchTargetForAction(params.snapshot, params.action);
   if (!target) return null;
 
-  const bestActiveAttack = summarizeBestDamage(params.playerDamagePreview);
-  const bestActiveThreat = summarizeBestThreat(params.opponentThreatPreview);
-  const bestIntoSwitch = bestSwitchThreat(params.opponentThreatPreview, target.species ?? target.displayName);
-  const switchBand = bestIntoSwitch?.band ?? null;
-  const classProb = classProbabilities(params.opponentActionPrediction);
+  const active = params.snapshot.yourSide.active;
+  const canPreserveActive = Boolean(active && !active.fainted && Number(active.hpPercent ?? 100) > 0);
+  const timing = params.opponentActionPrediction?.replyTiming;
+  const bestActiveAttack = canPreserveActive && !timing ? summarizeBestDamage(params.playerDamagePreview) : null;
+  const bestActiveThreat = canPreserveActive && !timing ? summarizeBestThreat(params.opponentThreatPreview) : null;
   const hazardInfo = estimateSwitchEntryHazards(params.snapshot, target);
+  const bestIntoSwitch = bestSwitchThreat(params.opponentThreatPreview, target.species ?? target.displayName, target.instanceId);
+  const switchBand = hazardInfo.damageQualified ? bestIntoSwitch?.band ?? null : null;
+  const matchupsKnown = switchAttackMatchupsKnown(params.snapshot, params.opponentThreatPreview, target);
+  const safeSwitchBand = matchupsKnown ? switchBand : null;
+  const classProb = classProbabilities(params.opponentActionPrediction);
   const currentThreatBand = bestActiveThreat?.band ?? null;
-  const switchRelation = params.speedPreview?.switchMatchups?.find((entry) => normalizeName(entry.species) === normalizeName(target.species ?? target.displayName))?.relation ?? "unknown";
+  const switchRelation = hazardInfo.speedCertain ? params.speedPreview?.switchMatchups?.find((entry) => target.instanceId ? entry.instanceId === target.instanceId : normalizeName(entry.species) === normalizeName(target.species ?? target.displayName))?.relation ?? "unknown" : "unknown";
   const preserveValue = activePreservationValue({
     snapshot: params.snapshot,
     playerDamagePreview: params.playerDamagePreview,
@@ -1625,7 +1682,10 @@ function buildSwitchCandidate(params: {
     speedPreview: params.speedPreview
   });
   const reasons: string[] = [];
-  const riskFlags: string[] = [];
+  const riskFlags: string[] = params.action.uncertainLegal
+    ? ["hidden trapping may block this switch; attempting it cannot be undone"]
+    : [];
+  if (!matchupsKnown) riskFlags.unshift("one or more incoming attacking matchups are unknown; reply value is conditional");
   const breakdown: ActionScoreComponent[] = [];
   let baseScore = 12;
   let tacticalScore = 0;
@@ -1635,41 +1695,41 @@ function buildSwitchCandidate(params: {
   let hazardScore = 0;
   let riskScore = 0;
 
-  if (bestActiveAttack?.band && bandCoverageScore(bestActiveAttack.band) === 2) {
+  if (bestActiveAttack?.band && bandKoScore(bestActiveAttack.band) === 2) {
     tacticalScore -= 16;
     riskFlags.push("switching gives up a clean attacking line");
-  } else if (bestActiveAttack?.band && bandCoverageScore(bestActiveAttack.band) === 1) {
+  } else if (bestActiveAttack?.band && bandKoScore(bestActiveAttack.band) === 1) {
     tacticalScore -= 8;
   }
 
-  if (currentThreatBand && (currentThreatBand.coverage === "covers_current_hp" || currentThreatBand.coverage === "can_cover_current_hp")) {
-    if (!switchBand || switchFeelsSafe(switchBand)) {
-      preserveScore += currentThreatBand.coverage === "covers_current_hp" ? 30 : 20;
+  if (currentThreatBand && (currentThreatBand.immediate?.ko === "all_rolls" || currentThreatBand.immediate?.ko === "some_rolls")) {
+    if ((matchupsKnown && hazardInfo.hpCertain && !hazardInfo.fainted && !bestIntoSwitch) || switchFeelsSafe(safeSwitchBand)) {
+      preserveScore += currentThreatBand.immediate?.ko === "all_rolls" ? 30 : 20;
       predictionScore += 12 * classProb.stayAttack;
       reasons.push("safer than the obvious stay line");
     }
   }
 
   if (!switchBand) {
-    tacticalScore += 10;
-  } else if (isImmuneOrBlockedBand(switchBand)) {
+    if (matchupsKnown && hazardInfo.hpCertain && !hazardInfo.fainted && !bestIntoSwitch) tacticalScore += 10;
+  } else if (matchupsKnown && isImmuneOrBlockedBand(switchBand)) {
     tacticalScore += 28;
-    reasons.push("obvious immunity on the likely line");
-  } else if (switchBand.coverage === "misses_current_hp" && bandMaxPercent(switchBand) <= 35) {
+    reasons.push(timing && timing.status !== "pending" ? "immunity in the conditional matchup" : "obvious immunity on the likely line");
+  } else if (matchupsKnown && switchBand.immediate?.ko === "no_ko" && bandHpLossMax(switchBand) !== null && bandHpLossMax(switchBand)! <= 35) {
     tacticalScore += 22;
-    reasons.push("switch target absorbs the likely attack");
-  } else if (switchBand.coverage === "misses_current_hp" && bandMaxPercent(switchBand) <= 50) {
+    reasons.push(timing && timing.status !== "pending" ? "favorable conditional defensive matchup" : "switch target absorbs the likely attack");
+  } else if (matchupsKnown && switchBand.immediate?.ko === "no_ko" && bandHpLossMax(switchBand) !== null && bandHpLossMax(switchBand)! <= 50) {
     tacticalScore += 10;
-    reasons.push("safer than staying");
-  } else if (switchBand.coverage === "can_cover_current_hp") {
+    reasons.push(timing ? "limits the conditional damage forecast" : canPreserveActive ? "safer than staying" : "switch target limits the likely damage");
+  } else if (switchBand.immediate?.ko === "some_rolls") {
     riskScore -= 12;
-    riskFlags.push("switch target still takes a heavy hit");
-  } else if (switchBand.coverage === "covers_current_hp") {
+    riskFlags.push(timing && timing.status !== "pending" ? "conditional forecast includes a heavy hit" : "switch target still takes a heavy hit");
+  } else if (switchBand.immediate?.ko === "all_rolls") {
     riskScore -= 24;
-    riskFlags.push("switch target can still be broken immediately");
+    riskFlags.push(timing && timing.status !== "pending" ? "conditional forecast can KO this target" : "switch target can still be broken immediately");
   }
 
-  if (bestIntoSwitch?.target?.likelyBandSource && bestIntoSwitch.target.likelyBandSource !== "calc" && switchFeelsSafe(switchBand)) {
+  if (bestIntoSwitch?.target?.likelyBandSource && bestIntoSwitch.target.likelyBandSource !== "calc" && switchFeelsSafe(safeSwitchBand)) {
     tacticalScore += 3;
     reasons.push("covers hidden threat range");
   }
@@ -1691,17 +1751,17 @@ function buildSwitchCandidate(params: {
 
   if (switchRelation === "faster") {
     boardScore += 6;
-    reasons.push("faster after switching");
+    reasons.push(timing ? "faster in a later exchange; does not stop a queued action" : "faster after switching");
   } else if (switchRelation === "overlap") {
     riskFlags.push("speed still overlaps after the switch");
   } else if (switchRelation === "slower") {
     boardScore -= 4;
   }
 
-  if (switchFeelsGreat(switchBand)) {
+  if (switchFeelsGreat(safeSwitchBand)) {
     predictionScore += 10 * classProb.stayAttack;
   }
-  if (switchFeelsSafe(switchBand)) {
+  if (switchFeelsSafe(safeSwitchBand)) {
     predictionScore -= 8 * classProb.switchOut;
     if (classProb.switchOut >= 0.4) {
       riskFlags.push("hard switch can lose tempo into a likely opposing switch");
@@ -1709,19 +1769,19 @@ function buildSwitchCandidate(params: {
   }
 
   const preserveBonus = Math.max(0, preserveValue - sackTolerance) * 0.9;
-  if (switchFeelsSafe(switchBand) && preserveBonus > 0) {
+  if (switchFeelsSafe(safeSwitchBand) && preserveBonus > 0) {
     preserveScore += preserveBonus;
     if (preserveBonus >= 5) {
       reasons.push("preserves a still-useful active");
     }
   }
-  if ((params.snapshot.yourSide.active?.hpPercent ?? 100) <= 35) {
+  if (canPreserveActive && (active?.hpPercent ?? 100) <= 35) {
     preserveScore += 8;
     reasons.push("preserves win condition");
   }
 
   if (lateTurn(params.snapshot)) {
-    if ((params.snapshot.yourSide.active?.hpPercent ?? 100) <= 50) {
+    if (canPreserveActive && (active?.hpPercent ?? 100) <= 50) {
       preserveScore += 8;
       reasons.push("late-game preservation still matters");
     }
@@ -1731,6 +1791,15 @@ function buildSwitchCandidate(params: {
     }
   }
 
+  if (hazardInfo.fainted) {
+    tacticalScore = 0; boardScore = 0; predictionScore = 0; preserveScore = 0;
+    riskScore -= 100;
+    reasons.length = 0;
+    riskFlags.unshift("entry hazards KO this switch target before any reply");
+  }
+  if (!hazardInfo.fainted && !hazardInfo.damageQualified) riskFlags.unshift(...hazardInfo.notes.filter((note) => /entry form/i.test(note)));
+  else if (!hazardInfo.hpCertain || !hazardInfo.speedCertain) riskFlags.unshift("entry forecast is conditional on unresolved protection or exact HP");
+
   const predictionPenalty = predictionUncertaintyPenalty(params.opponentActionPrediction, true);
   const teraPenalty = teraUncertaintyPenalty(params.snapshot, true);
   riskScore -= predictionPenalty + teraPenalty;
@@ -1738,7 +1807,7 @@ function buildSwitchCandidate(params: {
     riskFlags.push("hidden Tera or prediction uncertainty can punish a hard switch");
   }
 
-  pushScoreComponent(breakdown, "tactical", "Immediate tactical value", tacticalScore);
+  pushScoreComponent(breakdown, "tactical", timing && timing.status !== "pending" ? "Conditional matchup value" : "Immediate tactical value", tacticalScore);
   pushScoreComponent(breakdown, "board", "Board-position value", boardScore);
   pushScoreComponent(breakdown, "prediction", "Expected value vs likely lines", predictionScore);
   pushScoreComponent(breakdown, "preserve", "Preserve or sack pressure", preserveScore);
@@ -1768,6 +1837,7 @@ function buildSwitchCandidate(params: {
 }
 
 export function buildSelfActionRecommendation(params: {
+  threatCoverageIncomplete?: boolean;
   snapshot: BattleSnapshot;
   activeOpponentEntry?: OpponentIntelEntry | undefined;
   playerDamagePreview?: DamagePreview[] | undefined;
@@ -1783,17 +1853,37 @@ export function buildSelfActionRecommendation(params: {
     return undefined;
   }
 
+  const teraAction = legalActions.find((action) => action.terastallize);
+  const teraSnapshot = teraAction ? snapshotForAction(params.snapshot, teraAction) : undefined;
+  const teraContext = teraSnapshot ? {
+    snapshot: teraSnapshot,
+    opponentThreatPreview: buildThreatPreview(teraSnapshot, {
+      moveCandidates: opponentThreatPreview.map((preview) => ({ name: preview.moveName, source: preview.moveSource })),
+      attackerPosterior: params.activeOpponentEntry?.posterior,
+      likelyAttackerItems: params.activeOpponentEntry?.likelyItems.map((entry) => entry.name),
+      likelyAttackerAbilities: params.activeOpponentEntry?.likelyAbilities.map((entry) => entry.name),
+      likelyAttackerProfile: params.activeOpponentEntry?.ladderAttackProfile
+      // Existing observed ranges belong to the captured typing, so do not
+      // reuse them on a hypothetical Tera defender.
+    }).map((preview) => ({
+      ...preview,
+      currentTarget: { ...preview.currentTarget, relation: params.speedPreview?.activeRelation ?? "unknown" }
+    }))
+  } : undefined;
+  const ordinaryPreviews = playerDamagePreview.filter((preview) => !preview.terastallize);
+
   const candidates: SelfActionCandidate[] = [];
   for (const action of legalActions) {
     if (action.kind === "move") {
+      const context = action.terastallize ? teraContext! : params;
       candidates.push(buildMoveCandidate({
-        snapshot: params.snapshot,
+        snapshot: context.snapshot,
         action,
         preview: damagePreviewForAction(action, playerDamagePreview),
         speedPreview: params.speedPreview,
-        opponentThreatPreview,
+        opponentThreatPreview: context.opponentThreatPreview ?? [],
         opponentActionPrediction: params.opponentActionPrediction,
-        playerDamagePreview
+        playerDamagePreview: playerDamagePreview.filter((preview) => Boolean(preview.terastallize) === Boolean(action.terastallize))
       }));
       continue;
     }
@@ -1804,7 +1894,7 @@ export function buildSelfActionRecommendation(params: {
         speedPreview: params.speedPreview,
         opponentThreatPreview,
         opponentActionPrediction: params.opponentActionPrediction,
-        playerDamagePreview
+        playerDamagePreview: ordinaryPreviews
       });
       if (candidate) candidates.push(candidate);
       continue;
@@ -1820,9 +1910,21 @@ export function buildSelfActionRecommendation(params: {
     playerDamagePreview,
     opponentThreatPreview,
     speedPreview: params.speedPreview,
-    opponentActionPrediction: params.opponentActionPrediction
+    opponentActionPrediction: params.opponentActionPrediction,
+    teraContext
   });
 
+  if (params.opponentActionPrediction?.replyTiming) {
+    for (const candidate of searchedCandidates) candidate.riskFlags = uniqueStrings([
+      params.opponentActionPrediction.replyTiming.summary, ...candidate.riskFlags
+    ]);
+  }
+  if (params.threatCoverageIncomplete) {
+    for (const action of searchedCandidates) {
+      action.reasons = action.reasons.map((reason) => /safe|absorbs|immunity|covers hidden threat/.test(reason)
+        ? `Among considered move forecasts: ${reason}` : reason);
+    }
+  }
   const rankedActions = searchedCandidates
     .sort((a, b) => b.score - a.score || a.label.localeCompare(b.label));
   const top = rankedActions[0];

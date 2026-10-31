@@ -1,0 +1,1249 @@
+{
+ "schemaVersion": 1,
+ "purpose": "Actual Chrome public spectator and separate private preview/terminal capture regression fixtures; not training samples or acceptance certificates.",
+ "producer": {
+  "path": "scripts/client-capture-fixture.ts",
+  "sha256": "1941774fe4709bd7c4240afcc81860345e3f4925e75d025e7c1bef24d600a95c"
+ },
+ "captureContext": {
+  "browser": "Actual Google Chrome browser 2",
+  "clientAttribution": "Manual capture-session UI observation: default legacy OU at 16:47 UTC; actual /beta/ Preact entry at 16:49, then UU and OU spectator rooms; root reload around 16:52:15 returned to default legacy UU. Client labels come from this UI observation, not URL inference or trace payloads.",
+  "betaEntry": "https://play.pokemonshowdown.com/beta/",
+  "routeCaveat": "Preact rewrites the route to root; route alone does not identify the client. SPA room changes changed captureSession; retain those session boundaries.",
+  "history": "Recorders used isolated temporary history; producer and tests do not access any history."
+ },
+ "traces": [
+  {
+   "file": "shwdn2op-chrome-capture.jsonl",
+   "bytes": 15550420,
+   "sha256": "69a418f4a426296eb98277d62952d7caac44a3049b6c56bb66170b5bd89b26a0",
+   "recorder": "shwdn2op-capture-companion-v1.mts",
+   "recorderSha256": "13dd3949330574b028c16b450217c8fb52e1bd8168a4153b498381f8625cc5f8",
+   "prefixThrough": "2026-10-18T16:52:36.067Z",
+   "jsonlRows": 219
+  },
+  {
+   "file": "shwdn2op-chrome-capture-2.jsonl",
+   "bytes": 2926480,
+   "sha256": "933e646bc23bdd3596ca83136c93186e08316028e786dbf4abaf44ed033c18c6",
+   "recorder": "shwdn2op-capture-companion.mts",
+   "recorderSha256": "f3cf47ed42cafbe9a953c01ca889a9d9f8c4242dbb6e8022a579cb1789ae4398",
+   "prefixThrough": "2026-10-18T17:04:25.224Z",
+   "jsonlRows": 155
+  }
+ ],
+ "sanitization": "Player names, rooms, capture/session UUIDs and all mon identifiers are aliased consistently. Removed free-text/chat/join/leave/timer/timestamp/rating/avatar lines or fields; blank lines preserve original source indexes. Protocol mechanics and supplemental sso-state values otherwise unchanged. Capture receipt UTC times retained only in provenance.",
+ "coverage": {
+  "privateRequests": false,
+  "rqid": false,
+  "ownLegalActions": false,
+  "privateBattleSnapshotParity": false,
+  "renderCertificate": false,
+  "battleCompletion": false,
+  "statusCure": "Absent from frozen traces; test observed toxic/burn preservation only, not cure/non-resurrection after cure.",
+  "recovery": "Lower authority. sso-state p1 hints, stale conditions and 1000/1000 placeholders are captured claims, not private HP or own-side truth.",
+  "omissions": "Selected observations only: repeated recovery, nonmechanical frames and unrelated requests/responses omitted. Original sequence gaps and partial turns retained. Second trace is a fixed complete-row prefix and may continue appending."
+ },
+ "cases": [
+  {
+   "id": "legacy-ou",
+   "keys": [
+    "legacy-ou"
+   ],
+   "coverage": "Protocol backlog through partial turn 12."
+  },
+  {
+   "id": "preact-ou",
+   "keys": [
+    "preact-ou-prefix"
+   ],
+   "coverage": "Actual protocol backlog trimmed after turn 12 for common-prefix comparison; original frame reached turn 22."
+  },
+  {
+   "id": "preact-uu-session-gap",
+   "keys": [
+    "preact-uu-preview",
+    "preact-uu-start",
+    "preact-uu-recovery-1"
+   ],
+   "coverage": "Original preview belongs to a different session. New session starts without roster; later recovery contains its missing prefix and matching protocol suffix. Recovered roster remains recovery authority; do not join sessions."
+  },
+  {
+   "id": "preact-uu-cold",
+   "keys": [
+    "preact-uu-recovery-1",
+    "preact-uu-turn-2",
+    "preact-uu-recovery-2",
+    "preact-uu-turn-3"
+   ],
+   "coverage": "Explicit cold replay starting from a real recovery, omitting its earlier same-session protocol; recovered roster/turn 1 remains recovery, subsequent turns 2/3 remain protocol."
+  },
+  {
+   "id": "legacy-uu",
+   "keys": [
+    "legacy-uu",
+    "legacy-uu-turn-10",
+    "legacy-uu-turn-11",
+    "legacy-uu-faint",
+    "legacy-uu-turn-12",
+    "legacy-uu-turn-13",
+    "legacy-uu-turn-14",
+    "legacy-uu-turn-15",
+    "legacy-uu-faint-2",
+    "legacy-uu-turn-16",
+    "legacy-uu-recovery-16"
+   ],
+   "coverage": "Protocol backlog through turn 9, selected subsequent public protocol through turn 16, then matching recovery across the recorder rotation."
+  }
+ ],
+ "comparisons": [
+  {
+   "left": "legacy-ou",
+   "right": "preact-ou",
+   "through": "|turn|12"
+  },
+  {
+   "left": "legacy-uu",
+   "right": "preact-uu-cold",
+   "through": "|turn|3"
+  }
+ ],
+ "comparisonScope": "Trim both comparison inputs at the declared canonical turn boundary; compare public facts and roster only, ignoring transport metadata and retaining original authority separately. No whole-frame or private BattleSnapshot parity claim.",
+ "observations": [
+  {
+   "key": "legacy-ou",
+   "client": "default-legacy",
+   "provenance": {
+    "trace": 0,
+    "jsonlLine": 4,
+    "observationIndex": 0,
+    "requestId": "req-3",
+    "at": "2026-10-18T16:47:22.403Z",
+    "originalObservationIdSha256": "60fe57d2f0d0f1a3d90a977fb7e938c2552974f3aff3a2c8e5389fa7bfd19ef1",
+    "rawJsonlLineSha256": "fc8f85c9e5b77e2d54e9ca197469633435b9e53b77c8a80bb80874675bca9fa8",
+    "rawDataSha256": "0c2123146ad393c5e1fa1bf5ecb5c44717260c0eb33c33c572450b6caea64bbe",
+    "originalLineCount": 190,
+    "retainedLineCount": 190,
+    "trimAfter": null
+   },
+   "observation": {
+    "observationId": "capture-1:15:battle-room-1",
+    "sessionId": "session-1",
+    "sequence": 2,
+    "roomId": "battle-room-1",
+    "source": "protocol",
+    "data": ">battle-room-1\n|init|battle\n|title|Player 1 vs. Player 2\n\n\n\n|gametype|singles\n|player|p1|Player 1\n|player|p2|Player 2\n\n|tier|[Gen 9] OU\n\n\n\n\n\n\n\n\n\n|clearpoke\n|poke|p1|Latios, M|\n|poke|p1|Great Tusk|\n|poke|p1|Heatran, M|\n|poke|p1|Pecharunt|\n|poke|p1|Samurott-Hisui, M|\n|poke|p1|Zamazenta-*|\n|poke|p2|Tyranitar, F|\n|poke|p2|Excadrill, M|\n|poke|p2|Houndstone, F|\n|poke|p2|Mandibuzz, F|\n|poke|p2|Deoxys-Speed|\n|poke|p2|Hippowdon, M|\n|teampreview\n\n\n\n|teamsize|p1|6\n|teamsize|p2|6\n|start\n|switch|p1a: Mon 1|Samurott-Hisui, M|100/100\n|switch|p2a: Mon 1|Tyranitar, F|100/100\n|-weather|Sandstorm|[from] ability: Sand Stream|[of] p2a: Mon 1\n|turn|1\n\n\n|switch|p1a: Mon 2|Great Tusk|100/100\n|move|p2a: Mon 1|Low Kick|p1a: Mon 2\n|-damage|p1a: Mon 2|53/100\n\n|-weather|Sandstorm|[upkeep]\n|upkeep\n|turn|2\n\n\n|switch|p2a: Mon 2|Hippowdon, M|100/100\n|move|p1a: Mon 2|Ice Spinner|p2a: Mon 2\n|-supereffective|p2a: Mon 2\n|-damage|p2a: Mon 2|70/100\n|-damage|p1a: Mon 2|36/100|[from] item: Rocky Helmet|[of] p2a: Mon 2\n\n|-weather|Sandstorm|[upkeep]\n|upkeep\n|turn|3\n\n\n|-end|p1a: Mon 2|Protosynthesis|[silent]\n|switch|p1a: Mon 1|Samurott-Hisui, M|100/100\n|move|p2a: Mon 2|Stealth Rock|p1a: Mon 1\n|-sidestart|p1: Player 1|move: Stealth Rock\n\n|-weather|Sandstorm|[upkeep]\n|-damage|p1a: Mon 1|94/100|[from] Sandstorm\n|upkeep\n|turn|4\n\n\n|switch|p2a: Mon 3|Mandibuzz, F|100/100\n|move|p1a: Mon 1|Ceaseless Edge|p2a: Mon 3\n|-resisted|p2a: Mon 3\n|-damage|p2a: Mon 3|88/100\n|-sidestart|p2: Player 2|Spikes\n\n|-weather|Sandstorm|[upkeep]\n|-damage|p1a: Mon 1|88/100|[from] Sandstorm\n|upkeep\n|turn|5\n\n\n\n|switch|p1a: Mon 3|Pecharunt|100/100\n|move|p2a: Mon 3|U-turn|p1a: Mon 3\n|-resisted|p1a: Mon 3\n|-damage|p1a: Mon 3|99/100\n\n\n\n|switch|p2a: Mon 1|Tyranitar, F|100/100|[from] U-turn\n|-damage|p2a: Mon 1|88/100|[from] Spikes\n\n|-weather|none\n|upkeep\n|turn|6\n\n\n|move|p1a: Mon 3|Parting Shot|p2a: Mon 1\n|-unboost|p2a: Mon 1|atk|1\n|-unboost|p2a: Mon 1|spa|1\n\n\n|switch|p1a: Mon 2|Great Tusk|36/100|[from] Parting Shot\n|move|p2a: Mon 1|Knock Off|p1a: Mon 2\n|-resisted|p1a: Mon 2\n|-damage|p1a: Mon 2|15/100\n|-enditem|p1a: Mon 2|Heavy-Duty Boots|[from] move: Knock Off|[of] p2a: Mon 1\n\n|upkeep\n|turn|7\n\n\n|-end|p1a: Mon 2|Protosynthesis|[silent]\n|switch|p1a: Mon 1|Samurott-Hisui, M|88/100\n|-damage|p1a: Mon 1|76/100|[from] Stealth Rock\n|switch|p2a: Mon 2|Hippowdon, M|70/100\n|-damage|p2a: Mon 2|57/100|[from] Spikes\n|-weather|Sandstorm|[from] ability: Sand Stream|[of] p2a: Mon 2\n\n|-weather|Sandstorm|[upkeep]\n|-damage|p1a: Mon 1|70/100|[from] Sandstorm\n|upkeep\n|turn|8\n\n\n\n|switch|p1a: Mon 3|Pecharunt|99/100\n|switch|p2a: Mon 3|Mandibuzz, F|88/100\n\n|-weather|Sandstorm|[upkeep]\n|-damage|p1a: Mon 3|93/100|[from] Sandstorm\n|upkeep\n|turn|9\n\n\n|switch|p2a: Mon 4|Excadrill, M|100/100\n|-item|p2a: Mon 4|Air Balloon\n|move|p1a: Mon 3|Malignant Chain|p2a: Mon 4\n|-immune|p2a: Mon 4\n\n|-weather|Sandstorm|[upkeep]\n|-damage|p1a: Mon 3|87/100|[from] Sandstorm\n|upkeep\n|turn|10\n\n\n|switch|p1a: Mon 2|Great Tusk|15/100\n|-damage|p1a: Mon 2|12/100|[from] Stealth Rock\n|move|p2a: Mon 4|Earthquake|p1a: Mon 2\n|-damage|p1a: Mon 2|0 fnt\n|faint|p1a: Mon 2\n|-end|p1a: Mon 2|Protosynthesis|[silent]\n\n|-weather|Sandstorm|[upkeep]\n|upkeep\n\n\n|switch|p1a: Mon 4|Zamazenta|100/100\n|-damage|p1a: Mon 4|94/100|[from] Stealth Rock\n|-ability|p1a: Mon 4|Dauntless Shield|boost\n|-boost|p1a: Mon 4|def|1\n|turn|11\n\n\n\n|switch|p2a: Mon 3|Mandibuzz, F|88/100\n|move|p1a: Mon 4|Substitute|p1a: Mon 4\n|-start|p1a: Mon 4|Substitute\n|-damage|p1a: Mon 4|70/100\n\n|-weather|none\n|-heal|p1a: Mon 4|76/100|[from] item: Leftovers\n|upkeep\n|turn|12\n\n\n|move|p1a: Mon 4|Iron Defense|p1a: Mon 4\n|-boost|p1a: Mon 4|def|2\n|move|p2a: Mon 3|U-turn|p1a: Mon 4\n|-resisted|p1a: Mon 4\n|-activate|p1a: Mon 4|move: Substitute|[damage]\n"
+   }
+  },
+  {
+   "key": "preact-uu-preview",
+   "client": "preact-beta",
+   "provenance": {
+    "trace": 0,
+    "jsonlLine": 66,
+    "observationIndex": 0,
+    "requestId": "req-12",
+    "at": "2026-10-18T16:50:05.347Z",
+    "originalObservationIdSha256": "776aa674930411587ca2d8e94f2df00e355d6d325e4e68b81f4e3f4651de1746",
+    "rawJsonlLineSha256": "8e7ae1653dd04280be072b31c1505a96b0f18f3f8697e80ace59f493c0e7cc35",
+    "rawDataSha256": "b91e71c5879d6cbd71d4504180740c8b0ad291a8e892f75f2d02a93141541ba5",
+    "originalLineCount": 38,
+    "retainedLineCount": 38,
+    "trimAfter": null
+   },
+   "observation": {
+    "observationId": "capture-2:10:battle-room-2",
+    "sessionId": "session-2",
+    "sequence": 1,
+    "roomId": "battle-room-2",
+    "source": "protocol",
+    "data": ">battle-room-2\n|init|battle\n|title|Player 1 vs. Player 2\n\n\n\n|gametype|singles\n|player|p1|Player 1\n|player|p2|Player 2\n\n|tier|[Gen 9] UU\n\n\n\n\n\n\n\n\n\n|clearpoke\n|poke|p1|Infernape, F|\n|poke|p1|Sinistcha|\n|poke|p1|Tinkaton, F|\n|poke|p1|Latios, M|\n|poke|p1|Thundurus, M|\n|poke|p1|Mandibuzz, F|\n|poke|p2|Cinccino, M|\n|poke|p2|Talonflame, M|\n|poke|p2|Yanmega, M|\n|poke|p2|Fezandipiti, M|\n|poke|p2|Drifblim, F|\n|poke|p2|Gyarados, M|\n|teampreview\n\n\n\n"
+   }
+  },
+  {
+   "key": "preact-ou-prefix",
+   "client": "preact-beta",
+   "provenance": {
+    "trace": 0,
+    "jsonlLine": 74,
+    "observationIndex": 0,
+    "requestId": "req-16",
+    "at": "2026-10-18T16:50:47.381Z",
+    "originalObservationIdSha256": "3bcafc6ecf338d9b18e0a946e7a71deccc8face6895f9b663a4a0941deb52f27",
+    "rawJsonlLineSha256": "f490a5abc5f854801a68219a74cf7c6d10f2210d3d5a9a4218114f45c787163c",
+    "rawDataSha256": "2504b43fe60f9fc008ff27b7e7ad0fb2f5a565e970036ccf36b74fb31333df1f",
+    "originalLineCount": 323,
+    "retainedLineCount": 182,
+    "trimAfter": "|turn|12"
+   },
+   "observation": {
+    "observationId": "capture-2:22:battle-room-1",
+    "sessionId": "session-3",
+    "sequence": 1,
+    "roomId": "battle-room-1",
+    "source": "protocol",
+    "data": ">battle-room-1\n|init|battle\n|title|Player 1 vs. Player 2\n\n\n\n|gametype|singles\n|player|p1|Player 1\n|player|p2|Player 2\n\n|tier|[Gen 9] OU\n\n\n\n\n\n\n\n\n\n|clearpoke\n|poke|p1|Latios, M|\n|poke|p1|Great Tusk|\n|poke|p1|Heatran, M|\n|poke|p1|Pecharunt|\n|poke|p1|Samurott-Hisui, M|\n|poke|p1|Zamazenta-*|\n|poke|p2|Tyranitar, F|\n|poke|p2|Excadrill, M|\n|poke|p2|Houndstone, F|\n|poke|p2|Mandibuzz, F|\n|poke|p2|Deoxys-Speed|\n|poke|p2|Hippowdon, M|\n|teampreview\n\n\n\n|teamsize|p1|6\n|teamsize|p2|6\n|start\n|switch|p1a: Mon 1|Samurott-Hisui, M|100/100\n|switch|p2a: Mon 1|Tyranitar, F|100/100\n|-weather|Sandstorm|[from] ability: Sand Stream|[of] p2a: Mon 1\n|turn|1\n\n\n|switch|p1a: Mon 2|Great Tusk|100/100\n|move|p2a: Mon 1|Low Kick|p1a: Mon 2\n|-damage|p1a: Mon 2|53/100\n\n|-weather|Sandstorm|[upkeep]\n|upkeep\n|turn|2\n\n\n|switch|p2a: Mon 2|Hippowdon, M|100/100\n|move|p1a: Mon 2|Ice Spinner|p2a: Mon 2\n|-supereffective|p2a: Mon 2\n|-damage|p2a: Mon 2|70/100\n|-damage|p1a: Mon 2|36/100|[from] item: Rocky Helmet|[of] p2a: Mon 2\n\n|-weather|Sandstorm|[upkeep]\n|upkeep\n|turn|3\n\n\n|-end|p1a: Mon 2|Protosynthesis|[silent]\n|switch|p1a: Mon 1|Samurott-Hisui, M|100/100\n|move|p2a: Mon 2|Stealth Rock|p1a: Mon 1\n|-sidestart|p1: Player 1|move: Stealth Rock\n\n|-weather|Sandstorm|[upkeep]\n|-damage|p1a: Mon 1|94/100|[from] Sandstorm\n|upkeep\n|turn|4\n\n\n|switch|p2a: Mon 3|Mandibuzz, F|100/100\n|move|p1a: Mon 1|Ceaseless Edge|p2a: Mon 3\n|-resisted|p2a: Mon 3\n|-damage|p2a: Mon 3|88/100\n|-sidestart|p2: Player 2|Spikes\n\n|-weather|Sandstorm|[upkeep]\n|-damage|p1a: Mon 1|88/100|[from] Sandstorm\n|upkeep\n|turn|5\n\n\n\n|switch|p1a: Mon 3|Pecharunt|100/100\n|move|p2a: Mon 3|U-turn|p1a: Mon 3\n|-resisted|p1a: Mon 3\n|-damage|p1a: Mon 3|99/100\n\n\n\n|switch|p2a: Mon 1|Tyranitar, F|100/100|[from] U-turn\n|-damage|p2a: Mon 1|88/100|[from] Spikes\n\n|-weather|none\n|upkeep\n|turn|6\n\n\n|move|p1a: Mon 3|Parting Shot|p2a: Mon 1\n|-unboost|p2a: Mon 1|atk|1\n|-unboost|p2a: Mon 1|spa|1\n\n\n|switch|p1a: Mon 2|Great Tusk|36/100|[from] Parting Shot\n|move|p2a: Mon 1|Knock Off|p1a: Mon 2\n|-resisted|p1a: Mon 2\n|-damage|p1a: Mon 2|15/100\n|-enditem|p1a: Mon 2|Heavy-Duty Boots|[from] move: Knock Off|[of] p2a: Mon 1\n\n|upkeep\n|turn|7\n\n\n|-end|p1a: Mon 2|Protosynthesis|[silent]\n|switch|p1a: Mon 1|Samurott-Hisui, M|88/100\n|-damage|p1a: Mon 1|76/100|[from] Stealth Rock\n|switch|p2a: Mon 2|Hippowdon, M|70/100\n|-damage|p2a: Mon 2|57/100|[from] Spikes\n|-weather|Sandstorm|[from] ability: Sand Stream|[of] p2a: Mon 2\n\n|-weather|Sandstorm|[upkeep]\n|-damage|p1a: Mon 1|70/100|[from] Sandstorm\n|upkeep\n|turn|8\n\n\n\n|switch|p1a: Mon 3|Pecharunt|99/100\n|switch|p2a: Mon 3|Mandibuzz, F|88/100\n\n|-weather|Sandstorm|[upkeep]\n|-damage|p1a: Mon 3|93/100|[from] Sandstorm\n|upkeep\n|turn|9\n\n\n|switch|p2a: Mon 4|Excadrill, M|100/100\n|-item|p2a: Mon 4|Air Balloon\n|move|p1a: Mon 3|Malignant Chain|p2a: Mon 4\n|-immune|p2a: Mon 4\n\n|-weather|Sandstorm|[upkeep]\n|-damage|p1a: Mon 3|87/100|[from] Sandstorm\n|upkeep\n|turn|10\n\n\n|switch|p1a: Mon 2|Great Tusk|15/100\n|-damage|p1a: Mon 2|12/100|[from] Stealth Rock\n|move|p2a: Mon 4|Earthquake|p1a: Mon 2\n|-damage|p1a: Mon 2|0 fnt\n|faint|p1a: Mon 2\n|-end|p1a: Mon 2|Protosynthesis|[silent]\n\n|-weather|Sandstorm|[upkeep]\n|upkeep\n\n\n|switch|p1a: Mon 4|Zamazenta|100/100\n|-damage|p1a: Mon 4|94/100|[from] Stealth Rock\n|-ability|p1a: Mon 4|Dauntless Shield|boost\n|-boost|p1a: Mon 4|def|1\n|turn|11\n\n\n\n|switch|p2a: Mon 3|Mandibuzz, F|88/100\n|move|p1a: Mon 4|Substitute|p1a: Mon 4\n|-start|p1a: Mon 4|Substitute\n|-damage|p1a: Mon 4|70/100\n\n|-weather|none\n|-heal|p1a: Mon 4|76/100|[from] item: Leftovers\n|upkeep\n|turn|12"
+   }
+  },
+  {
+   "key": "preact-uu-start",
+   "client": "preact-beta",
+   "provenance": {
+    "trace": 0,
+    "jsonlLine": 78,
+    "observationIndex": 0,
+    "requestId": "req-18",
+    "at": "2026-10-18T16:50:51.904Z",
+    "originalObservationIdSha256": "30542176013d881078105c9cfa253e765f68255b77577ac5099444e0d6e74c69",
+    "rawJsonlLineSha256": "7a655493aa88b52792a1fc922b0dfcd2a9f7dd7a9d820d0b0fe47b588ffd744e",
+    "rawDataSha256": "441c7ec68b4e94f86251bd7d4f2a843a074eeb3528fd54d15bd989524050a4bf",
+    "originalLineCount": 9,
+    "retainedLineCount": 9,
+    "trimAfter": null
+   },
+   "observation": {
+    "observationId": "capture-2:24:battle-room-2",
+    "sessionId": "session-3",
+    "sequence": 3,
+    "roomId": "battle-room-2",
+    "source": "protocol",
+    "data": ">battle-room-2\n\n\n|teamsize|p1|6\n|teamsize|p2|6\n|start\n|switch|p1a: Mon 1|Infernape, F|100/100\n|switch|p2a: Mon 1|Fezandipiti, M|100/100\n|turn|1"
+   }
+  },
+  {
+   "key": "preact-uu-recovery-1",
+   "client": "preact-beta",
+   "provenance": {
+    "trace": 0,
+    "jsonlLine": 80,
+    "observationIndex": 0,
+    "requestId": "req-19",
+    "at": "2026-10-18T16:50:52.888Z",
+    "originalObservationIdSha256": "87d991e0239b92ec472eb6059ed73e65a2e4300b7d0e30ef2996ca6739ff6107",
+    "rawJsonlLineSha256": "d2052c930d1a613af13eab4ea5044984de3cb686b4debed891cd2899615ba143",
+    "rawDataSha256": "d78edaa505484e8c64ab6504c6439ac6ab53839c346fc4bb48f0838d4f9a2b2d",
+    "originalLineCount": 45,
+    "retainedLineCount": 45,
+    "trimAfter": null
+   },
+   "observation": {
+    "observationId": "capture-2:25:battle-room-2",
+    "sessionId": "session-3",
+    "sequence": 4,
+    "roomId": "battle-room-2",
+    "source": "recovery",
+    "data": ">battle-room-2\n\n\n\n|gametype|singles\n|player|p1|Player 1\n|player|p2|Player 2\n\n|tier|[Gen 9] UU\n\n\n\n\n\n\n\n\n\n|clearpoke\n|poke|p1|Infernape, F|\n|poke|p1|Sinistcha|\n|poke|p1|Tinkaton, F|\n|poke|p1|Latios, M|\n|poke|p1|Thundurus, M|\n|poke|p1|Mandibuzz, F|\n|poke|p2|Cinccino, M|\n|poke|p2|Talonflame, M|\n|poke|p2|Yanmega, M|\n|poke|p2|Fezandipiti, M|\n|poke|p2|Drifblim, F|\n|poke|p2|Gyarados, M|\n|teampreview\n\n\n\n\n\n\n|teamsize|p1|6\n|teamsize|p2|6\n|start\n|switch|p1a: Mon 1|Infernape, F|100/100\n|switch|p2a: Mon 1|Fezandipiti, M|100/100\n|turn|1\n|sso-state|{\"playerSide\":\"p1\",\"sideNames\":{\"p1\":\"Player 1\",\"p2\":\"Player 2\"},\"pokemon\":[{\"ident\":\"p1: Mon 1\",\"details\":\"Infernape, F\",\"condition\":\"100/100\",\"active\":false,\"level\":100,\"moves\":[],\"item\":null,\"ability\":null,\"baseAbility\":null,\"teraType\":null,\"terastallized\":false,\"side\":\"p1\"},{\"ident\":null,\"details\":\"Sinistcha\",\"condition\":\"1000/1000\",\"active\":false,\"level\":100,\"moves\":[],\"item\":null,\"ability\":null,\"baseAbility\":null,\"teraType\":null,\"terastallized\":false,\"side\":\"p1\"},{\"ident\":null,\"details\":\"Tinkaton, F\",\"condition\":\"1000/1000\",\"active\":false,\"level\":100,\"moves\":[],\"item\":null,\"ability\":null,\"baseAbility\":null,\"teraType\":null,\"terastallized\":false,\"side\":\"p1\"},{\"ident\":null,\"details\":\"Latios, M\",\"condition\":\"1000/1000\",\"active\":false,\"level\":100,\"moves\":[],\"item\":null,\"ability\":null,\"baseAbility\":null,\"teraType\":null,\"terastallized\":false,\"side\":\"p1\"},{\"ident\":null,\"details\":\"Thundurus, M\",\"condition\":\"1000/1000\",\"active\":false,\"level\":100,\"moves\":[],\"item\":null,\"ability\":null,\"baseAbility\":null,\"teraType\":null,\"terastallized\":false,\"side\":\"p1\"},{\"ident\":null,\"details\":\"Mandibuzz, F\",\"condition\":\"1000/1000\",\"active\":false,\"level\":100,\"moves\":[],\"item\":null,\"ability\":null,\"baseAbility\":null,\"teraType\":null,\"terastallized\":false,\"side\":\"p1\"},{\"ident\":null,\"details\":\"Cinccino, M\",\"condition\":\"1000/1000\",\"active\":false,\"level\":100,\"moves\":[],\"item\":null,\"ability\":null,\"baseAbility\":null,\"teraType\":null,\"terastallized\":false,\"side\":\"p2\"},{\"ident\":null,\"details\":\"Talonflame, M\",\"condition\":\"1000/1000\",\"active\":false,\"level\":100,\"moves\":[],\"item\":null,\"ability\":null,\"baseAbility\":null,\"teraType\":null,\"terastallized\":false,\"side\":\"p2\"},{\"ident\":null,\"details\":\"Yanmega, M\",\"condition\":\"1000/1000\",\"active\":false,\"level\":100,\"moves\":[],\"item\":null,\"ability\":null,\"baseAbility\":null,\"teraType\":null,\"terastallized\":false,\"side\":\"p2\"},{\"ident\":null,\"details\":\"Fezandipiti, M\",\"condition\":\"1000/1000\",\"active\":false,\"level\":100,\"moves\":[],\"item\":null,\"ability\":null,\"baseAbility\":null,\"teraType\":null,\"terastallized\":false,\"side\":\"p2\"},{\"ident\":null,\"details\":\"Drifblim, F\",\"condition\":\"1000/1000\",\"active\":false,\"level\":100,\"moves\":[],\"item\":null,\"ability\":null,\"baseAbility\":null,\"teraType\":null,\"terastallized\":false,\"side\":\"p2\"},{\"ident\":null,\"details\":\"Gyarados, M\",\"condition\":\"1000/1000\",\"active\":false,\"level\":100,\"moves\":[],\"item\":null,\"ability\":null,\"baseAbility\":null,\"teraType\":null,\"terastallized\":false,\"side\":\"p2\"}],\"field\":{\"weather\":null,\"terrain\":null,\"pseudoWeather\":[],\"yourSideConditions\":[],\"opponentSideConditions\":[]}}"
+   }
+  },
+  {
+   "key": "preact-uu-turn-2",
+   "client": "preact-beta",
+   "provenance": {
+    "trace": 0,
+    "jsonlLine": 88,
+    "observationIndex": 0,
+    "requestId": "req-1d",
+    "at": "2026-10-18T16:51:04.463Z",
+    "originalObservationIdSha256": "a6395236611c596e1fa0300044159520c3322dca3f8bc88df9e5ea8df3073730",
+    "rawJsonlLineSha256": "049811f2d1dfcf28bf7194feaddf6b84e804e1dbb33edb2f7a74fbb60de81912",
+    "rawDataSha256": "98fa2f32b9b36dc34107ed7ac5258b15dc953360bae28e96bd64b0d21f8d597d",
+    "originalLineCount": 25,
+    "retainedLineCount": 25,
+    "trimAfter": null
+   },
+   "observation": {
+    "observationId": "capture-2:29:battle-room-2",
+    "sessionId": "session-3",
+    "sequence": 8,
+    "roomId": "battle-room-2",
+    "source": "protocol",
+    "data": ">battle-room-2\n\n\n|move|p1a: Mon 1|Overheat|p2a: Mon 1\n|-damage|p2a: Mon 1|61/100\n|-unboost|p1a: Mon 1|spa|2\n|move|p2a: Mon 1|Beat Up|p1a: Mon 1\n|-resisted|p1a: Mon 1\n|-damage|p1a: Mon 1|97/100\n|-resisted|p1a: Mon 1\n|-damage|p1a: Mon 1|95/100\n|-resisted|p1a: Mon 1\n|-damage|p1a: Mon 1|92/100\n|-status|p1a: Mon 1|tox|[from] ability: Toxic Chain|[of] p2a: Mon 1\n|-resisted|p1a: Mon 1\n|-damage|p1a: Mon 1|89/100 tox\n|-resisted|p1a: Mon 1\n|-damage|p1a: Mon 1|87/100 tox\n|-resisted|p1a: Mon 1\n|-damage|p1a: Mon 1|83/100 tox\n|-hitcount|p1a: Mon 1|6\n\n|-damage|p1a: Mon 1|77/100 tox|[from] psn\n|upkeep\n|turn|2"
+   }
+  },
+  {
+   "key": "preact-uu-recovery-2",
+   "client": "preact-beta",
+   "provenance": {
+    "trace": 0,
+    "jsonlLine": 90,
+    "observationIndex": 0,
+    "requestId": "req-1e",
+    "at": "2026-10-18T16:51:04.880Z",
+    "originalObservationIdSha256": "e049cd75cef542bd9a8bd19bdc28a4722b4258f4809d4c954050575aed160671",
+    "rawJsonlLineSha256": "31617468f993b399be343a8b1c8bf6756745ed707741f49e67396cbf84e58afd",
+    "rawDataSha256": "bf78e6297caf47e66ccaa0a4b8e91b1efcd95a20ce06296e7c086e73ec997152",
+    "originalLineCount": 69,
+    "retainedLineCount": 69,
+    "trimAfter": null
+   },
+   "observation": {
+    "observationId": "capture-2:30:battle-room-2",
+    "sessionId": "session-3",
+    "sequence": 9,
+    "roomId": "battle-room-2",
+    "source": "recovery",
+    "data": ">battle-room-2\n\n\n\n|gametype|singles\n|player|p1|Player 1\n|player|p2|Player 2\n\n|tier|[Gen 9] UU\n\n\n\n\n\n\n\n\n\n|clearpoke\n|poke|p1|Infernape, F|\n|poke|p1|Sinistcha|\n|poke|p1|Tinkaton, F|\n|poke|p1|Latios, M|\n|poke|p1|Thundurus, M|\n|poke|p1|Mandibuzz, F|\n|poke|p2|Cinccino, M|\n|poke|p2|Talonflame, M|\n|poke|p2|Yanmega, M|\n|poke|p2|Fezandipiti, M|\n|poke|p2|Drifblim, F|\n|poke|p2|Gyarados, M|\n|teampreview\n\n\n\n\n\n\n|teamsize|p1|6\n|teamsize|p2|6\n|start\n|switch|p1a: Mon 1|Infernape, F|100/100\n|switch|p2a: Mon 1|Fezandipiti, M|100/100\n|turn|1\n\n\n|move|p1a: Mon 1|Overheat|p2a: Mon 1\n|-damage|p2a: Mon 1|61/100\n|-unboost|p1a: Mon 1|spa|2\n|move|p2a: Mon 1|Beat Up|p1a: Mon 1\n|-resisted|p1a: Mon 1\n|-damage|p1a: Mon 1|97/100\n|-resisted|p1a: Mon 1\n|-damage|p1a: Mon 1|95/100\n|-resisted|p1a: Mon 1\n|-damage|p1a: Mon 1|92/100\n|-status|p1a: Mon 1|tox|[from] ability: Toxic Chain|[of] p2a: Mon 1\n|-resisted|p1a: Mon 1\n|-damage|p1a: Mon 1|89/100 tox\n|-resisted|p1a: Mon 1\n|-damage|p1a: Mon 1|87/100 tox\n|-resisted|p1a: Mon 1\n|-damage|p1a: Mon 1|83/100 tox\n|-hitcount|p1a: Mon 1|6\n\n|-damage|p1a: Mon 1|77/100 tox|[from] psn\n|upkeep\n|turn|2\n|sso-state|{\"playerSide\":\"p1\",\"sideNames\":{\"p1\":\"Player 1\",\"p2\":\"Player 2\"},\"pokemon\":[{\"ident\":\"p1: Mon 1\",\"details\":\"Infernape, F\",\"condition\":\"100/100\",\"active\":false,\"level\":100,\"moves\":[],\"item\":null,\"ability\":null,\"baseAbility\":null,\"teraType\":null,\"terastallized\":false,\"side\":\"p1\"},{\"ident\":null,\"details\":\"Sinistcha\",\"condition\":\"1000/1000\",\"active\":false,\"level\":100,\"moves\":[],\"item\":null,\"ability\":null,\"baseAbility\":null,\"teraType\":null,\"terastallized\":false,\"side\":\"p1\"},{\"ident\":null,\"details\":\"Tinkaton, F\",\"condition\":\"1000/1000\",\"active\":false,\"level\":100,\"moves\":[],\"item\":null,\"ability\":null,\"baseAbility\":null,\"teraType\":null,\"terastallized\":false,\"side\":\"p1\"},{\"ident\":null,\"details\":\"Latios, M\",\"condition\":\"1000/1000\",\"active\":false,\"level\":100,\"moves\":[],\"item\":null,\"ability\":null,\"baseAbility\":null,\"teraType\":null,\"terastallized\":false,\"side\":\"p1\"},{\"ident\":null,\"details\":\"Thundurus, M\",\"condition\":\"1000/1000\",\"active\":false,\"level\":100,\"moves\":[],\"item\":null,\"ability\":null,\"baseAbility\":null,\"teraType\":null,\"terastallized\":false,\"side\":\"p1\"},{\"ident\":null,\"details\":\"Mandibuzz, F\",\"condition\":\"1000/1000\",\"active\":false,\"level\":100,\"moves\":[],\"item\":null,\"ability\":null,\"baseAbility\":null,\"teraType\":null,\"terastallized\":false,\"side\":\"p1\"},{\"ident\":null,\"details\":\"Cinccino, M\",\"condition\":\"1000/1000\",\"active\":false,\"level\":100,\"moves\":[],\"item\":null,\"ability\":null,\"baseAbility\":null,\"teraType\":null,\"terastallized\":false,\"side\":\"p2\"},{\"ident\":null,\"details\":\"Talonflame, M\",\"condition\":\"1000/1000\",\"active\":false,\"level\":100,\"moves\":[],\"item\":null,\"ability\":null,\"baseAbility\":null,\"teraType\":null,\"terastallized\":false,\"side\":\"p2\"},{\"ident\":null,\"details\":\"Yanmega, M\",\"condition\":\"1000/1000\",\"active\":false,\"level\":100,\"moves\":[],\"item\":null,\"ability\":null,\"baseAbility\":null,\"teraType\":null,\"terastallized\":false,\"side\":\"p2\"},{\"ident\":\"p2: Mon 1\",\"details\":\"Fezandipiti, M\",\"condition\":\"100/100\",\"active\":false,\"level\":100,\"moves\":[],\"item\":null,\"ability\":null,\"baseAbility\":null,\"teraType\":null,\"terastallized\":false,\"side\":\"p2\"},{\"ident\":null,\"details\":\"Drifblim, F\",\"condition\":\"1000/1000\",\"active\":false,\"level\":100,\"moves\":[],\"item\":null,\"ability\":null,\"baseAbility\":null,\"teraType\":null,\"terastallized\":false,\"side\":\"p2\"},{\"ident\":null,\"details\":\"Gyarados, M\",\"condition\":\"1000/1000\",\"active\":false,\"level\":100,\"moves\":[],\"item\":null,\"ability\":null,\"baseAbility\":null,\"teraType\":null,\"terastallized\":false,\"side\":\"p2\"}],\"field\":{\"weather\":null,\"terrain\":null,\"pseudoWeather\":[],\"yourSideConditions\":[],\"opponentSideConditions\":[]}}"
+   }
+  },
+  {
+   "key": "preact-uu-turn-3",
+   "client": "preact-beta",
+   "provenance": {
+    "trace": 0,
+    "jsonlLine": 112,
+    "observationIndex": 0,
+    "requestId": "req-1p",
+    "at": "2026-10-18T16:51:22.202Z",
+    "originalObservationIdSha256": "38a6fd46883d1717484ae72e31b24833aecf21cd147e41f287b26e2f34b059c8",
+    "rawJsonlLineSha256": "c723157d85789680c672e4114bcb050b6e8f7981df2ca92854e2d0775fd0622d",
+    "rawDataSha256": "fc7f027f6d3ab243fd996f562e25b7c31d246959adb6321f4196d44b111ca399",
+    "originalLineCount": 11,
+    "retainedLineCount": 11,
+    "trimAfter": null
+   },
+   "observation": {
+    "observationId": "capture-2:44:battle-room-2",
+    "sessionId": "session-3",
+    "sequence": 23,
+    "roomId": "battle-room-2",
+    "source": "protocol",
+    "data": ">battle-room-2\n\n\n|switch|p1a: Mon 2|Tinkaton, F|100/100\n|-item|p1a: Mon 2|Air Balloon\n|switch|p2a: Mon 2|Gyarados, M|100/100\n|-ability|p2a: Mon 2|Intimidate|boost\n|-unboost|p1a: Mon 2|atk|1\n\n|upkeep\n|turn|3"
+   }
+  },
+  {
+   "key": "legacy-uu",
+   "client": "default-legacy",
+   "provenance": {
+    "trace": 0,
+    "jsonlLine": 208,
+    "observationIndex": 0,
+    "requestId": "req-32",
+    "at": "2026-10-18T16:52:25.279Z",
+    "originalObservationIdSha256": "a8b3f03e06d41e8c4a7431475dca8923ac06668dbabe9773c38b4492468b1fe4",
+    "rawJsonlLineSha256": "b74571733162a2bedf02a04125f1fb872f1ab56309650cb28805b5f63cb99983",
+    "rawDataSha256": "292ac307b9b0d0535488d3533239a05d8eb3637f56e58316da59521e0f56b4c0",
+    "originalLineCount": 152,
+    "retainedLineCount": 152,
+    "trimAfter": null
+   },
+   "observation": {
+    "observationId": "capture-3:15:battle-room-2",
+    "sessionId": "session-4",
+    "sequence": 2,
+    "roomId": "battle-room-2",
+    "source": "protocol",
+    "data": ">battle-room-2\n|init|battle\n|title|Player 1 vs. Player 2\n\n\n\n|gametype|singles\n|player|p1|Player 1\n|player|p2|Player 2\n\n|tier|[Gen 9] UU\n\n\n\n\n\n\n\n\n\n|clearpoke\n|poke|p1|Infernape, F|\n|poke|p1|Sinistcha|\n|poke|p1|Tinkaton, F|\n|poke|p1|Latios, M|\n|poke|p1|Thundurus, M|\n|poke|p1|Mandibuzz, F|\n|poke|p2|Cinccino, M|\n|poke|p2|Talonflame, M|\n|poke|p2|Yanmega, M|\n|poke|p2|Fezandipiti, M|\n|poke|p2|Drifblim, F|\n|poke|p2|Gyarados, M|\n|teampreview\n\n\n\n\n\n\n|teamsize|p1|6\n|teamsize|p2|6\n|start\n|switch|p1a: Mon 1|Infernape, F|100/100\n|switch|p2a: Mon 1|Fezandipiti, M|100/100\n|turn|1\n\n\n|move|p1a: Mon 1|Overheat|p2a: Mon 1\n|-damage|p2a: Mon 1|61/100\n|-unboost|p1a: Mon 1|spa|2\n|move|p2a: Mon 1|Beat Up|p1a: Mon 1\n|-resisted|p1a: Mon 1\n|-damage|p1a: Mon 1|97/100\n|-resisted|p1a: Mon 1\n|-damage|p1a: Mon 1|95/100\n|-resisted|p1a: Mon 1\n|-damage|p1a: Mon 1|92/100\n|-status|p1a: Mon 1|tox|[from] ability: Toxic Chain|[of] p2a: Mon 1\n|-resisted|p1a: Mon 1\n|-damage|p1a: Mon 1|89/100 tox\n|-resisted|p1a: Mon 1\n|-damage|p1a: Mon 1|87/100 tox\n|-resisted|p1a: Mon 1\n|-damage|p1a: Mon 1|83/100 tox\n|-hitcount|p1a: Mon 1|6\n\n|-damage|p1a: Mon 1|77/100 tox|[from] psn\n|upkeep\n|turn|2\n\n\n|switch|p1a: Mon 2|Tinkaton, F|100/100\n|-item|p1a: Mon 2|Air Balloon\n|switch|p2a: Mon 2|Gyarados, M|100/100\n|-ability|p2a: Mon 2|Intimidate|boost\n|-unboost|p1a: Mon 2|atk|1\n\n|upkeep\n|turn|3\n\n\n|move|p2a: Mon 2|Dragon Dance|p2a: Mon 2\n|-boost|p2a: Mon 2|atk|1\n|-boost|p2a: Mon 2|spe|1\n|move|p1a: Mon 2|Encore|p2a: Mon 2\n|-start|p2a: Mon 2|Encore\n\n|upkeep\n|turn|4\n\n\n|switch|p1a: Mon 3|Thundurus, M|100/100\n|move|p2a: Mon 2|Dragon Dance|p2a: Mon 2\n|-boost|p2a: Mon 2|atk|1\n|-boost|p2a: Mon 2|spe|1\n\n|upkeep\n|turn|5\n\n\n|move|p2a: Mon 2|Dragon Dance|p2a: Mon 2\n|-boost|p2a: Mon 2|atk|1\n|-boost|p2a: Mon 2|spe|1\n|move|p1a: Mon 3|Nasty Plot|p1a: Mon 3\n|-boost|p1a: Mon 3|spa|2\n\n|upkeep\n|turn|6\n\n\n|move|p2a: Mon 2|Dragon Dance|p2a: Mon 2\n|-boost|p2a: Mon 2|atk|1\n|-boost|p2a: Mon 2|spe|1\n|move|p1a: Mon 3|Thunderbolt|p2a: Mon 2\n|-supereffective|p2a: Mon 2\n|-damage|p2a: Mon 2|0 fnt\n|faint|p2a: Mon 2\n\n|upkeep\n\n\n|switch|p2a: Mon 3|Yanmega, M|100/100\n|turn|7\n\n\n|move|p2a: Mon 3|Protect|p2a: Mon 3\n|-singleturn|p2a: Mon 3|Protect\n|move|p1a: Mon 3|Thunderbolt|p2a: Mon 3\n|-activate|p2a: Mon 3|move: Protect\n\n|-ability|p2a: Mon 3|Speed Boost|boost\n|-boost|p2a: Mon 3|spe|1\n|upkeep\n|turn|8\n\n\n|move|p2a: Mon 3|Ancient Power|p1a: Mon 3\n|-supereffective|p1a: Mon 3\n|-damage|p1a: Mon 3|21/100\n|-damage|p2a: Mon 3|91/100|[from] item: Life Orb\n|move|p1a: Mon 3|Thunderbolt|p2a: Mon 3\n|-supereffective|p2a: Mon 3\n|-damage|p2a: Mon 3|0 fnt\n|faint|p2a: Mon 3\n\n|upkeep\n\n\n|switch|p2a: Mon 4|Cinccino, M|100/100\n|turn|9\n"
+   }
+  },
+  {
+   "key": "legacy-uu-turn-10",
+   "client": "default-legacy",
+   "provenance": {
+    "trace": 0,
+    "jsonlLine": 212,
+    "observationIndex": 0,
+    "requestId": "req-34",
+    "at": "2026-10-18T16:52:30.191Z",
+    "originalObservationIdSha256": "755625f8d96ae10235a607bb9bdcd68160dd423c979d4d5894bfdc11e34cf8d1",
+    "rawJsonlLineSha256": "01341a048230039ba38375c394c36509a929212d7995f7e3a95bc68314af90ee",
+    "rawDataSha256": "7557d599c06b492dac59a6680bf2f9e825d191d67559e4488fb6b00942905e42",
+    "originalLineCount": 15,
+    "retainedLineCount": 15,
+    "trimAfter": null
+   },
+   "observation": {
+    "observationId": "capture-3:17:battle-room-2",
+    "sessionId": "session-4",
+    "sequence": 4,
+    "roomId": "battle-room-2",
+    "source": "protocol",
+    "data": ">battle-room-2\n\n\n|switch|p1a: Mon 4|Mandibuzz, F|100/100\n|move|p2a: Mon 4|Triple Axel|p1a: Mon 4\n|-supereffective|p1a: Mon 4\n|-damage|p1a: Mon 4|90/100\n|-supereffective|p1a: Mon 4\n|-damage|p1a: Mon 4|70/100\n|-supereffective|p1a: Mon 4\n|-damage|p1a: Mon 4|40/100\n|-hitcount|p1a: Mon 4|3\n\n|upkeep\n|turn|10"
+   }
+  },
+  {
+   "key": "legacy-uu-turn-11",
+   "client": "default-legacy",
+   "provenance": {
+    "trace": 1,
+    "jsonlLine": 2,
+    "observationIndex": 0,
+    "requestId": "req-1",
+    "at": "2026-10-18T16:52:40.545Z",
+    "originalObservationIdSha256": "4d85114c6c47626869e3ce0b0cf8013d49bd0a1e5ff3b989710695a8e6b70d70",
+    "rawJsonlLineSha256": "ca55218396e03023f65f0f6530843d4c697dfd36c4bfacf3483fa2ea1bf92356",
+    "rawDataSha256": "46f55c6e7cb41bf1888ac020883ab0113d8bb645572bd59d0d7e5fcde89c33d4",
+    "originalLineCount": 11,
+    "retainedLineCount": 11,
+    "trimAfter": null
+   },
+   "observation": {
+    "observationId": "capture-3:21:battle-room-2",
+    "sessionId": "session-4",
+    "sequence": 8,
+    "roomId": "battle-room-2",
+    "source": "protocol",
+    "data": ">battle-room-2\n\n\n|-terastallize|p1a: Mon 4|Steel\n|move|p2a: Mon 4|Triple Axel|p1a: Mon 4|[miss]\n|-miss|p2a: Mon 4|p1a: Mon 4\n|move|p1a: Mon 4|Roost|p1a: Mon 4\n|-heal|p1a: Mon 4|91/100\n\n|upkeep\n|turn|11"
+   }
+  },
+  {
+   "key": "legacy-uu-faint",
+   "client": "default-legacy",
+   "provenance": {
+    "trace": 1,
+    "jsonlLine": 8,
+    "observationIndex": 0,
+    "requestId": "req-4",
+    "at": "2026-10-18T16:52:49.767Z",
+    "originalObservationIdSha256": "cff4b005140dfcc99ec511478bf9dda364c5b450e93828999d320a2e1bae95cc",
+    "rawJsonlLineSha256": "d1570ce7ff20e3784b836e86d172c2f25c4fcde9995a3d1219e59a0c1eafd057",
+    "rawDataSha256": "017c41ceccdf62df9bf87e6822aa606c10bdfa877e3a1f0f69a7a67302ddc8e0",
+    "originalLineCount": 11,
+    "retainedLineCount": 11,
+    "trimAfter": null
+   },
+   "observation": {
+    "observationId": "capture-3:24:battle-room-2",
+    "sessionId": "session-4",
+    "sequence": 11,
+    "roomId": "battle-room-2",
+    "source": "protocol",
+    "data": ">battle-room-2\n\n\n|move|p2a: Mon 4|Tidy Up|p2a: Mon 4\n|-boost|p2a: Mon 4|atk|1\n|-boost|p2a: Mon 4|spe|1\n|move|p1a: Mon 4|Foul Play|p2a: Mon 4\n|-damage|p2a: Mon 4|0 fnt\n|faint|p2a: Mon 4\n\n|upkeep"
+   }
+  },
+  {
+   "key": "legacy-uu-turn-12",
+   "client": "default-legacy",
+   "provenance": {
+    "trace": 1,
+    "jsonlLine": 16,
+    "observationIndex": 0,
+    "requestId": "req-8",
+    "at": "2026-10-18T16:52:57.828Z",
+    "originalObservationIdSha256": "4402525fe652ffe8c95b98fdcd0bcb3f80a69a3eeaceb9f925ecd68190598a46",
+    "rawJsonlLineSha256": "b81d15cfd9f1809a87f3e2e65e8160c93d1a0ef485b459d3df1d83dc0192da1e",
+    "rawDataSha256": "78ef9ff5c4d6c56c29fece905fc63313f4b18c61fe5ad882bcc90762e245ebab",
+    "originalLineCount": 5,
+    "retainedLineCount": 5,
+    "trimAfter": null
+   },
+   "observation": {
+    "observationId": "capture-3:28:battle-room-2",
+    "sessionId": "session-4",
+    "sequence": 15,
+    "roomId": "battle-room-2",
+    "source": "protocol",
+    "data": ">battle-room-2\n\n\n|switch|p2a: Mon 5|Drifblim, F|100/100\n|turn|12"
+   }
+  },
+  {
+   "key": "legacy-uu-turn-13",
+   "client": "default-legacy",
+   "provenance": {
+    "trace": 1,
+    "jsonlLine": 20,
+    "observationIndex": 0,
+    "requestId": "req-a",
+    "at": "2026-10-18T16:53:03.060Z",
+    "originalObservationIdSha256": "aef3d758a08371d673cbf73687658847d5af1fe28784f64a88466416a4af180a",
+    "rawJsonlLineSha256": "a922a631adeea86c794bc83940c446991f1241a97e45535d0c06a38579c92585",
+    "rawDataSha256": "65eef82fd8c6a19588aefb7a7de79d7e55d31cb7a9fde646af871d3262b47503",
+    "originalLineCount": 11,
+    "retainedLineCount": 11,
+    "trimAfter": null
+   },
+   "observation": {
+    "observationId": "capture-3:30:battle-room-2",
+    "sessionId": "session-4",
+    "sequence": 17,
+    "roomId": "battle-room-2",
+    "source": "protocol",
+    "data": ">battle-room-2\n\n\n|switch|p1a: Mon 2|Tinkaton, F|100/100\n|-item|p1a: Mon 2|Air Balloon\n|move|p2a: Mon 5|Protect||[still]\n|-fail|p2a: Mon 5\n\n|-status|p2a: Mon 5|brn|[from] item: Flame Orb\n|upkeep\n|turn|13"
+   }
+  },
+  {
+   "key": "legacy-uu-turn-14",
+   "client": "default-legacy",
+   "provenance": {
+    "trace": 1,
+    "jsonlLine": 28,
+    "observationIndex": 0,
+    "requestId": "req-e",
+    "at": "2026-10-18T16:53:48.924Z",
+    "originalObservationIdSha256": "5cd54cc781f30e8526efbc91d350c578fb587ae35e9878b83cc93bb89d41ed2d",
+    "rawJsonlLineSha256": "80e5fbb61afdc541c2726ebdd71733e23ea71da5a8beeffc8c99eea612611f09",
+    "rawDataSha256": "c0b801d8586a544b438784e42813578ffd04d38178ef31ddbd9c205307ab0286",
+    "originalLineCount": 12,
+    "retainedLineCount": 12,
+    "trimAfter": null
+   },
+   "observation": {
+    "observationId": "capture-3:35:battle-room-2",
+    "sessionId": "session-4",
+    "sequence": 22,
+    "roomId": "battle-room-2",
+    "source": "protocol",
+    "data": ">battle-room-2\n\n\n|move|p2a: Mon 5|Shadow Ball|p1a: Mon 2\n|-damage|p1a: Mon 2|67/100\n|-enditem|p1a: Mon 2|Air Balloon\n|move|p1a: Mon 2|Encore|p2a: Mon 5\n|-start|p2a: Mon 5|Encore\n\n|-damage|p2a: Mon 5|94/100 brn|[from] brn\n|upkeep\n|turn|14"
+   }
+  },
+  {
+   "key": "legacy-uu-turn-15",
+   "client": "default-legacy",
+   "provenance": {
+    "trace": 1,
+    "jsonlLine": 38,
+    "observationIndex": 0,
+    "requestId": "req-j",
+    "at": "2026-10-18T16:54:02.279Z",
+    "originalObservationIdSha256": "9dc354c433d95333d435fd4d3e16e81b626fd9f3397c1b8254dd5abb150a38bb",
+    "rawJsonlLineSha256": "fc10187a6d39e6811f334a5d0ec7e2b2d1f8353c6e8de3e1134c1e3041d2b8b1",
+    "rawDataSha256": "892d143f5df505afc76f03fb4d1af01f11ed6c3be34e0d98cc1410cc7dee4c32",
+    "originalLineCount": 14,
+    "retainedLineCount": 14,
+    "trimAfter": null
+   },
+   "observation": {
+    "observationId": "capture-3:40:battle-room-2",
+    "sessionId": "session-4",
+    "sequence": 27,
+    "roomId": "battle-room-2",
+    "source": "protocol",
+    "data": ">battle-room-2\n\n\n|move|p2a: Mon 5|Shadow Ball|p1a: Mon 2\n|-damage|p1a: Mon 2|35/100\n|-unboost|p1a: Mon 2|spd|1\n|move|p1a: Mon 2|Knock Off|p2a: Mon 5\n|-supereffective|p2a: Mon 5\n|-damage|p2a: Mon 5|38/100 brn\n|-enditem|p2a: Mon 5|Flame Orb|[from] move: Knock Off|[of] p1a: Mon 2\n\n|-damage|p2a: Mon 5|32/100 brn|[from] brn\n|upkeep\n|turn|15"
+   }
+  },
+  {
+   "key": "legacy-uu-faint-2",
+   "client": "default-legacy",
+   "provenance": {
+    "trace": 1,
+    "jsonlLine": 48,
+    "observationIndex": 0,
+    "requestId": "req-o",
+    "at": "2026-10-18T16:54:18.925Z",
+    "originalObservationIdSha256": "475c20390632c77a6c7b49a6633dbf75d6eaa6c75203d1a0e08a2648c3570a08",
+    "rawJsonlLineSha256": "ff16da4aa331bbf8aa3136a69a624d8b79367631ac42c0e943be9d8179e1bdf3",
+    "rawDataSha256": "9cda9782e32ec6b84a2b816229985c436bf24c02cfba6780d32d1642aa900bea",
+    "originalLineCount": 10,
+    "retainedLineCount": 10,
+    "trimAfter": null
+   },
+   "observation": {
+    "observationId": "capture-3:45:battle-room-2",
+    "sessionId": "session-4",
+    "sequence": 32,
+    "roomId": "battle-room-2",
+    "source": "protocol",
+    "data": ">battle-room-2\n\n\n|move|p2a: Mon 5|Shadow Ball|p1a: Mon 2\n|-crit|p1a: Mon 2\n|-damage|p1a: Mon 2|0 fnt\n|faint|p1a: Mon 2\n\n|-damage|p2a: Mon 5|26/100 brn|[from] brn\n|upkeep"
+   }
+  },
+  {
+   "key": "legacy-uu-turn-16",
+   "client": "default-legacy",
+   "provenance": {
+    "trace": 1,
+    "jsonlLine": 54,
+    "observationIndex": 0,
+    "requestId": "req-r",
+    "at": "2026-10-18T16:54:21.080Z",
+    "originalObservationIdSha256": "44cbe7fbce0a4414047ef6e6c580aeb1331faa87d3b433523276ce18289386d2",
+    "rawJsonlLineSha256": "2d37014794fffb79ba1b7a23dd5695ca882695e6c5e2a276da23556b6beb9847",
+    "rawDataSha256": "04177fd56b93b092073060660789c0fe5cdfd06ee94bbaefd48e69adc0e89728",
+    "originalLineCount": 5,
+    "retainedLineCount": 5,
+    "trimAfter": null
+   },
+   "observation": {
+    "observationId": "capture-3:48:battle-room-2",
+    "sessionId": "session-4",
+    "sequence": 35,
+    "roomId": "battle-room-2",
+    "source": "protocol",
+    "data": ">battle-room-2\n\n\n|switch|p1a: Mon 3|Thundurus, M|21/100\n|turn|16"
+   }
+  },
+  {
+   "key": "legacy-uu-recovery-16",
+   "client": "default-legacy",
+   "provenance": {
+    "trace": 1,
+    "jsonlLine": 56,
+    "observationIndex": 0,
+    "requestId": "req-s",
+    "at": "2026-10-18T16:54:22.560Z",
+    "originalObservationIdSha256": "1f67429574c88619e1aff8ead3ffd48eeef79bfb4aa64a4c306bfd6c085de624",
+    "rawJsonlLineSha256": "c2e8110611e62fc2f1f9508457a9046e6e3454577064e5e58cc931863f672082",
+    "rawDataSha256": "150cb750178d82d70caf356015dd7ed028183b0333d8d387dee41cddcce26a6a",
+    "originalLineCount": 237,
+    "retainedLineCount": 237,
+    "trimAfter": null
+   },
+   "observation": {
+    "observationId": "capture-3:49:battle-room-2",
+    "sessionId": "session-4",
+    "sequence": 36,
+    "roomId": "battle-room-2",
+    "source": "recovery",
+    "data": ">battle-room-2\n\n\n\n|gametype|singles\n|player|p1|Player 1\n|player|p2|Player 2\n\n|tier|[Gen 9] UU\n\n\n\n\n\n\n\n\n\n|clearpoke\n|poke|p1|Infernape, F|\n|poke|p1|Sinistcha|\n|poke|p1|Tinkaton, F|\n|poke|p1|Latios, M|\n|poke|p1|Thundurus, M|\n|poke|p1|Mandibuzz, F|\n|poke|p2|Cinccino, M|\n|poke|p2|Talonflame, M|\n|poke|p2|Yanmega, M|\n|poke|p2|Fezandipiti, M|\n|poke|p2|Drifblim, F|\n|poke|p2|Gyarados, M|\n|teampreview\n\n\n\n\n\n\n|teamsize|p1|6\n|teamsize|p2|6\n|start\n|switch|p1a: Mon 1|Infernape, F|100/100\n|switch|p2a: Mon 1|Fezandipiti, M|100/100\n|turn|1\n\n\n|move|p1a: Mon 1|Overheat|p2a: Mon 1\n|-damage|p2a: Mon 1|61/100\n|-unboost|p1a: Mon 1|spa|2\n|move|p2a: Mon 1|Beat Up|p1a: Mon 1\n|-resisted|p1a: Mon 1\n|-damage|p1a: Mon 1|97/100\n|-resisted|p1a: Mon 1\n|-damage|p1a: Mon 1|95/100\n|-resisted|p1a: Mon 1\n|-damage|p1a: Mon 1|92/100\n|-status|p1a: Mon 1|tox|[from] ability: Toxic Chain|[of] p2a: Mon 1\n|-resisted|p1a: Mon 1\n|-damage|p1a: Mon 1|89/100 tox\n|-resisted|p1a: Mon 1\n|-damage|p1a: Mon 1|87/100 tox\n|-resisted|p1a: Mon 1\n|-damage|p1a: Mon 1|83/100 tox\n|-hitcount|p1a: Mon 1|6\n\n|-damage|p1a: Mon 1|77/100 tox|[from] psn\n|upkeep\n|turn|2\n\n\n|switch|p1a: Mon 2|Tinkaton, F|100/100\n|-item|p1a: Mon 2|Air Balloon\n|switch|p2a: Mon 2|Gyarados, M|100/100\n|-ability|p2a: Mon 2|Intimidate|boost\n|-unboost|p1a: Mon 2|atk|1\n\n|upkeep\n|turn|3\n\n\n|move|p2a: Mon 2|Dragon Dance|p2a: Mon 2\n|-boost|p2a: Mon 2|atk|1\n|-boost|p2a: Mon 2|spe|1\n|move|p1a: Mon 2|Encore|p2a: Mon 2\n|-start|p2a: Mon 2|Encore\n\n|upkeep\n|turn|4\n\n\n|switch|p1a: Mon 3|Thundurus, M|100/100\n|move|p2a: Mon 2|Dragon Dance|p2a: Mon 2\n|-boost|p2a: Mon 2|atk|1\n|-boost|p2a: Mon 2|spe|1\n\n|upkeep\n|turn|5\n\n\n|move|p2a: Mon 2|Dragon Dance|p2a: Mon 2\n|-boost|p2a: Mon 2|atk|1\n|-boost|p2a: Mon 2|spe|1\n|move|p1a: Mon 3|Nasty Plot|p1a: Mon 3\n|-boost|p1a: Mon 3|spa|2\n\n|upkeep\n|turn|6\n\n\n|move|p2a: Mon 2|Dragon Dance|p2a: Mon 2\n|-boost|p2a: Mon 2|atk|1\n|-boost|p2a: Mon 2|spe|1\n|move|p1a: Mon 3|Thunderbolt|p2a: Mon 2\n|-supereffective|p2a: Mon 2\n|-damage|p2a: Mon 2|0 fnt\n|faint|p2a: Mon 2\n\n|upkeep\n\n\n|switch|p2a: Mon 3|Yanmega, M|100/100\n|turn|7\n\n\n|move|p2a: Mon 3|Protect|p2a: Mon 3\n|-singleturn|p2a: Mon 3|Protect\n|move|p1a: Mon 3|Thunderbolt|p2a: Mon 3\n|-activate|p2a: Mon 3|move: Protect\n\n|-ability|p2a: Mon 3|Speed Boost|boost\n|-boost|p2a: Mon 3|spe|1\n|upkeep\n|turn|8\n\n\n|move|p2a: Mon 3|Ancient Power|p1a: Mon 3\n|-supereffective|p1a: Mon 3\n|-damage|p1a: Mon 3|21/100\n|-damage|p2a: Mon 3|91/100|[from] item: Life Orb\n|move|p1a: Mon 3|Thunderbolt|p2a: Mon 3\n|-supereffective|p2a: Mon 3\n|-damage|p2a: Mon 3|0 fnt\n|faint|p2a: Mon 3\n\n|upkeep\n\n\n|switch|p2a: Mon 4|Cinccino, M|100/100\n|turn|9\n\n\n\n|switch|p1a: Mon 4|Mandibuzz, F|100/100\n|move|p2a: Mon 4|Triple Axel|p1a: Mon 4\n|-supereffective|p1a: Mon 4\n|-damage|p1a: Mon 4|90/100\n|-supereffective|p1a: Mon 4\n|-damage|p1a: Mon 4|70/100\n|-supereffective|p1a: Mon 4\n|-damage|p1a: Mon 4|40/100\n|-hitcount|p1a: Mon 4|3\n\n|upkeep\n|turn|10\n\n\n|-terastallize|p1a: Mon 4|Steel\n|move|p2a: Mon 4|Triple Axel|p1a: Mon 4|[miss]\n|-miss|p2a: Mon 4|p1a: Mon 4\n|move|p1a: Mon 4|Roost|p1a: Mon 4\n|-heal|p1a: Mon 4|91/100\n\n|upkeep\n|turn|11\n\n\n|move|p2a: Mon 4|Tidy Up|p2a: Mon 4\n|-boost|p2a: Mon 4|atk|1\n|-boost|p2a: Mon 4|spe|1\n|move|p1a: Mon 4|Foul Play|p2a: Mon 4\n|-damage|p2a: Mon 4|0 fnt\n|faint|p2a: Mon 4\n\n|upkeep\n\n\n|switch|p2a: Mon 5|Drifblim, F|100/100\n|turn|12\n\n\n|switch|p1a: Mon 2|Tinkaton, F|100/100\n|-item|p1a: Mon 2|Air Balloon\n|move|p2a: Mon 5|Protect||[still]\n|-fail|p2a: Mon 5\n\n|-status|p2a: Mon 5|brn|[from] item: Flame Orb\n|upkeep\n|turn|13\n\n\n\n|move|p2a: Mon 5|Shadow Ball|p1a: Mon 2\n|-damage|p1a: Mon 2|67/100\n|-enditem|p1a: Mon 2|Air Balloon\n|move|p1a: Mon 2|Encore|p2a: Mon 5\n|-start|p2a: Mon 5|Encore\n\n|-damage|p2a: Mon 5|94/100 brn|[from] brn\n|upkeep\n|turn|14\n\n\n|move|p2a: Mon 5|Shadow Ball|p1a: Mon 2\n|-damage|p1a: Mon 2|35/100\n|-unboost|p1a: Mon 2|spd|1\n|move|p1a: Mon 2|Knock Off|p2a: Mon 5\n|-supereffective|p2a: Mon 5\n|-damage|p2a: Mon 5|38/100 brn\n|-enditem|p2a: Mon 5|Flame Orb|[from] move: Knock Off|[of] p1a: Mon 2\n\n|-damage|p2a: Mon 5|32/100 brn|[from] brn\n|upkeep\n|turn|15\n\n\n|move|p2a: Mon 5|Shadow Ball|p1a: Mon 2\n|-crit|p1a: Mon 2\n|-damage|p1a: Mon 2|0 fnt\n|faint|p1a: Mon 2\n\n|-damage|p2a: Mon 5|26/100 brn|[from] brn\n|upkeep\n\n\n|switch|p1a: Mon 3|Thundurus, M|21/100\n|turn|16\n|sso-state|{\"playerSide\":\"p1\",\"sideNames\":{\"p1\":\"Player 1\",\"p2\":\"Player 2\"},\"pokemon\":[{\"ident\":\"p1: Mon 1\",\"details\":\"Infernape, F\",\"condition\":\"77/100 tox\",\"active\":false,\"level\":100,\"moves\":[],\"item\":null,\"ability\":null,\"baseAbility\":null,\"teraType\":null,\"terastallized\":false,\"side\":\"p1\"},{\"ident\":null,\"details\":\"Sinistcha\",\"condition\":\"1000/1000\",\"active\":false,\"level\":100,\"moves\":[],\"item\":null,\"ability\":null,\"baseAbility\":null,\"teraType\":null,\"terastallized\":false,\"side\":\"p1\"},{\"ident\":\"p1: Mon 2\",\"details\":\"Tinkaton, F\",\"condition\":\"0/100 fnt\",\"active\":false,\"level\":100,\"moves\":[],\"item\":null,\"ability\":null,\"baseAbility\":null,\"teraType\":null,\"terastallized\":false,\"side\":\"p1\"},{\"ident\":null,\"details\":\"Latios, M\",\"condition\":\"1000/1000\",\"active\":false,\"level\":100,\"moves\":[],\"item\":null,\"ability\":null,\"baseAbility\":null,\"teraType\":null,\"terastallized\":false,\"side\":\"p1\"},{\"ident\":\"p1: Mon 3\",\"details\":\"Thundurus, M\",\"condition\":\"21/100\",\"active\":false,\"level\":100,\"moves\":[],\"item\":null,\"ability\":null,\"baseAbility\":null,\"teraType\":null,\"terastallized\":false,\"side\":\"p1\"},{\"ident\":\"p1: Mon 4\",\"details\":\"Mandibuzz, F, tera:Steel\",\"condition\":\"91/100\",\"active\":false,\"level\":100,\"moves\":[],\"item\":null,\"ability\":null,\"baseAbility\":null,\"teraType\":\"Steel\",\"terastallized\":true,\"side\":\"p1\"},{\"ident\":\"p2: Mon 4\",\"details\":\"Cinccino, M\",\"condition\":\"0/100 fnt\",\"active\":false,\"level\":100,\"moves\":[],\"item\":null,\"ability\":null,\"baseAbility\":null,\"teraType\":null,\"terastallized\":false,\"side\":\"p2\"},{\"ident\":null,\"details\":\"Talonflame, M\",\"condition\":\"1000/1000\",\"active\":false,\"level\":100,\"moves\":[],\"item\":null,\"ability\":null,\"baseAbility\":null,\"teraType\":null,\"terastallized\":false,\"side\":\"p2\"},{\"ident\":\"p2: Mon 3\",\"details\":\"Yanmega, M\",\"condition\":\"0/100 fnt\",\"active\":false,\"level\":100,\"moves\":[],\"item\":\"Life Orb\",\"ability\":\"Speed Boost\",\"baseAbility\":\"Speed Boost\",\"teraType\":null,\"terastallized\":false,\"side\":\"p2\"},{\"ident\":\"p2: Mon 1\",\"details\":\"Fezandipiti, M\",\"condition\":\"61/100\",\"active\":false,\"level\":100,\"moves\":[],\"item\":null,\"ability\":\"Toxic Chain\",\"baseAbility\":\"Toxic Chain\",\"teraType\":null,\"terastallized\":false,\"side\":\"p2\"},{\"ident\":\"p2: Mon 5\",\"details\":\"Drifblim, F\",\"condition\":\"26/100 brn\",\"active\":false,\"level\":100,\"moves\":[],\"item\":null,\"ability\":null,\"baseAbility\":null,\"teraType\":null,\"terastallized\":false,\"side\":\"p2\"},{\"ident\":\"p2: Mon 2\",\"details\":\"Gyarados, M\",\"condition\":\"0/100 fnt\",\"active\":false,\"level\":100,\"moves\":[],\"item\":null,\"ability\":\"Intimidate\",\"baseAbility\":\"Intimidate\",\"teraType\":null,\"terastallized\":false,\"side\":\"p2\"}],\"field\":{\"weather\":null,\"terrain\":null,\"pseudoWeather\":[],\"yourSideConditions\":[],\"opponentSideConditions\":[]}}"
+   }
+  }
+ ],
+ "privateCoverage": {
+  "privatePreviewRequests": true,
+  "pairedEvaluations": true,
+  "terminalAtTurnZero": true,
+  "privateMoveRequest": false,
+  "privateTeraActionRequest": false,
+  "renderCertificate": false,
+  "playedTurn": false,
+  "identityScope": "Receipt IDs are aliases; identity/result hashes, engineVersion and historyRevision are exact captured values verified against raw responses, not sanitized replay hashes. Party hashes sort the nonidentifying projection by species.",
+  "reconstruction": "Tests replay selected sanitized protocol in memory. Omitted recovery/no-op frames and full envelopes remain in the local trace. Recomputed identities/actions are offline reconstruction, not recaptured evaluations or UI proof.",
+  "limits": "Team move names/Tera types are captured; private move/Tera actions are not. Public cases remain spectator-only. No full-match or private cross-client parity claim."
+ },
+ "privateCaptures": [
+  {
+   "id": "preact-private-immediate-forfeit",
+   "client": "preact-beta",
+   "coverage": "Preview-only immediate forfeit; no lead or turn selected.",
+   "observations": [
+    {
+     "key": "preact-private-1-1",
+     "client": "preact-beta",
+     "provenance": {
+      "trace": 1,
+      "jsonlLine": 100,
+      "observationIndex": 0,
+      "requestId": "req-1f",
+      "at": "2026-10-18T17:00:20.639Z",
+      "originalObservationIdSha256": "808b6cd60fcb099019772b4c78405c588862d915c38811fed32243574536b5ea",
+      "rawJsonlLineSha256": "bec64b045e975060ec3462bd5b396354655f10c97cb35e61dd9a37f0f1d629c9",
+      "rawDataSha256": "98e14a5d739fe2b511e77b685afead9a8c733b2a638154752c7e9e72193fa4ae",
+      "originalLineCount": 5,
+      "retainedLineCount": 5,
+      "trimAfter": null
+     },
+     "observation": {
+      "observationId": "capture-4:24:battle-room-3",
+      "sessionId": "session-5",
+      "sequence": 1,
+      "roomId": "battle-room-3",
+      "source": "protocol",
+      "data": ">battle-room-3\n|init|battle\n|title|Player 1 vs. Player 2\n\n"
+     }
+    },
+    {
+     "key": "preact-private-1-2",
+     "client": "preact-beta",
+     "provenance": {
+      "trace": 1,
+      "jsonlLine": 100,
+      "observationIndex": 2,
+      "requestId": "req-1f",
+      "at": "2026-10-18T17:00:20.639Z",
+      "originalObservationIdSha256": "c8e4516b99b85c5a77c186143d80bffc66fe943d1650600f02aaf56466a66644",
+      "rawJsonlLineSha256": "bec64b045e975060ec3462bd5b396354655f10c97cb35e61dd9a37f0f1d629c9",
+      "rawDataSha256": "36503c31b60e4ffb586d536af8640ede3f31810103a29d9731dc4b31d38b43df",
+      "originalLineCount": 3,
+      "retainedLineCount": 3,
+      "trimAfter": null
+     },
+     "observation": {
+      "observationId": "capture-4:26:battle-room-3",
+      "sessionId": "session-5",
+      "sequence": 3,
+      "roomId": "battle-room-3",
+      "source": "protocol",
+      "data": ">battle-room-3\n\n|gametype|singles"
+     }
+    },
+    {
+     "key": "preact-private-1-3",
+     "client": "preact-beta",
+     "provenance": {
+      "trace": 1,
+      "jsonlLine": 100,
+      "observationIndex": 3,
+      "requestId": "req-1f",
+      "at": "2026-10-18T17:00:20.639Z",
+      "originalObservationIdSha256": "19f8980976cb6f7dba88db22b192e728842b915e54ecb47067d437886581da45",
+      "rawJsonlLineSha256": "bec64b045e975060ec3462bd5b396354655f10c97cb35e61dd9a37f0f1d629c9",
+      "rawDataSha256": "4f6c4facc03fe055fa5d839ef19a74544587da9b4c6c2d2a8517c25fa83aac17",
+      "originalLineCount": 2,
+      "retainedLineCount": 2,
+      "trimAfter": null
+     },
+     "observation": {
+      "observationId": "capture-4:27:battle-room-3",
+      "sessionId": "session-5",
+      "sequence": 4,
+      "roomId": "battle-room-3",
+      "source": "protocol",
+      "data": ">battle-room-3\n|player|p1|Player 1"
+     }
+    },
+    {
+     "key": "preact-private-1-4",
+     "client": "preact-beta",
+     "provenance": {
+      "trace": 1,
+      "jsonlLine": 100,
+      "observationIndex": 4,
+      "requestId": "req-1f",
+      "at": "2026-10-18T17:00:20.639Z",
+      "originalObservationIdSha256": "79c560f27b7e2672b51a10bec6e6b411f18a77e78cc714976924d07c42d293f4",
+      "rawJsonlLineSha256": "bec64b045e975060ec3462bd5b396354655f10c97cb35e61dd9a37f0f1d629c9",
+      "rawDataSha256": "c7b6209856d344684cc1e4c384031d2a73a0e76743719ca21d661dceaeae81d6",
+      "originalLineCount": 27,
+      "retainedLineCount": 27,
+      "trimAfter": null
+     },
+     "observation": {
+      "observationId": "capture-4:28:battle-room-3",
+      "sessionId": "session-5",
+      "sequence": 5,
+      "roomId": "battle-room-3",
+      "source": "protocol",
+      "data": ">battle-room-3\n|player|p2|Player 2\n|gen|9\n|tier|[Gen 9] UU\n\n\n\n\n\n\n\n\n\n|clearpoke\n|poke|p1|Fezandipiti, M|\n|poke|p1|Donphan, F|\n|poke|p1|Arcanine-Hisui, F|\n|poke|p1|Slowking, M|\n|poke|p1|Thundurus, M|\n|poke|p1|Mamoswine, M|\n|poke|p2|Iron Jugulis|\n|poke|p2|Slither Wing|\n|poke|p2|Keldeo-Resolute|\n|poke|p2|Mandibuzz, F|\n|poke|p2|Clodsire, F|\n|poke|p2|Metagross|\n|teampreview"
+     }
+    },
+    {
+     "key": "preact-private-1-5",
+     "client": "preact-beta",
+     "provenance": {
+      "trace": 1,
+      "jsonlLine": 100,
+      "observationIndex": 5,
+      "requestId": "req-1f",
+      "at": "2026-10-18T17:00:20.639Z",
+      "originalObservationIdSha256": "cd24c5081ac616be662e4b2d4ca20fef2ad4dd200aaaaf796b50c1566e108e68",
+      "rawJsonlLineSha256": "bec64b045e975060ec3462bd5b396354655f10c97cb35e61dd9a37f0f1d629c9",
+      "rawDataSha256": "fd287ca62adf47ddf47a92550fba1a9a7dd742173ca4b8b451840de0dd2c29c8",
+      "originalLineCount": 2,
+      "retainedLineCount": 2,
+      "trimAfter": null
+     },
+     "observation": {
+      "observationId": "capture-4:29:battle-room-3",
+      "sessionId": "session-5",
+      "sequence": 6,
+      "roomId": "battle-room-3",
+      "source": "protocol",
+      "data": ">battle-room-3\n|request|{\"teamPreview\":true,\"side\":{\"name\":\"Player 1\",\"id\":\"p1\",\"pokemon\":[{\"ident\":\"p1: Mon 1\",\"details\":\"Fezandipiti, M\",\"condition\":\"380/380\",\"active\":true,\"stats\":{\"atk\":218,\"def\":260,\"spa\":158,\"spd\":319,\"spe\":234},\"moves\":[\"moonblast\",\"taunt\",\"roost\",\"uturn\"],\"baseAbility\":\"toxicchain\",\"item\":\"heavydutyboots\",\"pokeball\":\"pokeball\",\"ability\":\"toxicchain\",\"commanding\":false,\"reviving\":false,\"teraType\":\"Water\",\"terastallized\":\"\"},{\"ident\":\"p1: Mon 2\",\"details\":\"Donphan, F\",\"condition\":\"383/383\",\"active\":false,\"stats\":{\"atk\":308,\"def\":332,\"spa\":140,\"spd\":156,\"spe\":141},\"moves\":[\"stealthrock\",\"icespinner\",\"earthquake\",\"rapidspin\"],\"baseAbility\":\"sturdy\",\"item\":\"leftovers\",\"pokeball\":\"pokeball\",\"ability\":\"sturdy\",\"commanding\":false,\"reviving\":false,\"teraType\":\"Ghost\",\"terastallized\":\"\"},{\"ident\":\"p1: Mon 3\",\"details\":\"Arcanine-Hisui, F\",\"condition\":\"331/331\",\"active\":false,\"stats\":{\"atk\":329,\"def\":196,\"spa\":203,\"spd\":197,\"spe\":306},\"moves\":[\"headsmash\",\"flareblitz\",\"doubleedge\",\"extremespeed\"],\"baseAbility\":\"rockhead\",\"item\":\"choicescarf\",\"pokeball\":\"pokeball\",\"ability\":\"rockhead\",\"commanding\":false,\"reviving\":false,\"teraType\":\"Fire\",\"terastallized\":\"\"},{\"ident\":\"p1: Mon 4\",\"details\":\"Slowking, M\",\"condition\":\"394/394\",\"active\":false,\"stats\":{\"atk\":155,\"def\":256,\"spa\":236,\"spd\":286,\"spe\":58},\"moves\":[\"scald\",\"futuresight\",\"slackoff\",\"chillyreception\"],\"baseAbility\":\"regenerator\",\"item\":\"heavydutyboots\",\"pokeball\":\"pokeball\",\"ability\":\"regenerator\",\"commanding\":false,\"reviving\":false,\"teraType\":\"Fairy\",\"terastallized\":\"\"},{\"ident\":\"p1: Mon 5\",\"details\":\"Thundurus, M\",\"condition\":\"299/299\",\"active\":false,\"stats\":{\"atk\":239,\"def\":177,\"spa\":349,\"spd\":196,\"spe\":353},\"moves\":[\"voltswitch\",\"knockoff\",\"focusblast\",\"thunderwave\"],\"baseAbility\":\"prankster\",\"item\":\"heavydutyboots\",\"pokeball\":\"pokeball\",\"ability\":\"prankster\",\"commanding\":false,\"reviving\":false,\"teraType\":\"Steel\",\"terastallized\":\"\"},{\"ident\":\"p1: Mon 6\",\"details\":\"Mamoswine, M\",\"condition\":\"361/361\",\"active\":false,\"stats\":{\"atk\":359,\"def\":196,\"spa\":158,\"spd\":157,\"spe\":284},\"moves\":[\"earthquake\",\"iciclecrash\",\"knockoff\",\"iceshard\"],\"baseAbility\":\"thickfat\",\"item\":\"heavydutyboots\",\"pokeball\":\"pokeball\",\"ability\":\"thickfat\",\"commanding\":false,\"reviving\":false,\"teraType\":\"Ice\",\"terastallized\":\"\"}]},\"rqid\":2}"
+     }
+    },
+    {
+     "key": "preact-private-1-6",
+     "client": "preact-beta",
+     "provenance": {
+      "trace": 1,
+      "jsonlLine": 106,
+      "observationIndex": 1,
+      "requestId": "req-1i",
+      "at": "2026-10-18T17:00:28.516Z",
+      "originalObservationIdSha256": "b8c64fec4f6e83654279159b4db904c5bf64385562fa18e718f912081851354b",
+      "rawJsonlLineSha256": "af74ff6d0f91f798bc3299c018245c2490742bc65b913ff6688914702d7c4c6b",
+      "rawDataSha256": "8778f03338ca62d64738cf95ac9283182a0298c09698106d52031b75aa1e03e9",
+      "originalLineCount": 3,
+      "retainedLineCount": 3,
+      "trimAfter": null
+     },
+     "observation": {
+      "observationId": "capture-4:34:battle-room-3",
+      "sessionId": "session-5",
+      "sequence": 9,
+      "roomId": "battle-room-3",
+      "source": "protocol",
+      "data": ">battle-room-3\n\n|win|Player 2"
+     }
+    }
+   ],
+   "evaluations": [
+    {
+     "observationKey": "preact-private-1-5",
+     "provenance": {
+      "acknowledgment": {
+       "trace": 1,
+       "jsonlLine": 101,
+       "requestId": "req-1f",
+       "at": "2026-10-18T17:00:20.663Z",
+       "rawJsonlLineSha256": "e90d297c307ac511a70185d527e9eee6a7c4ca6bb7ccfa4d0b33ed8fd23b4542"
+      },
+      "resultIndex": 5,
+      "request": {
+       "trace": 1,
+       "jsonlLine": 104,
+       "requestId": "req-1h",
+       "at": "2026-10-18T17:00:22.028Z",
+       "rawJsonlLineSha256": "57b8c9442ef2c9303663f3c95421e585448f50dd4b16a203c6000b857fab4aed"
+      },
+      "response": {
+       "trace": 1,
+       "jsonlLine": 105,
+       "requestId": "req-1h",
+       "at": "2026-10-18T17:00:22.281Z",
+       "rawJsonlLineSha256": "c8e2dd1041dc8f74efd1c328fc41a03ae7bff2be20f960b8e0607727d19a3263"
+      },
+      "originalRoomIdSha256": "00eb674a4317172f62b1c125886470afd98e7714ae52da76b5777edd0a7b7a31",
+      "originalSessionIdSha256": "916ab32bf24613614894cf35ac02d87a088766f68b5ee07b7421a65227a6d40d"
+     },
+     "acknowledgment": {
+      "observationId": "capture-4:29:battle-room-3",
+      "acknowledgedSequence": 6,
+      "changed": true,
+      "identity": {
+       "roomId": "battle-room-3",
+       "rqid": 2,
+       "snapshotHash": "sha256:1777ad3d82430781a2679862e75482d759a4859f7e8a4d7806eb519250c4a968",
+       "legalActionSetHash": "sha256:daa07dc92a5f555f13f5123b12148bb4503f4a73ead0de225135462816cf64a3",
+       "stateRevision": 2,
+       "requestKind": "team_preview"
+      },
+      "turn": 0,
+      "phase": "preview",
+      "factCount": 21
+     },
+     "request": {
+      "sessionId": "session-5",
+      "identity": {
+       "roomId": "battle-room-3",
+       "rqid": 2,
+       "snapshotHash": "sha256:1777ad3d82430781a2679862e75482d759a4859f7e8a4d7806eb519250c4a968",
+       "legalActionSetHash": "sha256:daa07dc92a5f555f13f5123b12148bb4503f4a73ead0de225135462816cf64a3",
+       "stateRevision": 2,
+       "requestKind": "team_preview"
+      },
+      "historyRevision": "sha256:a47d2fbde558884b9204a531e82465e493e6468587074766a000a1f523da83ab"
+     },
+     "response": {
+      "status": 200,
+      "evaluatedAt": "2026-10-18T17:00:22.280Z",
+      "contractVersion": "showdown-decision@1",
+      "engineVersion": "shwdn2op:sha256:96bf88c344bc6a0286f5f722b6588f361638517b860376a8a61caf95313840ee",
+      "identity": {
+       "roomId": "battle-room-3",
+       "rqid": 2,
+       "snapshotHash": "sha256:1777ad3d82430781a2679862e75482d759a4859f7e8a4d7806eb519250c4a968",
+       "legalActionSetHash": "sha256:daa07dc92a5f555f13f5123b12148bb4503f4a73ead0de225135462816cf64a3",
+       "stateRevision": 2,
+       "requestKind": "team_preview"
+      },
+      "historyRevision": "sha256:a47d2fbde558884b9204a531e82465e493e6468587074766a000a1f523da83ab",
+      "resultHash": "sha256:1b3e6b38fe8e430937fa5ab957baf2efc31593ed720a240fb901090a4e378c40",
+      "phase": "preview",
+      "turn": 0,
+      "sideId": "p1",
+      "actionable": true,
+      "legalActionCount": 720,
+      "rankedActionCount": 720,
+      "topActionId": "team:123456",
+      "rankedActionIdsHash": "sha256:a6ba956838bb0485628dc930b00910ee511c47119853cacf03fa6dd615b5f3fa",
+      "partyHash": "sha256:5d4f4331e9d1bbcff25d7e5d19cba4ac2c9253880386c9720ff754337fe57ee2"
+     }
+    },
+    {
+     "observationKey": "preact-private-1-6",
+     "provenance": {
+      "acknowledgment": {
+       "trace": 1,
+       "jsonlLine": 107,
+       "requestId": "req-1i",
+       "at": "2026-10-18T17:00:28.542Z",
+       "rawJsonlLineSha256": "683dc3a991915731abceeff2345f9168664ed2f80c551a0d32fec844787b1a9e"
+      },
+      "resultIndex": 1,
+      "request": {
+       "trace": 1,
+       "jsonlLine": 108,
+       "requestId": "req-1j",
+       "at": "2026-10-18T17:00:28.858Z",
+       "rawJsonlLineSha256": "81fb77979bb5b24f2f88fd89749bd91e9d3333e202e3e4f406fe6190762affcd"
+      },
+      "response": {
+       "trace": 1,
+       "jsonlLine": 109,
+       "requestId": "req-1j",
+       "at": "2026-10-18T17:00:28.873Z",
+       "rawJsonlLineSha256": "2a34340ad4e292e29229ee6c24df059eb1862e4309235b4a7c065adf15948e85"
+      },
+      "originalRoomIdSha256": "00eb674a4317172f62b1c125886470afd98e7714ae52da76b5777edd0a7b7a31",
+      "originalSessionIdSha256": "916ab32bf24613614894cf35ac02d87a088766f68b5ee07b7421a65227a6d40d"
+     },
+     "acknowledgment": {
+      "observationId": "capture-4:34:battle-room-3",
+      "acknowledgedSequence": 9,
+      "changed": true,
+      "identity": {
+       "roomId": "battle-room-3",
+       "rqid": 2,
+       "snapshotHash": "sha256:0f39cbab42926a0db1958ad7b230f5392a392fb6a6ca8371b289c3354f04d074",
+       "legalActionSetHash": "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+       "stateRevision": 3,
+       "requestKind": "finished"
+      },
+      "turn": 0,
+      "phase": "finished",
+      "factCount": 22
+     },
+     "request": {
+      "sessionId": "session-5",
+      "identity": {
+       "roomId": "battle-room-3",
+       "rqid": 2,
+       "snapshotHash": "sha256:0f39cbab42926a0db1958ad7b230f5392a392fb6a6ca8371b289c3354f04d074",
+       "legalActionSetHash": "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+       "stateRevision": 3,
+       "requestKind": "finished"
+      },
+      "historyRevision": "sha256:81fdd9ae3d5c3aca4cf7b70f2b547e37aa5f9d1914988c817b771e02540e802c"
+     },
+     "response": {
+      "status": 200,
+      "evaluatedAt": "2026-10-18T17:00:28.873Z",
+      "contractVersion": "showdown-decision@1",
+      "engineVersion": "shwdn2op:sha256:96bf88c344bc6a0286f5f722b6588f361638517b860376a8a61caf95313840ee",
+      "identity": {
+       "roomId": "battle-room-3",
+       "rqid": 2,
+       "snapshotHash": "sha256:0f39cbab42926a0db1958ad7b230f5392a392fb6a6ca8371b289c3354f04d074",
+       "legalActionSetHash": "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+       "stateRevision": 3,
+       "requestKind": "finished"
+      },
+      "historyRevision": "sha256:81fdd9ae3d5c3aca4cf7b70f2b547e37aa5f9d1914988c817b771e02540e802c",
+      "resultHash": "sha256:c5c8d12160863211cc496b6bec0919a136a7964f96a8ab118befddfbcdca5429",
+      "phase": "finished",
+      "turn": 0,
+      "sideId": "p1",
+      "actionable": false,
+      "legalActionCount": 0,
+      "rankedActionCount": 0,
+      "topActionId": null,
+      "rankedActionIdsHash": "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "partyHash": "sha256:5d4f4331e9d1bbcff25d7e5d19cba4ac2c9253880386c9720ff754337fe57ee2"
+     }
+    }
+   ]
+  },
+  {
+   "id": "preact-private-final-probe",
+   "client": "preact-beta",
+   "coverage": "Manual UI observation, not in the trace: Fezandipiti lead selected, opponent never selected. Forfeited before deadline; server win at turn 0. Inbound trace does not prove UI selection.",
+   "observations": [
+    {
+     "key": "preact-private-2-1",
+     "client": "preact-beta",
+     "provenance": {
+      "trace": 1,
+      "jsonlLine": 128,
+      "observationIndex": 0,
+      "requestId": "req-1u",
+      "at": "2026-10-18T17:03:27.564Z",
+      "originalObservationIdSha256": "a4eead17a44cff34a7d1eb516f15d1f5f140b3088ad31a3cde148bc5e34e0a6a",
+      "rawJsonlLineSha256": "431526718fadeace12a804c7a7f7b2c2b26de295d318a162c1e873bd245eae95",
+      "rawDataSha256": "ee0e7d4a9628aa3d153f96a13dc170661d7a57d294327694bccf57e7766fa542",
+      "originalLineCount": 6,
+      "retainedLineCount": 6,
+      "trimAfter": null
+     },
+     "observation": {
+      "observationId": "capture-4:66:battle-room-4",
+      "sessionId": "session-6",
+      "sequence": 1,
+      "roomId": "battle-room-4",
+      "source": "protocol",
+      "data": ">battle-room-4\n|init|battle\n|title|Player 1 vs. Player 2\n\n\n"
+     }
+    },
+    {
+     "key": "preact-private-2-2",
+     "client": "preact-beta",
+     "provenance": {
+      "trace": 1,
+      "jsonlLine": 128,
+      "observationIndex": 1,
+      "requestId": "req-1u",
+      "at": "2026-10-18T17:03:27.564Z",
+      "originalObservationIdSha256": "9ae124c82bb5cfd1f9f64c7a169181018c0962aa8b1daba8b50397ff66932f98",
+      "rawJsonlLineSha256": "431526718fadeace12a804c7a7f7b2c2b26de295d318a162c1e873bd245eae95",
+      "rawDataSha256": "4eba1979e7b8866db0a38b9677877c899397c51fe63bca0457edc1247910f2f5",
+      "originalLineCount": 3,
+      "retainedLineCount": 3,
+      "trimAfter": null
+     },
+     "observation": {
+      "observationId": "capture-4:67:battle-room-4",
+      "sessionId": "session-6",
+      "sequence": 2,
+      "roomId": "battle-room-4",
+      "source": "protocol",
+      "data": ">battle-room-4\n\n|gametype|singles"
+     }
+    },
+    {
+     "key": "preact-private-2-3",
+     "client": "preact-beta",
+     "provenance": {
+      "trace": 1,
+      "jsonlLine": 128,
+      "observationIndex": 2,
+      "requestId": "req-1u",
+      "at": "2026-10-18T17:03:27.564Z",
+      "originalObservationIdSha256": "a93893b173b1ec3867f6449b652fa2a4c89820c0be88bb5356c625dbfd4fdac7",
+      "rawJsonlLineSha256": "431526718fadeace12a804c7a7f7b2c2b26de295d318a162c1e873bd245eae95",
+      "rawDataSha256": "fffb60bad7acbab5fca50213a113ae7ea24abb55bb3c367dcb1ac356f913c960",
+      "originalLineCount": 2,
+      "retainedLineCount": 2,
+      "trimAfter": null
+     },
+     "observation": {
+      "observationId": "capture-4:68:battle-room-4",
+      "sessionId": "session-6",
+      "sequence": 3,
+      "roomId": "battle-room-4",
+      "source": "protocol",
+      "data": ">battle-room-4\n|player|p1|Player 1"
+     }
+    },
+    {
+     "key": "preact-private-2-4",
+     "client": "preact-beta",
+     "provenance": {
+      "trace": 1,
+      "jsonlLine": 128,
+      "observationIndex": 3,
+      "requestId": "req-1u",
+      "at": "2026-10-18T17:03:27.564Z",
+      "originalObservationIdSha256": "026fdb8d24e14a2155db73653d1210276f13cdd6397332a1712609aa599e212c",
+      "rawJsonlLineSha256": "431526718fadeace12a804c7a7f7b2c2b26de295d318a162c1e873bd245eae95",
+      "rawDataSha256": "7ebba73a8808cf2fc202914d04f742a70b9a3c33ef9448e1d0552498867ae30c",
+      "originalLineCount": 27,
+      "retainedLineCount": 27,
+      "trimAfter": null
+     },
+     "observation": {
+      "observationId": "capture-4:69:battle-room-4",
+      "sessionId": "session-6",
+      "sequence": 4,
+      "roomId": "battle-room-4",
+      "source": "protocol",
+      "data": ">battle-room-4\n|player|p2|Player 2\n|gen|9\n|tier|[Gen 9] UU\n\n\n\n\n\n\n\n\n\n|clearpoke\n|poke|p1|Cinccino, F|\n|poke|p1|Talonflame, F|\n|poke|p1|Yanmega, M|\n|poke|p1|Fezandipiti, M|\n|poke|p1|Drifblim, M|\n|poke|p1|Gyarados, M|\n|poke|p2|Fezandipiti, M|\n|poke|p2|Donphan, F|\n|poke|p2|Arcanine-Hisui, F|\n|poke|p2|Slowking, F|\n|poke|p2|Thundurus, M|\n|poke|p2|Mamoswine, F|\n|teampreview"
+     }
+    },
+    {
+     "key": "preact-private-2-5",
+     "client": "preact-beta",
+     "provenance": {
+      "trace": 1,
+      "jsonlLine": 128,
+      "observationIndex": 4,
+      "requestId": "req-1u",
+      "at": "2026-10-18T17:03:27.564Z",
+      "originalObservationIdSha256": "028c4a993b3a5eb6d4cc6b61089c29c7aa80a7dfb948414467db7e3b866fb7cf",
+      "rawJsonlLineSha256": "431526718fadeace12a804c7a7f7b2c2b26de295d318a162c1e873bd245eae95",
+      "rawDataSha256": "7c677d18be4f7f99d8b0873340c31543d545549d1328ea4d0c4b39834b230ec0",
+      "originalLineCount": 2,
+      "retainedLineCount": 2,
+      "trimAfter": null
+     },
+     "observation": {
+      "observationId": "capture-4:70:battle-room-4",
+      "sessionId": "session-6",
+      "sequence": 5,
+      "roomId": "battle-room-4",
+      "source": "protocol",
+      "data": ">battle-room-4\n|request|{\"teamPreview\":true,\"side\":{\"name\":\"Player 2\",\"id\":\"p2\",\"pokemon\":[{\"ident\":\"p2: Mon 1\",\"details\":\"Fezandipiti, M\",\"condition\":\"380/380\",\"active\":true,\"stats\":{\"atk\":218,\"def\":260,\"spa\":158,\"spd\":319,\"spe\":234},\"moves\":[\"moonblast\",\"taunt\",\"roost\",\"uturn\"],\"baseAbility\":\"toxicchain\",\"item\":\"heavydutyboots\",\"pokeball\":\"pokeball\",\"ability\":\"toxicchain\",\"commanding\":false,\"reviving\":false,\"teraType\":\"Water\",\"terastallized\":\"\"},{\"ident\":\"p2: Mon 2\",\"details\":\"Donphan, F\",\"condition\":\"383/383\",\"active\":false,\"stats\":{\"atk\":308,\"def\":332,\"spa\":140,\"spd\":156,\"spe\":141},\"moves\":[\"stealthrock\",\"icespinner\",\"earthquake\",\"rapidspin\"],\"baseAbility\":\"sturdy\",\"item\":\"leftovers\",\"pokeball\":\"pokeball\",\"ability\":\"sturdy\",\"commanding\":false,\"reviving\":false,\"teraType\":\"Ghost\",\"terastallized\":\"\"},{\"ident\":\"p2: Mon 3\",\"details\":\"Arcanine-Hisui, F\",\"condition\":\"331/331\",\"active\":false,\"stats\":{\"atk\":329,\"def\":196,\"spa\":203,\"spd\":197,\"spe\":306},\"moves\":[\"headsmash\",\"flareblitz\",\"doubleedge\",\"extremespeed\"],\"baseAbility\":\"rockhead\",\"item\":\"choicescarf\",\"pokeball\":\"pokeball\",\"ability\":\"rockhead\",\"commanding\":false,\"reviving\":false,\"teraType\":\"Fire\",\"terastallized\":\"\"},{\"ident\":\"p2: Mon 4\",\"details\":\"Slowking, F\",\"condition\":\"394/394\",\"active\":false,\"stats\":{\"atk\":155,\"def\":256,\"spa\":236,\"spd\":286,\"spe\":58},\"moves\":[\"scald\",\"futuresight\",\"slackoff\",\"chillyreception\"],\"baseAbility\":\"regenerator\",\"item\":\"heavydutyboots\",\"pokeball\":\"pokeball\",\"ability\":\"regenerator\",\"commanding\":false,\"reviving\":false,\"teraType\":\"Fairy\",\"terastallized\":\"\"},{\"ident\":\"p2: Mon 5\",\"details\":\"Thundurus, M\",\"condition\":\"299/299\",\"active\":false,\"stats\":{\"atk\":239,\"def\":177,\"spa\":349,\"spd\":196,\"spe\":353},\"moves\":[\"voltswitch\",\"knockoff\",\"focusblast\",\"thunderwave\"],\"baseAbility\":\"prankster\",\"item\":\"heavydutyboots\",\"pokeball\":\"pokeball\",\"ability\":\"prankster\",\"commanding\":false,\"reviving\":false,\"teraType\":\"Steel\",\"terastallized\":\"\"},{\"ident\":\"p2: Mon 6\",\"details\":\"Mamoswine, F\",\"condition\":\"361/361\",\"active\":false,\"stats\":{\"atk\":359,\"def\":196,\"spa\":158,\"spd\":157,\"spe\":284},\"moves\":[\"earthquake\",\"iciclecrash\",\"knockoff\",\"iceshard\"],\"baseAbility\":\"thickfat\",\"item\":\"heavydutyboots\",\"pokeball\":\"pokeball\",\"ability\":\"thickfat\",\"commanding\":false,\"reviving\":false,\"teraType\":\"Ice\",\"terastallized\":\"\"}]},\"rqid\":3}"
+     }
+    },
+    {
+     "key": "preact-private-2-6",
+     "client": "preact-beta",
+     "provenance": {
+      "trace": 1,
+      "jsonlLine": 150,
+      "observationIndex": 1,
+      "requestId": "req-25",
+      "at": "2026-10-18T17:04:24.858Z",
+      "originalObservationIdSha256": "c4fea87214e59443a8a02299a09341ae5ed9bcb60a5cbb87d00195050c2117b0",
+      "rawJsonlLineSha256": "b2d1dbe8fa47ff5df155108813547e56f007048617cce36ab416c57416cea9f7",
+      "rawDataSha256": "713c46e89922f75d6a605617cdba004cd121492b27d6c1bbcc790f43a498b7b7",
+      "originalLineCount": 3,
+      "retainedLineCount": 3,
+      "trimAfter": null
+     },
+     "observation": {
+      "observationId": "capture-4:82:battle-room-4",
+      "sessionId": "session-6",
+      "sequence": 13,
+      "roomId": "battle-room-4",
+      "source": "protocol",
+      "data": ">battle-room-4\n\n|win|Player 1"
+     }
+    }
+   ],
+   "evaluations": [
+    {
+     "observationKey": "preact-private-2-5",
+     "provenance": {
+      "acknowledgment": {
+       "trace": 1,
+       "jsonlLine": 129,
+       "requestId": "req-1u",
+       "at": "2026-10-18T17:03:27.594Z",
+       "rawJsonlLineSha256": "c64510f0ccb52ad67a63fbdf4200f09c4c161efe6ed56a5cbbc1621b845e0838"
+      },
+      "resultIndex": 4,
+      "request": {
+       "trace": 1,
+       "jsonlLine": 132,
+       "requestId": "req-1w",
+       "at": "2026-10-18T17:03:27.958Z",
+       "rawJsonlLineSha256": "b14a52ea32084875bdd9906fcf933145599aa7e0931698c0ed47853a140bd763"
+      },
+      "response": {
+       "trace": 1,
+       "jsonlLine": 133,
+       "requestId": "req-1w",
+       "at": "2026-10-18T17:03:28.023Z",
+       "rawJsonlLineSha256": "5f46ddfa3df3dfdc7c0fe83ea3257469affc00a5870f4befdadc5870d941e81e"
+      },
+      "originalRoomIdSha256": "8af17229762dad82e63ec350a39fe2ac085cf0c942a0120e48e8119084c3f574",
+      "originalSessionIdSha256": "4124e00bcecffc803e0e693c1152cc88b108c0776db477f0e9f7c847f605ca6b"
+     },
+     "acknowledgment": {
+      "observationId": "capture-4:70:battle-room-4",
+      "acknowledgedSequence": 5,
+      "changed": true,
+      "identity": {
+       "roomId": "battle-room-4",
+       "rqid": 3,
+       "snapshotHash": "sha256:6ba48a9214768c6d1a602d20f325971a650a17d73bfa4b2528237e86e23e63a4",
+       "legalActionSetHash": "sha256:daa07dc92a5f555f13f5123b12148bb4503f4a73ead0de225135462816cf64a3",
+       "stateRevision": 2,
+       "requestKind": "team_preview"
+      },
+      "turn": 0,
+      "phase": "preview",
+      "factCount": 21
+     },
+     "request": {
+      "sessionId": "session-6",
+      "identity": {
+       "roomId": "battle-room-4",
+       "rqid": 3,
+       "snapshotHash": "sha256:6ba48a9214768c6d1a602d20f325971a650a17d73bfa4b2528237e86e23e63a4",
+       "legalActionSetHash": "sha256:daa07dc92a5f555f13f5123b12148bb4503f4a73ead0de225135462816cf64a3",
+       "stateRevision": 2,
+       "requestKind": "team_preview"
+      },
+      "historyRevision": "sha256:e75e65ae6e219ee627b1d81b4e057f64111533bef123fff92ebdad32437f14d1"
+     },
+     "response": {
+      "status": 200,
+      "evaluatedAt": "2026-10-18T17:03:28.022Z",
+      "contractVersion": "showdown-decision@1",
+      "engineVersion": "shwdn2op:sha256:96bf88c344bc6a0286f5f722b6588f361638517b860376a8a61caf95313840ee",
+      "identity": {
+       "roomId": "battle-room-4",
+       "rqid": 3,
+       "snapshotHash": "sha256:6ba48a9214768c6d1a602d20f325971a650a17d73bfa4b2528237e86e23e63a4",
+       "legalActionSetHash": "sha256:daa07dc92a5f555f13f5123b12148bb4503f4a73ead0de225135462816cf64a3",
+       "stateRevision": 2,
+       "requestKind": "team_preview"
+      },
+      "historyRevision": "sha256:e75e65ae6e219ee627b1d81b4e057f64111533bef123fff92ebdad32437f14d1",
+      "resultHash": "sha256:1426f06a6f0d5a728edb00ca465bf36c73b8a17f1f1568c201ce0bd127e07d1d",
+      "phase": "preview",
+      "turn": 0,
+      "sideId": "p2",
+      "actionable": true,
+      "legalActionCount": 720,
+      "rankedActionCount": 720,
+      "topActionId": "team:123456",
+      "rankedActionIdsHash": "sha256:a6ba956838bb0485628dc930b00910ee511c47119853cacf03fa6dd615b5f3fa",
+      "partyHash": "sha256:5d4f4331e9d1bbcff25d7e5d19cba4ac2c9253880386c9720ff754337fe57ee2"
+     }
+    },
+    {
+     "observationKey": "preact-private-2-6",
+     "provenance": {
+      "acknowledgment": {
+       "trace": 1,
+       "jsonlLine": 151,
+       "requestId": "req-25",
+       "at": "2026-10-18T17:04:24.880Z",
+       "rawJsonlLineSha256": "5172898dda4ba1b76c3f112912f25627bc7292fa4be42f82107704b85ba64990"
+      },
+      "resultIndex": 1,
+      "request": {
+       "trace": 1,
+       "jsonlLine": 154,
+       "requestId": "req-27",
+       "at": "2026-10-18T17:04:25.208Z",
+       "rawJsonlLineSha256": "846f7bab6aeda244152bab102492b3ba77ab214cc08b42612f98c45f0e9d3723"
+      },
+      "response": {
+       "trace": 1,
+       "jsonlLine": 155,
+       "requestId": "req-27",
+       "at": "2026-10-18T17:04:25.224Z",
+       "rawJsonlLineSha256": "b094fc4587335bc347b895de62139f7df3207cf8788f8b2ecd63ae735f365f32"
+      },
+      "originalRoomIdSha256": "8af17229762dad82e63ec350a39fe2ac085cf0c942a0120e48e8119084c3f574",
+      "originalSessionIdSha256": "4124e00bcecffc803e0e693c1152cc88b108c0776db477f0e9f7c847f605ca6b"
+     },
+     "acknowledgment": {
+      "observationId": "capture-4:82:battle-room-4",
+      "acknowledgedSequence": 13,
+      "changed": true,
+      "identity": {
+       "roomId": "battle-room-4",
+       "rqid": 3,
+       "snapshotHash": "sha256:a84a01c9c7ac237f101c97e84cfaf319777d76f02e8c9536b68358095164c9ac",
+       "legalActionSetHash": "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+       "stateRevision": 3,
+       "requestKind": "finished"
+      },
+      "turn": 0,
+      "phase": "finished",
+      "factCount": 22
+     },
+     "request": {
+      "sessionId": "session-6",
+      "identity": {
+       "roomId": "battle-room-4",
+       "rqid": 3,
+       "snapshotHash": "sha256:a84a01c9c7ac237f101c97e84cfaf319777d76f02e8c9536b68358095164c9ac",
+       "legalActionSetHash": "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+       "stateRevision": 3,
+       "requestKind": "finished"
+      },
+      "historyRevision": "sha256:3dde96f919f423ac5529927183b7d0ab84049813832d6308a458806763a799f7"
+     },
+     "response": {
+      "status": 200,
+      "evaluatedAt": "2026-10-18T17:04:25.224Z",
+      "contractVersion": "showdown-decision@1",
+      "engineVersion": "shwdn2op:sha256:96bf88c344bc6a0286f5f722b6588f361638517b860376a8a61caf95313840ee",
+      "identity": {
+       "roomId": "battle-room-4",
+       "rqid": 3,
+       "snapshotHash": "sha256:a84a01c9c7ac237f101c97e84cfaf319777d76f02e8c9536b68358095164c9ac",
+       "legalActionSetHash": "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+       "stateRevision": 3,
+       "requestKind": "finished"
+      },
+      "historyRevision": "sha256:3dde96f919f423ac5529927183b7d0ab84049813832d6308a458806763a799f7",
+      "resultHash": "sha256:98c84abcd09fa7dd14ea51024c485a44bae64c55a9840dfee30eb9170f4593b7",
+      "phase": "finished",
+      "turn": 0,
+      "sideId": "p2",
+      "actionable": false,
+      "legalActionCount": 0,
+      "rankedActionCount": 0,
+      "topActionId": null,
+      "rankedActionIdsHash": "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "partyHash": "sha256:5d4f4331e9d1bbcff25d7e5d19cba4ac2c9253880386c9720ff754337fe57ee2"
+     }
+    }
+   ]
+  }
+ ]
+}

@@ -1,6 +1,8 @@
 import { Dex } from "@pkmn/dex";
 import { Generations as DataGenerations } from "@pkmn/data";
-import { calculate, Field, Generations as CalcGenerations, Move, Pokemon, Side } from "@smogon/calc";
+import { calculate, Field, Generations as CalcGenerations, Move, Side } from "@smogon/calc";
+import { BattlePokemon as Pokemon, applyAbilityState, calculateDamageScenarios } from "../mechanics/calcPokemon.js";
+import { choiceRefutedByStint, stintRepeat } from "../mechanics/liveLikelyItems.js";
 
 import type {
   BattleSnapshot,
@@ -13,12 +15,10 @@ import type {
 } from "../types.js";
 
 import {
+  effectiveSpeed,
+  effectiveSpeedField,
   speedStageMultiplier,
-  paralysisSpeedMultiplier,
-  matchingFieldSpeedAbilityRule,
-  unburdenSpeedMultiplier,
-  boosterEnergySpeedMultiplier,
-  slowStartSpeedMultiplier
+  speedAbilityMultiplierRange
 } from "../mechanics/speed.js";
 
 type StatArchetypeId = PosteriorHypothesis["statArchetype"];
@@ -26,6 +26,7 @@ type StatId = "hp" | "atk" | "def" | "spa" | "spd" | "spe";
 type DamageDirection = "incoming" | "outgoing";
 
 export interface PosteriorBattleDamageObservation {
+  factIds?: string[] | undefined;
   key: string;
   direction: DamageDirection;
   turn: number;
@@ -37,6 +38,9 @@ export interface PosteriorBattleDamageObservation {
 }
 
 export interface PosteriorBattleSpeedObservation {
+  factIds?: string[] | undefined;
+  opponent?: PokemonSnapshot | undefined;
+  field?: BattleSnapshot["field"] | undefined;
   key: string;
   turn: number;
   relation: "first" | "second";
@@ -61,6 +65,10 @@ export interface PosteriorFormatStats {
   curatedItems: Record<string, number>;
   curatedAbilities: Record<string, number>;
   curatedTeraTypes: Record<string, number>;
+  /** The monthly ladder's held items for the species with their usage shares (absent without priors). */
+  ladderItems?: Array<{ name: string; share: number }> | undefined;
+  /** The monthly ladder's moves for the species with their set-inclusion shares (absent without priors). */
+  ladderMoves?: Array<{ name: string; share: number }> | undefined;
 }
 
 interface PosteriorBuildParams {
@@ -353,6 +361,7 @@ function createPokemonForCalc(params: {
   const level = normalizedBattleLevel(params.format, params.snapshotMon.level);
   const config: Record<string, unknown> = {
     level,
+    ability: "No Ability",
     boosts: calcBoosts(params.snapshotMon.boosts)
   };
   const hypothesis = params.hypothesis;
@@ -366,7 +375,7 @@ function createPokemonForCalc(params: {
     }
   } else {
     config.item = params.snapshotMon.item ?? undefined;
-    config.ability = params.snapshotMon.ability ?? undefined;
+    config.ability = params.snapshotMon.ability ?? "No Ability";
     if (params.snapshotMon.terastallized && params.snapshotMon.teraType) config.teraType = params.snapshotMon.teraType;
   }
   const status = normalizeStatus(params.snapshotMon.status);
@@ -405,6 +414,7 @@ function createPokemonForCalc(params: {
     pokemon.originalCurHP = Math.min(currentHp, pokemon.rawStats.hp);
   }
 
+  applyAbilityState(pokemon, params.snapshotMon);
   return pokemon;
 }
 
@@ -429,6 +439,22 @@ function damageRangePercent(result: ReturnType<typeof calculate>, defender: Poke
     min: (Math.min(...rolls) / hp) * 100,
     max: (Math.max(...rolls) / hp) * 100
   };
+}
+
+/** Choice items the current stint has refuted: two different moves since switching in (the same rule as the live item
+ * filter). Only for an unrevealed item; a revealed one is a fact (Trick can hand over a Choice item mid-stint). */
+function choiceItemRefuted(opponent: PokemonSnapshot, item: string | null) {
+  return ["choiceband", "choicespecs", "choicescarf"].includes(normalizeName(item)) && choiceRefutedByStint(opponent);
+}
+
+/** Booster Energy is consumed as soon as its holder's Protosynthesis/Quark Drive is not active from the field; an active
+ * Pokémon with a hidden, unconsumed item under no such field cannot hold it (otherwise a Slither Wing's Earthquake
+ * damage is split between Booster Energy and Choice Band). Magic Room suspends items. */
+function boosterRefutedByBoard(opponent: PokemonSnapshot, item: string | null, ability: string | null, field: BattleSnapshot["field"] | undefined) {
+  if (normalizeName(item) !== "boosterenergy" || opponent.item || opponent.removedItem || !opponent.active || !field) return false;
+  if (field.pseudoWeather.some((name) => /magic room/i.test(name))) return false;
+  const id = normalizeName(opponent.ability ?? ability);
+  return (id === "protosynthesis" && !/sun/i.test(field.weather ?? "")) || (id === "quarkdrive" && !/electric/i.test(field.terrain ?? ""));
 }
 
 function isItemKnownImpossible(item: string | null, moves: string[], format: string) {
@@ -472,6 +498,7 @@ function effectiveSpeedForHypothesis(
   hypothesis: PosteriorHypothesis,
   options: {
     battleSnapshot?: BattleSnapshot | undefined;
+    field?: BattleSnapshot["field"] | undefined;
     includeCurrentBoardModifiers?: boolean | undefined;
   } = {}
 ) {
@@ -480,47 +507,46 @@ function effectiveSpeedForHypothesis(
   const species = lookupSpecies(gen, opponent.species ?? opponent.displayName);
   if (!species) return null;
   const level = normalizedBattleLevel(format, opponent.level);
-  let speed = estimateNonHpStat(species.baseStats.spe, level, hypothesis.evs.spe ?? 0, natureMultiplier("spe", hypothesis.nature));
-  if (normalizeName(hypothesis.item) === "choicescarf") speed = Math.floor(speed * 1.5);
-  if (normalizeName(hypothesis.item) === "ironball") speed = Math.floor(speed * 0.5);
-  if (!options.includeCurrentBoardModifiers) return speed;
-
-  const abilityId = normalizeName(hypothesis.ability);
-  speed = Math.floor(speed * speedStageMultiplier(opponent.boosts?.spe ?? 0));
-  if (opponent.status === "par" && abilityId !== "quickfeet") {
-    speed = Math.floor(speed * paralysisSpeedMultiplier(genNum));
+  const rawSpeed = estimateNonHpStat(species.baseStats.spe, level, hypothesis.evs.spe ?? 0, natureMultiplier("spe", hypothesis.nature));
+  const item = opponent.item ?? (opponent.removedItem ? null : hypothesis.item);
+  const rawField = options.includeCurrentBoardModifiers ? options.field ?? options.battleSnapshot?.field : undefined;
+  const field = rawField ? effectiveSpeedField(rawField, [opponent, options.battleSnapshot?.yourSide.active]) : undefined;
+  const abilityId = normalizeName(opponent.ability ?? hypothesis.ability);
+  let abilityRange = speedAbilityMultiplierRange(abilityId, field, opponent.removedItem, opponent.paradoxBoostedStat, opponent.slowStartActive);
+  if (["protosynthesis", "quarkdrive"].includes(abilityId) && abilityRange.min !== abilityRange.max) {
+    // Each posterior hypothesis already specifies a spread. Resolve its best
+    // stat separately, retaining boosted and unboosted sets across hypotheses.
+    const stats = ["atk", "def", "spa", "spd", "spe"] as const;
+    const bestStat = stats.reduce((best, stat) => {
+      const value = (key: typeof stat) => Math.floor(estimateNonHpStat(species.baseStats[key], level,
+        hypothesis.evs[key] ?? 0, natureMultiplier(key, hypothesis.nature)) * speedStageMultiplier(opponent.boosts?.[key] ?? 0));
+      return value(stat) > value(best) ? stat : best;
+    });
+    abilityRange = speedAbilityMultiplierRange(abilityId, field, opponent.removedItem, bestStat);
   }
-  if (opponent.status && abilityId === "quickfeet") {
-    speed = Math.floor(speed * 1.5);
-  }
-  if (options.battleSnapshot?.field.opponentSideConditions.some((value) => /tailwind/i.test(value))) {
-    speed = Math.floor(speed * 2);
-  }
-  const fieldSpeedRule = matchingFieldSpeedAbilityRule(abilityId, options.battleSnapshot?.field);
-  if (fieldSpeedRule) {
-    speed = Math.floor(speed * fieldSpeedRule.multiplier);
-  }
-  // Unburden: 2× after item consumption
-  const unburdenMul = unburdenSpeedMultiplier(abilityId, opponent.removedItem);
-  if (unburdenMul !== 1) speed = Math.floor(speed * unburdenMul);
-  // Booster Energy (non-field): 1.5× when Paradox ability consumed Booster Energy
-  const boosterMul = boosterEnergySpeedMultiplier(abilityId, opponent.removedItem, options.battleSnapshot?.field);
-  if (boosterMul !== 1) speed = Math.floor(speed * boosterMul);
-  // Slow Start: 0.5× for first 5 turns (turnsOnField not available here — skip)
-  return speed;
+  return effectiveSpeed(genNum, rawSpeed, {
+    ...opponent, item, ability: opponent.ability ?? hypothesis.ability,
+    ...(!options.includeCurrentBoardModifiers ? { boosts: {}, status: null, unburdenActive: false } : {})
+  }, field?.opponentSideConditions ?? [], field, Boolean(options.includeCurrentBoardModifiers && abilityRange.min === 1.5));
 }
 
 function speedObservationLogScore(format: string, opponent: PokemonSnapshot, hypothesis: PosteriorHypothesis, observation: PosteriorBattleSpeedObservation) {
-  const speed = effectiveSpeedForHypothesis(format, opponent, hypothesis);
+  const historical = observation.opponent ?? opponent;
+  const speed = effectiveSpeedForHypothesis(format, historical, hypothesis, {
+    field: observation.field, includeCurrentBoardModifiers: Boolean(observation.field)
+  });
   if (!Number.isFinite(speed)) return 0;
+  // A canonical order (factIds) has passed the supported-modifier filter: contradicting it is all but impossible. At 0.01 a
+  // 60:1 item prior outweighed it (an Armarouge stayed "Weakness Policy 74%" after outspeeding 353).
+  const contradiction = Math.log(observation.factIds?.length ? 0.0005 : 0.01);
   if (observation.relation === "first") {
     if (Number(speed) > observation.yourSpeedStat) return Math.log(0.97);
     if (Number(speed) === observation.yourSpeedStat) return Math.log(0.55);
-    return Math.log(0.01);
+    return contradiction;
   }
   if (Number(speed) < observation.yourSpeedStat) return Math.log(0.97);
   if (Number(speed) === observation.yourSpeedStat) return Math.log(0.55);
-  return Math.log(0.01);
+  return contradiction;
 }
 
 function damageObservationLogScore(
@@ -541,19 +567,20 @@ function damageObservationLogScore(
     ? createPokemonForCalc({ format, snapshotMon: observation.defender, side: "your", category })
     : createPokemonForCalc({ format, snapshotMon: observation.defender, side: "opponent", category, hypothesis });
   if (!attacker || !defender) return 0;
-  const result = calculate(
+  const results = calculateDamageScenarios(
     calcGen(genNum),
     attacker,
     defender,
     move,
     buildField(observation.field, observation.direction === "incoming" ? "opponent" : "your")
   );
-  const range = damageRangePercent(result, defender);
-  if (!range) return 0;
+  const ranges = results.map((result) => damageRangePercent(result, defender)).filter((range) => range !== null);
+  if (!ranges.length) return 0;
   const observed = observation.percent;
-  if (observed >= range.min - 2 && observed <= range.max + 2) return Math.log(0.95);
-  if (observed >= range.min - 5 && observed <= range.max + 5) return Math.log(0.6);
-  if (observed >= range.min - 10 && observed <= range.max + 10) return Math.log(0.2);
+  // Unknown activation is nuisance uncertainty, not a fabricated 50/50 prior.
+  if (ranges.some((range) => observed >= range.min - 2 && observed <= range.max + 2)) return Math.log(0.95);
+  if (ranges.some((range) => observed >= range.min - 5 && observed <= range.max + 5)) return Math.log(0.6);
+  if (ranges.some((range) => observed >= range.min - 10 && observed <= range.max + 10)) return Math.log(0.2);
   return Math.log(0.03);
 }
 
@@ -657,6 +684,20 @@ function inferenceEventLogScore(hypothesis: PosteriorHypothesis, events: Inferen
   return logScore;
 }
 
+/** How likely a player without a Choice item picks the same move again: the move just used counts twice against the
+ * set's other options, the expected number of other moves it holds (revealed ones, plus ladder inclusion shares, else
+ * those of at least five stored battles, which include this one; else three unknown slots; at most three). With a Choice
+ * item a repeat is certain, so each repeat of one move raises the likelihood of a locking item. */
+function repeatChanceWithoutChoice(move: string, opponent: PokemonSnapshot, formatStats: PosteriorFormatStats) {
+  const revealed = new Set(opponent.knownMoves.map(normalizeName).filter((name) => name !== normalizeName(move)));
+  const inclusion = formatStats.ladderMoves?.length ? formatStats.ladderMoves
+    : formatStats.observedBattlesSeen >= 5 ? Object.entries(formatStats.observedMoves).map(([name, count]) => ({ name, share: count / formatStats.observedBattlesSeen })) : [];
+  const unrevealed = inclusion.filter((entry) => ![normalizeName(move), ...revealed].includes(normalizeName(entry.name)))
+    .reduce((sum, entry) => sum + Math.min(1, entry.share), 0);
+  const alternatives = Math.min(3, inclusion.length ? revealed.size + unrevealed : Math.max(3, revealed.size));
+  return 2 / (2 + alternatives);
+}
+
 function weightedPercentile(values: Array<{ value: number; weight: number }>, percentile: number) {
   const filtered = values.filter((entry) => Number.isFinite(entry.value) && entry.weight > 0).sort((a, b) => a.value - b.value);
   if (filtered.length === 0) return 0;
@@ -692,17 +733,38 @@ function candidateAbilities(opponent: PokemonSnapshot, format: string) {
   return uniqueNames(Object.values(species.abilities));
 }
 
-function candidateItems(opponent: PokemonSnapshot, formatStats: PosteriorFormatStats) {
+/** Ladder items below this share are not proposed (each still counts in the share prior's mass). */
+const LADDER_ITEM_MIN_SHARE = 0.01;
+const LADDER_ITEM_FLOOR = 0.005;
+
+function candidateItems(opponent: PokemonSnapshot, formatStats: PosteriorFormatStats, format: string) {
   // When an item has been consumed/removed, use the removed item as the
   // candidate so the posterior can still score hypotheses about the mon's
   // BUILD (ability, archetype, etc.).  Damage calc already skips the item
   // when removedItem is set (line 359).
   if (!opponent.item && opponent.removedItem) return [opponent.removedItem];
   if (opponent.item) return [opponent.item];
+  // An unrevealed item is one this species runs: the ladder's list when there is one, never the generic list beside it,
+  // and never an item without an effect for it (Gengar's posterior once held Eviolite at 0.19).
+  const gen = dataGen(generationFromFormat(format));
+  const species = lookupSpecies(gen, opponent.species ?? opponent.displayName);
+  const ladder = (formatStats.ladderItems ?? []).filter((entry) => entry.share >= LADDER_ITEM_MIN_SHARE).map((entry) => entry.name);
   return uniqueNames([
     ...combinedTopRecordNames([formatStats.observedItems, formatStats.curatedItems], 4),
-    ...DEFAULT_ITEMS
-  ]);
+    ...(ladder.length ? ladder : DEFAULT_ITEMS)
+  ]).filter((name) => {
+    const item = gen.items.get(name);
+    if (normalizeName(name) === "eviolite") return Boolean(species?.nfe);
+    const users = (item as { itemUser?: string[] } | undefined)?.itemUser;
+    return !users?.length || !species || users.includes(species.name) || users.includes(species.baseSpecies);
+  });
+}
+
+/** The ladder's usage share as the item prior (a floor for an item seen only in stored history); flat without ladder data. */
+function ladderItemShare(formatStats: PosteriorFormatStats, item: string | null) {
+  const ladder = formatStats.ladderItems;
+  if (!ladder?.length || !item) return 1;
+  return Math.max(LADDER_ITEM_FLOOR, ladder.find((entry) => normalizeName(entry.name) === normalizeName(item))?.share ?? 0);
 }
 
 function candidateTeraTypes(opponent: PokemonSnapshot, format: string, formatStats: PosteriorFormatStats) {
@@ -785,9 +847,13 @@ export function buildOpponentPosterior(params: PosteriorBuildParams): OpponentPo
   if (!species) return undefined;
 
   const abilities = candidateAbilities(params.opponent, params.format);
-  const items = candidateItems(params.opponent, params.formatStats);
+  const items = candidateItems(params.opponent, params.formatStats, params.format);
   const teraTypes = candidateTeraTypes(params.opponent, params.format, params.formatStats);
   const evidence = buildEvidenceSummary(params);
+  // Each repeat of the stint's only move: certain under a Choice item, likely only so much without one.
+  const repeat = params.opponent.item || params.opponent.removedItem ? null : stintRepeat(params.battleSnapshot, params.opponent);
+  const repeatLog = repeat ? (repeat.uses - 1) * Math.log(repeatChanceWithoutChoice(repeat.move, params.opponent, params.formatStats)) : 0;
+  if (repeat) evidence.push({ kind: "inference", label: `Used ${repeat.move} ${repeat.uses}× in a row this stint` });
   const evidenceKinds = [...new Set(evidence.map((entry) => entry.kind))];
 
   const skeletons: SkeletonCandidate[] = [];
@@ -811,6 +877,7 @@ export function buildOpponentPosterior(params: PosteriorBuildParams): OpponentPo
           value: item,
           candidateCount: Math.max(1, items.length)
         }));
+        if (!params.opponent.item && !params.opponent.removedItem) logScore += Math.log(ladderItemShare(params.formatStats, item));
         logScore += Math.log(combinedSmoothedShare({
           observedRecord: params.formatStats.observedTeraTypes,
           observedSamples: params.formatStats.observedBattlesSeen,
@@ -824,15 +891,18 @@ export function buildOpponentPosterior(params: PosteriorBuildParams): OpponentPo
     }
   }
 
-  const topSkeletons = skeletons
-    .sort((a, b) => b.logScore - a.logScore)
-    .slice(0, 24);
+  // The prior's top skeletons plus each candidate item's best one: battle evidence must be able to raise a rare item
+  // (Choice Scarf at 1.2% was pruned before an Armarouge's turn order could imply it).
+  skeletons.sort((a, b) => b.logScore - a.logScore);
+  const topSkeletons = [...new Set([...skeletons.slice(0, 24),
+    ...[...new Set(skeletons.map((skeleton) => skeleton.item))].map((item) => skeletons.find((skeleton) => skeleton.item === item)!)])];
 
   const scoredHypotheses: PosteriorHypothesis[] = [];
   for (const skeleton of topSkeletons) {
     for (const archetype of ARCHETYPES) {
       const compatibility = moveCompatibilityScore(skeleton.item, archetype, params.opponent.knownMoves, params.format);
-      if (!Number.isFinite(compatibility)) continue;
+      if (!Number.isFinite(compatibility) || choiceItemRefuted(params.opponent, skeleton.item)
+        || boosterRefutedByBoard(params.opponent, skeleton.item, skeleton.ability, params.battleSnapshot?.field)) continue;
       const hypothesis: PosteriorHypothesis = {
         ability: skeleton.ability,
         item: skeleton.item,
@@ -861,6 +931,7 @@ export function buildOpponentPosterior(params: PosteriorBuildParams): OpponentPo
       if (params.inferenceEvents && params.inferenceEvents.length > 0) {
         logScore += inferenceEventLogScore(hypothesis, params.inferenceEvents);
       }
+      if (!["choiceband", "choicespecs", "choicescarf"].includes(normalizeName(skeleton.item))) logScore += repeatLog;
       hypothesis.effectiveSpeed = effectiveSpeedForHypothesis(params.format, params.opponent, hypothesis, {
         battleSnapshot: params.battleSnapshot,
         includeCurrentBoardModifiers: true
@@ -872,13 +943,22 @@ export function buildOpponentPosterior(params: PosteriorBuildParams): OpponentPo
 
   if (scoredHypotheses.length === 0) return undefined;
   const maxLogScore = Math.max(...scoredHypotheses.map((entry) => entry.weight));
-  const normalized = scoredHypotheses
+  const all = scoredHypotheses
     .map((entry) => ({
       ...entry,
       weight: Math.exp(entry.weight - maxLogScore)
     }))
-    .sort((a, b) => b.weight - a.weight)
-    .slice(0, 12);
+    .sort((a, b) => b.weight - a.weight);
+  // Item beliefs come from every scored hypothesis. The top-12 cut below kept only Choice Scarf hypotheses after one
+  // Moonblast and reported "Choice Scarf 100%" while the ladder's other items were still live.
+  const allWeight = all.reduce((sum, entry) => sum + entry.weight, 0) || 1;
+  const itemMass = new Map<string, number>();
+  for (const entry of all) itemMass.set(entry.item ?? "", (itemMass.get(entry.item ?? "") ?? 0) + entry.weight / allWeight);
+  // An unrevealed item is never shown as certain: at most 99% (a proven or revealed one is the sole candidate).
+  const shareCap = params.opponent.item || params.opponent.removedItem ? 1 : 0.99;
+  const itemShares = [...itemMass].filter(([name]) => name).sort((a, b) => b[1] - a[1])
+    .map(([name, share]) => ({ name, share: Number(Math.min(shareCap, share).toFixed(3)) })).filter((entry) => entry.share > 0);
+  const normalized = all.slice(0, 12);
   const totalWeight = normalized.reduce((sum, entry) => sum + entry.weight, 0) || 1;
   const topHypotheses: PosteriorHypothesis[] = normalized.map((entry) => ({
     ...entry,
@@ -904,6 +984,7 @@ export function buildOpponentPosterior(params: PosteriorBuildParams): OpponentPo
   const tier = confidenceTier(topHypotheses, evidenceKinds);
   return {
     topHypotheses,
+    itemShares,
     statBands,
     confidenceTier: tier,
     evidenceKinds,

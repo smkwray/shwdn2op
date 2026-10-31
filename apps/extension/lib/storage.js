@@ -33,6 +33,7 @@ export const DEFAULT_SETTINGS = {
   autoDownloadReplay: true,
   panelLayout: "classic",
   showOverlay: true,
+  showMetamonAdvice: true,
   showAskFriendCard: true,
   showMoveSuggestions: true,
   showLocalIntelPanel: false,

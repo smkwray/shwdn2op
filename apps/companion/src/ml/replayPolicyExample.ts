@@ -7,6 +7,7 @@ export interface ReplayPolicyLabel {
   kind: Extract<LegalAction["kind"], "move" | "switch">;
   label: string;
   moveName?: string | undefined;
+  terastallize?: boolean | undefined;
   switchTargetSpecies?: string | undefined;
   revealedThisTurn?: boolean | undefined;
 }
@@ -55,7 +56,7 @@ export interface ReplayDeterministicSummary {
 }
 
 export interface ReplayPolicyExample {
-  schemaVersion: "replay-policy-example@0.1" | "replay-policy-example@0.2";
+  schemaVersion: "replay-policy-example@0.1" | "replay-policy-example@0.2" | "replay-policy-example@0.3";
   exampleId: string;
   extractedAt: string;
   splitTag: ReplaySplitTag;

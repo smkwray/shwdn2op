@@ -1,0 +1,60 @@
+Fezandipiti @ Heavy-Duty Boots
+Ability: Toxic Chain
+Tera Type: Water
+EVs: 252 HP / 240 Def / 16 SpD
+Bold Nature
+- Moonblast
+- Taunt
+- Roost
+- U-turn
+
+Donphan @ Heavy-Duty Boots
+Ability: Sturdy
+Tera Type: Ghost
+EVs: 248 HP / 16 Atk / 244 Def
+Impish Nature
+- Earthquake
+- Rapid Spin
+- Stealth Rock
+- Knock Off
+
+Arcanine-Hisui @ Choice Scarf
+Ability: Rock Head
+Tera Type: Fire
+EVs: 252 Atk / 4 SpD / 252 Spe
+Jolly Nature
+- Flare Blitz
+- Head Smash
+- Close Combat
+- Extreme Speed
+
+Slowking @ Heavy-Duty Boots
+Ability: Regenerator
+Tera Type: Fairy
+EVs: 252 HP / 240 Def / 16 SpD
+Sassy Nature
+IVs: 0 Atk / 0 Spe
+- Scald
+- Future Sight
+- Slack Off
+- Chilly Reception
+
+Thundurus @ Heavy-Duty Boots
+Ability: Prankster
+Tera Type: Steel
+EVs: 252 SpA / 4 SpD / 252 Spe
+Timid Nature
+- Volt Switch
+- Thunderbolt
+- Grass Knot
+- Thunder Wave
+
+Scizor @ Heavy-Duty Boots
+Ability: Technician
+Tera Type: Steel
+EVs: 40 HP / 252 Atk / 216 Spe
+Adamant Nature
+- Swords Dance
+- Bullet Punch
+- Knock Off
+- Close Combat

@@ -6,7 +6,7 @@ Why plain JS?
 
 - no build step required to load it
 - easiest way to get an unpacked extension running in Vivaldi quickly
-- easiest handoff to Codex for iterative development
+- direct debugging through Chromium developer tools
 
 ## Files
 

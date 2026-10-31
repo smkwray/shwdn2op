@@ -20,6 +20,9 @@ function buildMessage(status, room, meta = {}) {
     case TAB_STATUS.ROOM_AMBIGUOUS:
       return "Multiple battle rooms look actionable. Focus the intended battle tab before analyzing.";
     case TAB_STATUS.WAITING_OR_NOT_YOUR_TURN:
+      if (room?.capability && room.capability !== "supported") {
+        return `${room.capability}: this engine supports singles requests with at most six team members.`;
+      }
       if (room?.lastRequest?.teamPreview) {
         return "Team preview is visible. Local lead prediction should appear if the preview team has been captured.";
       }
@@ -63,7 +66,7 @@ export function buildTabSelection(tabState, options = {}) {
   const activeRoom = tabState?.activeRoomId ? tabState.rooms.get(tabState.activeRoomId) ?? null : null;
   const actionableRooms = rooms.filter((room) => roomHasActionableRequest(room));
 
-  if (!activeRoom && actionableRooms.length > 1) {
+  if (tabState?.activeRoomAmbiguous || (!activeRoom && actionableRooms.length > 1)) {
     const room = actionableRooms[0];
     return {
       status: TAB_STATUS.ROOM_AMBIGUOUS,

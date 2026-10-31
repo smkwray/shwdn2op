@@ -26,10 +26,12 @@ async function main() {
 
   const replayFiles = await listReplayFiles(inputPath);
   const extracted: ReplayPolicyExample[] = [];
+  const withheldExamplesByReason: Record<string, number> = {};
   for (const replayFile of replayFiles) {
     const source = await readReplaySource(replayFile);
-    const examples = await extractReplayExamples(source, { buildLocalIntelSnapshot });
-    extracted.push(...examples);
+    const result = await extractReplayExamples(source, { buildLocalIntelSnapshot });
+    extracted.push(...result.examples);
+    for (const [reason, count] of Object.entries(result.withheld)) withheldExamplesByReason[reason] = (withheldExamplesByReason[reason] ?? 0) + count;
   }
 
   const deduped = dedupeExamples(extracted);
@@ -41,6 +43,7 @@ async function main() {
     outputPath: path.resolve(outputPath),
     replayFileCount: replayFiles.length,
     rawExampleCount: extracted.length,
+    withheldExamplesByReason,
     dedupedExampleCount: deduped.length,
     formats: Object.fromEntries(
       [...deduped.reduce((map, example) => {

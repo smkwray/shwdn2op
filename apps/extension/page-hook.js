@@ -1,18 +1,25 @@
 (() => {
   const SOURCE = "showdnass";
-  const PAGE_HOOK_VERSION = "2026-03-31-hook-1";
+  const PAGE_HOOK_VERSION = "2026-10-22-hook-8";
   if (window.__showdownSecondOpinionHookVersion === PAGE_HOOK_VERSION) return;
   window.__showdownSecondOpinionHookInstalled = true;
   window.__showdownSecondOpinionHookVersion = PAGE_HOOK_VERSION;
   let lastRoomId = null;
-  let hooksInstalled = false;
+  const captureId = window.crypto.randomUUID();
+  let sequence = 0;
   const lastProtocolByRoomId = new Map();
+
+  function observationMetadata() {
+    sequence += 1;
+    return { observationId: `${captureId}:${sequence}`, captureId, sequence };
+  }
 
   function emit(direction, url, data) {
     window.postMessage(
       {
         source: SOURCE,
         kind: "websocket-frame",
+        ...observationMetadata(),
         direction,
         url,
         data,
@@ -22,9 +29,34 @@
     );
   }
 
+  // The two clients expose different application roots but share the battle
+  // protocol. Keep private client access here; WebSocket capture is independent.
+  function clientAdapter() {
+    const preact = window.PS?.rooms && typeof window.PS.receive === "function" ? window.PS : null;
+    const root = preact ?? window.app ?? null;
+    const kind = preact ? "preact" : root ? "legacy" : "protocol-only";
+    return {
+      kind,
+      root,
+      isAmbiguous() {
+        return kind === "legacy" && root.curRoom?.id?.startsWith("battle-") && root.curSideRoom?.id?.startsWith("battle-")
+          && root.curRoom.id !== root.curSideRoom.id;
+      },
+      getActiveRoomId() {
+        if (this.isAmbiguous()) return null;
+        const focused = preact ? root.room : root?.curRoom;
+        const room = focused?.id?.startsWith("battle-") ? focused : preact ? root.baseRoom : root?.curSideRoom;
+        return room?.id?.startsWith("battle-") ? room.id : null;
+      },
+      listBattleRooms() {
+        return Object.values(root?.rooms ?? {}).filter((room) => room?.id?.startsWith("battle-"));
+      }
+    };
+  }
+
   function detectActiveRoomId() {
     try {
-      return window.app?.curRoom?.id ?? null;
+      return clientAdapter().getActiveRoomId();
     } catch {
       return null;
     }
@@ -32,13 +64,17 @@
 
   function emitActiveRoom() {
     const roomId = detectActiveRoomId();
-    if (roomId === lastRoomId) return;
-    lastRoomId = roomId;
+    const ambiguous = Boolean(clientAdapter().isAmbiguous());
+    const selection = `${roomId ?? ""}|${ambiguous}`;
+    if (selection === lastRoomId) return;
+    lastRoomId = selection;
     window.postMessage(
       {
         source: SOURCE,
         kind: "active-room",
         roomId,
+        ambiguous,
+        captureId,
         timestamp: Date.now()
       },
       "*"
@@ -184,6 +220,7 @@
   function buildSupplementalBattleState(room) {
     if (!room || typeof room !== "object") return null;
     const playerSide = roomSideLabelToSlot(room.request?.side?.id)
+      ?? roomSideLabelToSlot(room.side?.id)
       ?? roomSideLabelToSlot(room.battle?.mySide?.sideid)
       ?? roomSideLabelToSlot(room.battle?.mySide?.id);
     const opponentSide = playerSide === "p1" ? "p2" : playerSide === "p2" ? "p1" : null;
@@ -208,6 +245,7 @@
     if (Array.isArray(room.battle?.yourPokemon)) {
       for (const entry of room.battle.yourPokemon) pushSupplementalPokemon(pokemon, entry, opponentSide);
     }
+    pushSideCandidate(sideSnapshotCandidate(room.side, playerSide));
 
     pushSideCandidate(sideSnapshotCandidate(room.battle?.mySide, playerSide));
     pushSideCandidate(sideSnapshotCandidate(room.battle?.yourSide, opponentSide));
@@ -255,11 +293,10 @@
 
   function emitBattleProtocolSnapshots() {
     try {
-      const rooms = window.app?.rooms;
-      if (!rooms || typeof rooms !== "object") return;
+      const adapter = clientAdapter();
 
       const seenRoomIds = new Set();
-      for (const room of Object.values(rooms)) {
+      for (const room of adapter.listBattleRooms()) {
         if (!room || typeof room !== "object") continue;
         if (typeof room.id !== "string" || !room.id.startsWith("battle-")) continue;
         const protocol = buildBattleProtocolSnapshot(room);
@@ -271,8 +308,10 @@
           {
             source: SOURCE,
             kind: "room-protocol-snapshot",
+            ...observationMetadata(),
+            clientKind: adapter.kind,
             roomId: room.id,
-            roomSlot: roomSideLabelToSlot(room.request?.side?.id) ?? roomSideLabelToSlot(room.battle?.mySide?.sideid) ?? roomSideLabelToSlot(room.battle?.mySide?.id) ?? null,
+            roomSlot: roomSideLabelToSlot(room.request?.side?.id) ?? roomSideLabelToSlot(room.side?.id) ?? roomSideLabelToSlot(room.battle?.mySide?.sideid) ?? roomSideLabelToSlot(room.battle?.mySide?.id) ?? null,
             data: protocol,
             timestamp: Date.now()
           },
@@ -292,24 +331,26 @@
 
   function wrapFunction(target, key, wrapper) {
     if (!target || typeof target[key] !== "function") return false;
-    if (target[key].__ssoWrapped) return true;
+    if (target[key].__ssoHookVersion === PAGE_HOOK_VERSION) return true;
 
     const original = target[key];
     const wrapped = wrapper(original);
     wrapped.__ssoWrapped = true;
+    wrapped.__ssoHookVersion = PAGE_HOOK_VERSION;
     target[key] = wrapped;
     return true;
   }
 
   function installAppHooks() {
     try {
-      const app = window.app;
+      const adapter = clientAdapter();
+      const app = adapter.root;
       if (!app) return;
 
-      const receiveWrapped = wrapFunction(app, "receive", (original) => function receiveHook(data, ...rest) {
+      wrapFunction(app, "receive", (original) => function receiveHook(data, ...rest) {
         try {
           if (typeof data === "string") {
-            emit("in", "app.receive", data);
+            emit("in", `${adapter.kind}.receive`, data);
             emitActiveRoom();
           }
         } catch (error) {
@@ -318,10 +359,13 @@
         return original.call(this, data, ...rest);
       });
 
-      const sendWrapped = wrapFunction(app, "send", (original) => function sendHook(data, ...rest) {
+      wrapFunction(app, "send", (original) => function sendHook(data, ...rest) {
         try {
           if (typeof data === "string") {
-            emit("out", "app.send", data);
+            // app.send(data, roomId) prefixes the room itself; forward the wire line. The SockJS socket
+            // bypasses the WebSocket wrapper, so this is the only path for human choices.
+            const room = rest[0];
+            emit("out", `${adapter.kind}.send`, typeof room === "string" && room && room !== "lobby" ? `${room}|${data}` : data);
           }
         } catch (error) {
           console.warn("[SSO] failed to emit app.send payload", error);
@@ -329,7 +373,6 @@
         return original.call(this, data, ...rest);
       });
 
-      hooksInstalled = hooksInstalled || receiveWrapped || sendWrapped;
     } catch (error) {
       console.warn("[SSO] failed to install app hooks", error);
     }
@@ -360,7 +403,10 @@
 
       ws.addEventListener("message", (event) => {
         try {
-          emit("in", url, event.data);
+          // Existing sockets are captured through receive; newly instrumented
+          // sockets use this fallback only if receive could not be wrapped.
+          // This avoids treating one server frame as two observations.
+          if (!clientAdapter().root?.receive?.__ssoWrapped) emit("in", url, event.data);
           emitActiveRoom();
         } catch (error) {
           console.warn("[SSO] failed to emit incoming WS frame", error);
@@ -377,11 +423,32 @@
   Object.setPrototypeOf(InstrumentedWebSocket, NativeWebSocket);
   window.WebSocket = InstrumentedWebSocket;
 
+  // The background asks for this when it has no history for a battle (its service worker restarted, or the page loaded
+  // mid-battle): replay each battle's full client log once, as Showdown would on joining, so state rebuilds from |init|.
+  window.addEventListener("message", (event) => {
+    if (event.source !== window || event.data?.source !== SOURCE || event.data?.kind !== "bootstrap-request") return;
+    try {
+      // One room only when the background names it: replaying every open battle restarted healthy advisors too.
+      const only = typeof event.data.roomId === "string" ? event.data.roomId : null;
+      for (const room of clientAdapter().listBattleRooms()) {
+        if (only && room.id !== only) continue;
+        const log = Array.isArray(room.battle?.stepQueue) ? room.battle.stepQueue.filter((line) => typeof line === "string") : [];
+        if (!log.length) continue;
+        const request = room.request && typeof room.request === "object" ? [`|request|${JSON.stringify(room.request)}`] : [];
+        emit("in", "bootstrap", `>${room.id}\n|init|battle\n${[...log, ...request].join("\n")}`);
+      }
+    } catch (error) {
+      console.warn("[SSO] failed to emit bootstrap", error);
+    }
+  });
   window.addEventListener("hashchange", emitActiveRoom);
   window.addEventListener("popstate", emitActiveRoom);
   window.setInterval(installAppHooks, 1000);
   window.setInterval(emitActiveRoom, 1000);
   window.setInterval(emitBattleProtocolSnapshots, 1500);
+  // Chrome may stop the extension service worker mid-battle and drop its captured state; re-send each battle
+  // snapshot periodically so the background rebuilds within seconds (unchanged snapshots are no-ops downstream).
+  window.setInterval(() => { lastProtocolByRoomId.clear(); emitBattleProtocolSnapshots(); }, 15000);
   window.setTimeout(installAppHooks, 250);
   window.setTimeout(emitActiveRoom, 250);
   window.setTimeout(emitBattleProtocolSnapshots, 500);

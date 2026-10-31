@@ -75,7 +75,7 @@ function lookupSpecies(gen: ReturnType<typeof dataGen>, name: string | null | un
 }
 
 function currentBattleTypes(pokemon: PokemonSnapshot, dexTypes: string[] | undefined) {
-  if (pokemon.terastallized && pokemon.teraType) {
+  if (pokemon.terastallized && pokemon.teraType && pokemon.teraType !== "Stellar") {
     return [pokemon.teraType];
   }
   if (Array.isArray(pokemon.types) && pokemon.types.length > 0) {

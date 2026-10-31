@@ -1,4 +1,4 @@
-import type { AnalysisRequestContext, BattleSnapshot, DamageAssumptionBand, LocalIntelSnapshot } from "../types.js";
+import type { AnalysisRequestContext, BattleSnapshot, DamageAssumptionBand, DelayedDamagePreview, LocalIntelSnapshot } from "../types.js";
 import { buildDeterministicNotes } from "./deterministicNotes.js";
 
 export interface AnalysisPromptOptions {
@@ -20,6 +20,9 @@ function analysisModeForOptions(options: AnalysisPromptOptions): "tactical" | "s
 function compactPokemonForPrompt(pokemon: BattleSnapshot["yourSide"]["active"] | null | undefined) {
   if (!pokemon) return null;
   return {
+    instanceId: pokemon.instanceId,
+    appearanceId: pokemon.appearanceId,
+    identityStatus: pokemon.identityStatus,
     ident: pokemon.ident,
     species: pokemon.species,
     displayName: pokemon.displayName,
@@ -34,13 +37,15 @@ function compactPokemonForPrompt(pokemon: BattleSnapshot["yourSide"]["active"] |
     item: pokemon.item,
     removedItem: pokemon.removedItem,
     ability: pokemon.ability,
+    paradoxBoostedStat: pokemon.paradoxBoostedStat,
+    unburdenActive: pokemon.unburdenActive,
     types: pokemon.types,
     teraType: pokemon.teraType,
     terastallized: pokemon.terastallized
   };
 }
 
-function compactSideForPrompt(side: BattleSnapshot["yourSide"]) {
+export function compactSideForPrompt(side: BattleSnapshot["yourSide"]) {
   return {
     slot: side.slot,
     name: side.name,
@@ -71,6 +76,7 @@ function buildPromptSnapshot(snapshot: BattleSnapshot, options: AnalysisPromptOp
     yourSide: compactSideForPrompt(trimmed.yourSide),
     opponentSide: compactSideForPrompt(trimmed.opponentSide),
     field: trimmed.field,
+    ...(trimmed.pendingAttacks?.length ? { pendingAttacks: trimmed.pendingAttacks } : {}),
     legalActions: trimmed.legalActions.map((action) => ({
       id: action.id,
       kind: action.kind,
@@ -87,6 +93,20 @@ function buildPromptSnapshot(snapshot: BattleSnapshot, options: AnalysisPromptOp
 }
 
 
+function describeDelayedDamage(delayed: DelayedDamagePreview) {
+  const likely = delayed.bands.find((band) => band.label === "likely") ?? delayed.bands[0];
+  const impact = delayed.scheduling === "occupied"
+    ? "target slot already has a scheduled attack; another scheduling attempt fails"
+    : delayed.scheduling === "clear" && delayed.dueTurn !== null
+      ? `if scheduling succeeds, impact at end of turn ${delayed.dueTurn}`
+      : "an earlier attack may already occupy the target slot; scheduling is uncertain";
+  const range = likely?.minPercent !== null && likely?.minPercent !== undefined
+      && likely.maxPercent !== null && likely.maxPercent !== undefined
+    ? `${likely.minPercent}-${likely.maxPercent}% of max HP`
+    : likely?.detail ?? "unknown";
+  return `0% damage now; ${impact}; conditional impact range ${range} into ${delayed.targetSide}${delayed.targetPosition}. Damage depends on the occupant and battle conditions at impact, after that turn's actions`;
+}
+
 function describeDeterministicBand(band: DamageAssumptionBand | undefined) {
   if (!band?.outcome || band.outcome === "damage") return null;
   const outcomeText = band.outcome === "immune"
@@ -96,6 +116,10 @@ function describeDeterministicBand(band: DamageAssumptionBand | undefined) {
       : "non-damaging status";
   const detail = typeof band.detail === "string" ? band.detail.replace(/[.\s]+$/g, "") : undefined;
   return detail ? `${outcomeText} (${detail})` : outcomeText;
+}
+
+function describeImmediateBands(bands: DamageAssumptionBand[]) {
+  return `immediate ${JSON.stringify(bands.map((band) => ({ label: band.label, immediate: band.immediate })))}`;
 }
 
 function describePosterior(entry: NonNullable<LocalIntelSnapshot["opponents"]>[number]["posterior"]) {
@@ -220,6 +244,7 @@ export function buildAnalysisPrompt(snapshot: BattleSnapshot, options: AnalysisP
     ? [
         "",
         "Deterministic opponent next-action view:",
+        ...(options.localIntel.opponentActionPrediction.replyTiming ? [`- ${options.localIntel.opponentActionPrediction.replyTiming.summary}`] : []),
         `- Predicted class ${describeActionClass(options.localIntel.opponentActionPrediction.topActionClass)}; confidence ${options.localIntel.opponentActionPrediction.confidenceTier}.`,
         ...(options.localIntel.opponentActionPrediction.topActions.slice(0, 3).map((action) => `- ${describePredictionAction(action)}.`)),
         ...(options.localIntel.opponentActionPrediction.reasons.slice(0, 3).map((reason) => `- Why: ${reason}.`)),
@@ -272,15 +297,22 @@ export function buildAnalysisPrompt(snapshot: BattleSnapshot, options: AnalysisP
       ]
     : [];
   const structuredMechanicsLines = [
+    "Damage ranges are raw calculator pressure. Immediate KO assessments are conditional on the hit connecting and the stated impact state; conditional/unknown is not a clean KO or safety fact. A hard KO claim requires support across every represented profile, never the likely/median alone.",
     ...opponentLeadLines,
     ...playerLeadLines,
     ...selfRecommendationLines,
     ...opponentActionLines,
+    ...(snapshot.pendingAttacks?.length ? [
+      "",
+      "Scheduled attacks:",
+      ...snapshot.pendingAttacks.map((attack) => `- ${attack.moveName} targets slot ${attack.targetSide}${attack.targetPosition}: ${attack.status === "scheduled" ? `end of turn ${attack.dueTurn}, after ordinary actions` : "timing unknown"}; the occupant at impact receives it. Evidence ${attack.factIds.join(", ")}.`)
+    ] : []),
     ...(Array.isArray(options.localIntel?.playerDamagePreview) && options.localIntel.playerDamagePreview.length > 0
       ? [
           "",
           "Current damage ranges:",
           ...options.localIntel.playerDamagePreview.slice(0, 4).map((entry) => {
+            if (entry.delayed) return `- ${entry.label}: ${describeDelayedDamage(entry.delayed)}.`;
             const likelyBand = entry.bands.find((band) => band.label === "likely") ?? entry.bands[0];
             const lowBand = entry.bands.find((band) => band.label === "conservative");
             const highBand = entry.bands.find((band) => band.label === "high");
@@ -295,9 +327,9 @@ export function buildAnalysisPrompt(snapshot: BattleSnapshot, options: AnalysisP
                 : `; likely band from ${entry.likelyBandSource}-matched local history`
               : "";
             if (deterministic) {
-              return `- ${entry.label}: ${deterministic}${caveats}.`;
+              return `- ${entry.label}: ${deterministic}; ${describeImmediateBands(entry.bands)}${caveats}.`;
             }
-            return `- ${entry.label}: likely ${likelyBand?.minPercent ?? "?"}-${likelyBand?.maxPercent ?? "?"}% with outer envelope ${lowBand?.minPercent ?? "?"}-${lowBand?.maxPercent ?? "?"}% to ${highBand?.minPercent ?? "?"}-${highBand?.maxPercent ?? "?"}%${likelySource}${observed}${caveats}.`;
+            return `- ${entry.label}: raw likely ${likelyBand?.minPercent ?? "?"}-${likelyBand?.maxPercent ?? "?"}% of max HP; ${describeImmediateBands(entry.bands)}; raw outer envelope ${lowBand?.minPercent ?? "?"}-${lowBand?.maxPercent ?? "?"}% to ${highBand?.minPercent ?? "?"}-${highBand?.maxPercent ?? "?"}%${likelySource}${observed}${caveats}.`;
           })
         ]
       : []),
@@ -306,6 +338,7 @@ export function buildAnalysisPrompt(snapshot: BattleSnapshot, options: AnalysisP
           "",
           "Opponent threat ranges:",
           ...options.localIntel.opponentThreatPreview.slice(0, 4).map((entry) => {
+            if (entry.currentTarget.delayed) return `- Opponent ${entry.moveSource} ${entry.moveName}: ${describeDelayedDamage(entry.currentTarget.delayed)}.`;
             const likelyBand = entry.currentTarget.bands.find((band) => band.label === "likely") ?? entry.currentTarget.bands[0];
             const deterministic = describeDeterministicBand(likelyBand);
             const observed = entry.currentTarget.observedRange
@@ -317,9 +350,9 @@ export function buildAnalysisPrompt(snapshot: BattleSnapshot, options: AnalysisP
                 : `; likely band from ${entry.currentTarget.likelyBandSource}-matched local history`
               : "";
             if (deterministic) {
-              return `- Opponent ${entry.moveSource} ${entry.moveName} into your active: ${deterministic} (${entry.currentTarget.relation}).`;
+              return `- Opponent ${entry.moveSource} ${entry.moveName} into your active: ${deterministic}; ${describeImmediateBands(entry.currentTarget.bands)} (${entry.currentTarget.relation}).`;
             }
-            return `- Opponent ${entry.moveSource} ${entry.moveName} into your active: likely ${likelyBand?.minPercent ?? "?"}-${likelyBand?.maxPercent ?? "?"}% (${entry.currentTarget.relation})${likelySource}${observed}.`;
+            return `- Opponent ${entry.moveSource} ${entry.moveName} into your active: raw likely ${likelyBand?.minPercent ?? "?"}-${likelyBand?.maxPercent ?? "?"}% of max HP; ${describeImmediateBands(entry.currentTarget.bands)} (${entry.currentTarget.relation})${likelySource}${observed}.`;
           })
         ]
       : []),

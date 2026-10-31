@@ -14,7 +14,7 @@
       "species": "Great Tusk",
       "displayName": "Great Tusk",
       "level": 100,
-      "conditionText": "68/100",
+      "conditionText": "295/434",
       "hpPercent": 68,
       "status": null,
       "fainted": false,
@@ -22,7 +22,8 @@
       "revealed": true,
       "boosts": {},
       "stats": {
-        "atk": 315
+        "atk": 315,
+        "hp": 434
       },
       "knownMoves": [
         "headlongrush",
@@ -42,7 +43,7 @@
         "species": "Great Tusk",
         "displayName": "Great Tusk",
         "level": 100,
-        "conditionText": "68/100",
+        "conditionText": "295/434",
         "hpPercent": 68,
         "status": null,
         "fainted": false,
@@ -50,7 +51,8 @@
         "revealed": true,
         "boosts": {},
         "stats": {
-          "atk": 315
+          "atk": 315,
+          "hp": 434
         },
         "knownMoves": [
           "headlongrush",
@@ -69,7 +71,7 @@
         "species": "Gholdengo",
         "displayName": "Gholdengo",
         "level": 100,
-        "conditionText": "72/100",
+        "conditionText": "252/350",
         "hpPercent": 72,
         "status": null,
         "fainted": false,
@@ -77,7 +79,8 @@
         "revealed": true,
         "boosts": {},
         "stats": {
-          "spa": 319
+          "spa": 319,
+          "hp": 350
         },
         "knownMoves": [
           "makeitrain",
@@ -152,54 +155,155 @@
   },
   "legalActions": [
     {
-      "id": "move:headlongrush",
+      "id": "move:1|tera=0",
       "kind": "move",
       "label": "Headlong Rush",
       "moveName": "Headlong Rush",
       "target": "normal",
       "pp": 8,
       "disabled": false,
-      "details": "Tera available"
+      "details": null,
+      "moveSlot": 1,
+      "terastallize": false,
+      "actorSlot": 1,
+      "canUndo": true,
+      "legality": "certain",
+      "moveId": "headlongrush",
+      "choice": "move 1"
     },
     {
-      "id": "move:knockoff",
+      "id": "move:1|tera=1",
+      "kind": "move",
+      "label": "Tera + Headlong Rush",
+      "moveName": "Headlong Rush",
+      "target": "normal",
+      "pp": 8,
+      "disabled": false,
+      "details": "Terastallize into Water",
+      "moveSlot": 1,
+      "terastallize": true,
+      "actorSlot": 1,
+      "canUndo": true,
+      "legality": "certain",
+      "moveId": "headlongrush",
+      "choice": "move 1 terastallize"
+    },
+    {
+      "id": "move:2|tera=0",
       "kind": "move",
       "label": "Knock Off",
       "moveName": "Knock Off",
       "target": "normal",
       "pp": 16,
       "disabled": false,
-      "details": "Tera available"
+      "details": null,
+      "moveSlot": 2,
+      "terastallize": false,
+      "actorSlot": 1,
+      "canUndo": true,
+      "legality": "certain",
+      "moveId": "knockoff",
+      "choice": "move 2"
     },
     {
-      "id": "move:rapidspin",
+      "id": "move:2|tera=1",
+      "kind": "move",
+      "label": "Tera + Knock Off",
+      "moveName": "Knock Off",
+      "target": "normal",
+      "pp": 16,
+      "disabled": false,
+      "details": "Terastallize into Water",
+      "moveSlot": 2,
+      "terastallize": true,
+      "actorSlot": 1,
+      "canUndo": true,
+      "legality": "certain",
+      "moveId": "knockoff",
+      "choice": "move 2 terastallize"
+    },
+    {
+      "id": "move:3|tera=0",
       "kind": "move",
       "label": "Rapid Spin",
       "moveName": "Rapid Spin",
       "target": "normal",
       "pp": 32,
       "disabled": false,
-      "details": "Tera available"
+      "details": null,
+      "moveSlot": 3,
+      "terastallize": false,
+      "actorSlot": 1,
+      "canUndo": true,
+      "legality": "certain",
+      "moveId": "rapidspin",
+      "choice": "move 3"
     },
     {
-      "id": "move:icespinner",
+      "id": "move:3|tera=1",
+      "kind": "move",
+      "label": "Tera + Rapid Spin",
+      "moveName": "Rapid Spin",
+      "target": "normal",
+      "pp": 32,
+      "disabled": false,
+      "details": "Terastallize into Water",
+      "moveSlot": 3,
+      "terastallize": true,
+      "actorSlot": 1,
+      "canUndo": true,
+      "legality": "certain",
+      "moveId": "rapidspin",
+      "choice": "move 3 terastallize"
+    },
+    {
+      "id": "move:4|tera=0",
       "kind": "move",
       "label": "Ice Spinner",
       "moveName": "Ice Spinner",
       "target": "normal",
       "pp": 24,
       "disabled": false,
-      "details": "Tera available"
+      "details": null,
+      "moveSlot": 4,
+      "terastallize": false,
+      "actorSlot": 1,
+      "canUndo": true,
+      "legality": "certain",
+      "moveId": "icespinner",
+      "choice": "move 4"
     },
     {
-      "id": "switch:p1: Gholdengo",
+      "id": "move:4|tera=1",
+      "kind": "move",
+      "label": "Tera + Ice Spinner",
+      "moveName": "Ice Spinner",
+      "target": "normal",
+      "pp": 24,
+      "disabled": false,
+      "details": "Terastallize into Water",
+      "moveSlot": 4,
+      "terastallize": true,
+      "actorSlot": 1,
+      "canUndo": true,
+      "legality": "certain",
+      "moveId": "icespinner",
+      "choice": "move 4 terastallize"
+    },
+    {
+      "id": "switch:2",
       "kind": "switch",
       "label": "Switch to Gholdengo",
       "moveName": null,
       "target": "p1: Gholdengo",
       "pp": null,
       "disabled": null,
-      "details": "72%"
+      "details": "72%",
+      "targetSlot": 2,
+      "actorSlot": 1,
+      "canUndo": true,
+      "legality": "certain",
+      "choice": "switch 2"
     }
   ],
   "recentLog": [
@@ -213,7 +317,11 @@
     "wait": false,
     "teamPreview": false,
     "sideId": "p1",
-    "canTerastallize": "Water"
+    "canTerastallize": "Water",
+    "gameType": "singles",
+    "capability": "supported",
+    "requestKind": "move",
+    "reviving": false
   },
   "notes": [
     "Terastallization is available."

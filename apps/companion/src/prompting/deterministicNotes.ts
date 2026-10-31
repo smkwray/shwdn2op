@@ -2,7 +2,7 @@ import { Dex } from "@pkmn/dex";
 import { Generations } from "@pkmn/data";
 
 import type { BattleSnapshot } from "../types.js";
-import { speedStageMultiplier, paralysisSpeedMultiplier } from "../mechanics/speed.js";
+import { effectiveSpeedField, effectiveSpeedRange } from "../mechanics/speed.js";
 import { buildDamageNotes } from "./damageNotes.js";
 
 const gens = new Generations(Dex as any);
@@ -53,7 +53,7 @@ function currentBattleTypes(
   dexTypes: string[] | undefined
 ) {
   if (!pokemon) return dexTypes ?? [];
-  if (pokemon.terastallized && pokemon.teraType) {
+  if (pokemon.terastallized && pokemon.teraType && pokemon.teraType !== "Stellar") {
     return [pokemon.teraType];
   }
   if (Array.isArray(pokemon.types) && pokemon.types.length > 0) {
@@ -91,47 +91,15 @@ function speedRangeForSpecies(
   };
 }
 
-function sideHasCondition(conditions: string[], pattern: RegExp) {
-  return conditions.some((value) => pattern.test(value));
-}
-
-function effectiveSpeedRange(
-  genNum: number,
-  range: { min: number; max: number } | null,
-  pokemon: BattleSnapshot["yourSide"]["active"] | BattleSnapshot["opponentSide"]["active"] | null,
-  sideConditions: string[]
-) {
-  if (!range || !pokemon) return null;
-  let multiplier = speedStageMultiplier(Number(pokemon.boosts?.spe ?? 0));
-  if (pokemon.status === "par" && pokemon.ability !== "Quick Feet") {
-    multiplier *= paralysisSpeedMultiplier(genNum);
-  }
-  if (pokemon.status && pokemon.ability === "Quick Feet") {
-    multiplier *= 1.5;
-  }
-  if (pokemon.item === "Choice Scarf") {
-    multiplier *= 1.5;
-  }
-  if (pokemon.item === "Iron Ball") {
-    multiplier *= 0.5;
-  }
-  if (sideHasCondition(sideConditions, /tailwind/i)) {
-    multiplier *= 2;
-  }
-  return {
-    min: Math.floor(range.min * multiplier),
-    max: Math.floor(range.max * multiplier)
-  };
-}
-
 function effectiveShownSpeed(
   genNum: number,
   pokemon: BattleSnapshot["yourSide"]["active"] | BattleSnapshot["opponentSide"]["active"] | null,
-  sideConditions: string[]
+  sideConditions: string[],
+  field: BattleSnapshot["field"]
 ) {
   const shown = pokemon?.stats?.spe;
-  if (!Number.isFinite(shown)) return null;
-  return effectiveSpeedRange(genNum, { min: Number(shown), max: Number(shown) }, pokemon, sideConditions);
+  if (!pokemon || !Number.isFinite(shown)) return null;
+  return effectiveSpeedRange(genNum, { min: Number(shown), max: Number(shown) }, pokemon, sideConditions, field);
 }
 
 export function buildDeterministicNotes(snapshot: BattleSnapshot): string[] {
@@ -148,8 +116,10 @@ export function buildDeterministicNotes(snapshot: BattleSnapshot): string[] {
   const opponentRevealed = snapshot.opponentSide.team.filter((pokemon) => pokemon.revealed).length;
   const yourKnownStats = formatKnownStats(yourActive?.stats);
   const opponentSpeedRange = speedRangeForSpecies(opponentSpecies, opponentActive?.level);
-  const yourEffectiveSpeed = effectiveShownSpeed(genNum, yourActive, snapshot.field.yourSideConditions);
-  const opponentEffectiveSpeed = effectiveSpeedRange(genNum, opponentSpeedRange, opponentActive, snapshot.field.opponentSideConditions);
+  const speedField = effectiveSpeedField(snapshot.field, [yourActive, opponentActive]);
+  const yourEffectiveSpeed = effectiveShownSpeed(genNum, yourActive, speedField.yourSideConditions, speedField);
+  const opponentEffectiveSpeed = opponentSpeedRange && opponentActive
+    ? effectiveSpeedRange(genNum, opponentSpeedRange, opponentActive, speedField.opponentSideConditions, speedField) : null;
   const trickRoomActive = snapshot.field.pseudoWeather.some((value) => /trick room/i.test(value));
 
   const lines: string[] = [];

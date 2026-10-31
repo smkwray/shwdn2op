@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 
 import type { ReplayPolicyExample } from "../apps/companion/src/ml/replayPolicyExample.js";
 import { DEFAULT_REPLAY_OUTPUT, readJsonl } from "./replay-common.js";
@@ -15,7 +16,7 @@ function safeDivide(numerator: number, denominator: number) {
   return denominator > 0 ? Number((numerator / denominator).toFixed(3)) : 0;
 }
 
-function evaluateRows(rows: ReplayPolicyExample[]) {
+export function evaluateRows(rows: ReplayPolicyExample[], legacyProjection = false) {
   let total = 0;
   let top1 = 0;
   let top3 = 0;
@@ -42,13 +43,21 @@ function evaluateRows(rows: ReplayPolicyExample[]) {
   }> = [];
 
   for (const example of rows) {
-    const ranked = [...(example.candidateFeatures ?? [])].sort((a, b) => (b.deterministicScore ?? 0) - (a.deterministicScore ?? 0));
+    const semanticId = (action: { actionId: string; kind: string; moveName?: string | undefined; switchTargetSpecies?: string | undefined }) => {
+      if (!legacyProjection) return action.actionId;
+      const name = action.kind === "move" ? action.moveName : action.switchTargetSpecies;
+      return name ? `${action.kind}:${name.toLowerCase().replace(/[^a-z0-9]/g, "")}` : action.actionId;
+    };
+    const teraActionIds = new Set(example.snapshot.legalActions.filter((action) => action.terastallize).map((action) => action.id));
+    const ranked = [...(example.candidateFeatures ?? [])]
+      .filter((candidate) => !legacyProjection || (!teraActionIds.has(candidate.actionId) && !candidate.actionId.endsWith("|tera=1")))
+      .sort((a, b) => (b.deterministicScore ?? 0) - (a.deterministicScore ?? 0));
     if (ranked.length === 0) continue;
     total += 1;
     if (example.label.kind === "move") moveLabels += 1;
     if (example.label.kind === "switch") switchLabels += 1;
 
-    const rank = ranked.findIndex((candidate) => candidate.actionId === example.label.actionId);
+    const rank = ranked.findIndex((candidate) => semanticId(candidate) === semanticId(example.label));
     const topCandidate = ranked[0] ?? null;
     const scoreGap = ranked.length >= 2
       ? Number(((ranked[0]?.deterministicScore ?? 0) - (ranked[1]?.deterministicScore ?? 0)).toFixed(1))
@@ -223,6 +232,11 @@ async function main() {
       }, new Map<string, number>()).entries()].sort((a, b) => a[0].localeCompare(b[0]))
     ),
     overall,
+    legacySemanticProjection: {
+      meaning: "Exclude new Tera candidate variants and project all move labels to the ordinary move; comparable action vocabulary to the earlier extractor, not a best-play metric.",
+      overall: evaluateRows(rows, true),
+      goldHoldout: evaluateRows(rows.filter((row) => row.splitTag === "gold"), true)
+    },
     goldHoldout: bySplit.gold ?? null,
     bySplit,
     byFormat,
@@ -240,7 +254,9 @@ async function main() {
   console.log(JSON.stringify(summary, null, 2));
 }
 
-main().catch((error) => {
-  console.error(error instanceof Error ? error.stack ?? error.message : String(error));
-  process.exitCode = 1;
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
+  main().catch((error) => {
+    console.error(error instanceof Error ? error.stack ?? error.message : String(error));
+    process.exitCode = 1;
+  });
+}

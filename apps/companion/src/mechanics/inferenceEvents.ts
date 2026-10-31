@@ -6,6 +6,8 @@
  * liveLikelyItems (filtering), damage notes (interaction hints).
  */
 
+import { Dex } from "@pkmn/dex";
+
 import type {
   BattleSnapshot,
   InferenceEvent,
@@ -153,6 +155,7 @@ const SELF_STATUS_ITEM_SOURCES = new Set(["flameorb", "toxicorb"]);
  * 4. PokemonSnapshot.ability (ability reveal)
  */
 export function parseInferenceEvents(snapshot: BattleSnapshot): InferenceEvent[] {
+  if (snapshot.canonicalEvidence) return parseCanonicalInferenceEvents(snapshot);
   const events: InferenceEvent[] = [];
   const log = snapshot.recentLog ?? [];
 
@@ -161,6 +164,66 @@ export function parseInferenceEvents(snapshot: BattleSnapshot): InferenceEvent[]
   parseSnapshotItemConsumedEvents(snapshot, events);
   parseSnapshotAbilityRevealEvents(snapshot, events);
 
+  return events;
+}
+
+/** Canonical consumers use semantic subjects and immutable fact ancestry.
+ * The legacy prose parser below is restricted to untrusted snapshot tooling. */
+function parseCanonicalInferenceEvents(snapshot: BattleSnapshot): InferenceEvent[] {
+  const facts = snapshot.canonicalEvidence!.facts;
+  const events: InferenceEvent[] = [];
+  const mons = [...snapshot.yourSide.team, ...snapshot.opponentSide.team];
+  const owner = (id: string | undefined) => mons.find((mon) => mon.instanceId === id && mon.identityStatus === "resolved");
+  const base = (fact: typeof facts[number], id = fact.ownerInstanceId, reference?: typeof fact.subject) => {
+    const mon = owner(id);
+    const proof = reference ? facts.find((entry) => entry.subject.appearanceId === reference.appearanceId && entry.ownerInstanceId === id) : fact;
+    const factIds = [...new Set([...fact.supportingFactIds, ...(proof?.supportingFactIds ?? [])])];
+    if (!mon || (reference && !proof) || factIds.some((id) => !facts.some((entry) => entry.id === id && entry.source.channel !== "recovery"))) return null;
+    const appearanceId = reference?.appearanceId ?? fact.subject.appearanceId;
+    return { instanceId: id!, ...(appearanceId ? { appearanceId } : {}),
+      side: (snapshot.opponentSide.team.some((entry) => entry.instanceId === id) ? "opponent" : "player") as InferenceEventSide,
+      species: mon.canonicalSpecies ?? mon.species ?? "", turn: fact.turn, factIds };
+  };
+  for (const fact of facts) {
+    if (fact.identityStatus !== "resolved" || fact.source.channel === "recovery") continue;
+    const subject = base(fact);
+    if (!subject) continue;
+    if (fact.kind === "-ability") events.push({ ...subject, kind: "ability_reveal", abilityName: fact.args[1]! });
+    if (fact.kind === "-enditem") {
+      events.push({ ...subject, kind: "item_consumed", itemName: fact.args[1]!, trigger: "removed" });
+      if (["ejectbutton", "ejectpack"].includes(normalizeName(fact.args[1]))) events.push({ ...subject, kind: "forced_switch", itemName: fact.args[1]! });
+    }
+    const source = fact.args.find((arg) => arg.startsWith("[from]"))?.replace(/^\[from\]\s*(?:item:|ability:)?\s*/i, "");
+    const sourceId = normalizeName(source);
+    if (fact.kind === "-status" && SELF_STATUS_ITEM_SOURCES.has(sourceId)) events.push({ ...subject, kind: "self_inflicted_status", status: fact.args[1]! });
+    if (!["-damage", "-heal"].includes(fact.kind)) continue;
+    if (ATTACK_RECOIL_SOURCES.has(sourceId)) events.push({ ...subject, kind: "attack_recoil", recoilPercent: 10 });
+    if (RESIDUAL_HEAL_SOURCES.has(sourceId)) events.push({ ...subject, kind: "residual_heal", healPercent: 6.25, source });
+    if (SWITCH_HEAL_SOURCES.has(sourceId)) events.push({ ...subject, kind: "switch_heal", healPercent: 33 });
+    if (CONTACT_RECOIL_SOURCES.has(sourceId)) {
+      // Contact damage belongs to the explicitly tagged defender; never the
+      // current occupant of the opposite side in a later snapshot.
+      const index = fact.args.findIndex((arg) => arg.startsWith("[of]"));
+      const ref = fact.references[index];
+      const defenderId = ref?.instanceId ?? facts.find((entry) => ref?.appearanceId && entry.subject.appearanceId === ref.appearanceId)?.ownerInstanceId;
+      const defender = base(fact, defenderId, ref);
+      if (defender) events.push({ ...defender, kind: "contact_recoil", attackerSpecies: subject.species,
+        recoilPercent: sourceId === "rockyhelmet" ? 16.67 : 12.5, source });
+    }
+  }
+  const generation = Number(snapshot.format.match(/\[Gen\s*(\d+)\]/i)?.[1] ?? 9);
+  for (const entry of snapshot.entryObservations ?? []) {
+    if (!entry.complete || entry.damageObserved || entry.identityStatus !== "resolved" || !entry.factIds?.length) continue;
+    const mon = owner(entry.instanceId);
+    const supporting = entry.factIds.map((id) => facts.find((fact) => fact.id === id));
+    if (!mon || supporting.some((fact) => !fact || fact.source.channel === "recovery")) continue;
+    const hazards = entry.hazards.filter((hazard) => ["stealthrock", "spikes"].includes(normalizeName(hazard)));
+    if (!hazards.length) continue;
+    events.push({ kind: "hazard_immunity", instanceId: mon.instanceId, appearanceId: entry.appearanceId,
+      side: entry.side === snapshot.yourSide.slot ? "player" : "opponent", species: mon.canonicalSpecies ?? entry.species,
+      turn: entry.turn, hazards, monTypes: entry.types.length ? entry.types : [...Dex.forGen(generation).species.get(mon.canonicalSpecies ?? entry.species).types],
+      factIds: entry.factIds });
+  }
   return events;
 }
 
@@ -319,79 +382,20 @@ function parseHpChangeEvents(
 // 2. Hazard immunity detection
 // ---------------------------------------------------------------------------
 
-/**
- * Detect entries through active hazards where no follow-up damage is logged.
- *
- * Logic: scan recentLog for "X entered the field."  If the entering side has
- * HP-damaging hazards (Stealth Rock, Spikes, Toxic Spikes), check whether the
- * NEXT few lines contain an HP-change line for that same mon.  If not →
- * hazard_immunity event.  Sticky Web is excluded — it lowers Speed, not HP.
- *
- * The event includes the mon's types so consumers can disambiguate item-based
- * immunity (Boots) from type-based immunity (Flying vs Spikes) or ability
- * (Levitate, Magic Guard).
- */
-function parseHazardImmunityEvents(
-  snapshot: BattleSnapshot,
-  log: string[],
-  events: InferenceEvent[]
-): void {
-  const HAZARD_PATTERNS = ["stealth rock", "spikes", "toxic spikes"];
-
-  const opponentHazards = (snapshot.field.opponentSideConditions ?? [])
-    .filter((cond) => HAZARD_PATTERNS.some((h) => cond.toLowerCase().includes(h)));
-  const playerHazards = (snapshot.field.yourSideConditions ?? [])
-    .filter((cond) => HAZARD_PATTERNS.some((h) => cond.toLowerCase().includes(h)));
-
-  if (opponentHazards.length === 0 && playerHazards.length === 0) return;
-
-  let activeTurn = snapshot.turn;
-
-  for (let i = 0; i < log.length; i++) {
-    const turnNum = extractTurnNumber(log[i]!);
-    if (turnNum !== null) { activeTurn = turnNum; continue; }
-
-    const enteredName = extractEnteredFieldName(log[i]!);
-    if (!enteredName) continue;
-
-    const resolved = resolveMon(snapshot, enteredName);
-    if (!resolved) continue;
-
-    const relevantHazards = resolved.side === "opponent" ? opponentHazards : playerHazards;
-    if (relevantHazards.length === 0) continue;
-
-    // Look ahead for an HP-change line for this mon within the next few lines
-    // (before the next turn marker, entry, or move usage by someone else)
-    let tookDamage = false;
-    for (let j = i + 1; j < Math.min(i + 6, log.length); j++) {
-      const nextLine = log[j]!;
-      // Stop scanning at next turn, entry, or faint
-      if (extractTurnNumber(nextLine) !== null) break;
-      if (extractEnteredFieldName(nextLine) !== null) break;
-      if (nextLine.endsWith(" fainted.")) break;
-
-      const hpChange = extractHpChangeSource(nextLine);
-      if (hpChange && nameMatchesPokemon(hpChange.actor, resolved.pokemon)) {
-        tookDamage = true;
-        break;
-      }
-      // Also check for untagged damage (the parser doesn't log these to
-      // recentLog, so their absence from the log is safe to treat as "no damage")
-    }
-
-    if (!tookDamage) {
-      const species = speciesDisplayName(resolved.pokemon);
-      if (species) {
-        events.push({
-          kind: "hazard_immunity",
-          side: resolved.side,
-          species,
-          turn: activeTurn,
-          hazards: relevantHazards,
-          monTypes: resolved.pokemon.types ?? []
-        });
-      }
-    }
+/** Entry-time protocol observations are authoritative; UI text cannot prove absence. */
+function parseHazardImmunityEvents(snapshot: BattleSnapshot, _log: string[], events: InferenceEvent[]): void {
+  const generation = Number(snapshot.format.match(/\[Gen\s*(\d+)\]/i)?.[1] ?? 9);
+  for (const entry of snapshot.entryObservations ?? []) {
+    if (!entry.complete || entry.damageObserved || entry.observationIds.length === 0) continue;
+    const hazards = entry.hazards.filter((hazard) => ["stealthrock", "spikes"].includes(normalizeName(hazard)));
+    if (!hazards.length) continue;
+    const speciesTypes = Dex.forGen(generation).species.get(entry.species).types;
+    events.push({
+      kind: "hazard_immunity", side: entry.side === snapshot.yourSide.slot ? "player" : "opponent",
+      species: entry.species, turn: entry.turn, hazards,
+      monTypes: entry.types.length ? entry.types : [...(speciesTypes ?? [])],
+      observationIds: [...entry.observationIds]
+    });
   }
 }
 

@@ -1,6 +1,9 @@
 const BRAND_NAME = "shwdn2op";
 const SOURCE = "showdnass";
-const CONTENT_BRIDGE_VERSION = "2026-03-31-bridge-2";
+const CONTENT_BRIDGE_VERSION = "2026-10-24-bridge-11";
+// An orphaned bridge (its extension was reloaded) waits this long for the background to inject a successor before it
+// asks for a tab refresh, the last resort.
+const ORPHAN_GRACE_MS = 15000;
 const OVERLAY_ID = "showdnass-overlay";
 const OVERLAY_POSITION_KEY = "showdnass.overlay-position";
 const OVERLAY_COLLAPSED_KEY = "showdnass.overlay-collapsed";
@@ -25,13 +28,14 @@ const SIDEBAR_TAB_LABELS = {
 };
 const GROUP_STORAGE_PREFIX = "showdnass.group";
 const GROUP_DOM_PREFIX = "showdnass-group-";
+const TYPE_CHART_RESOURCE_PATH = chrome.runtime?.getURL?.("assets/type-chart.json") ?? null;
 
 const LEGACY_INTEL_PANEL_POSITION_KEY = "showdown-second-opinion.intel-position";
 const LEGACY_INTEL_PANEL_VISIBLE_KEY = "showdown-second-opinion.intel-visible";
 const PANEL_DEFS = [
   { key: "intel", id: "showdnass-panel-intel", title: "Local Intel", width: 360, zIndex: 10002, background: "rgba(18, 32, 24, 0.97)", border: "rgba(86, 202, 122, 0.24)" },
   { key: "opponentAction", id: "showdnass-panel-opponent-action", title: "Line To Respect", width: 360, zIndex: 10003, background: "rgba(38, 28, 18, 0.97)", border: "rgba(246, 173, 85, 0.24)" },
-  { key: "selfAction", id: "showdnass-panel-self-action", title: "Best Line", width: 360, zIndex: 10004, background: "rgba(18, 29, 38, 0.97)", border: "rgba(94, 210, 255, 0.24)" },
+  { key: "selfAction", id: "showdnass-panel-self-action", title: "Metamon + checks", width: 360, zIndex: 10004, background: "rgba(18, 29, 38, 0.97)", border: "rgba(94, 210, 255, 0.24)" },
   { key: "damage", id: "showdnass-panel-damage", title: "Damage Matrix", width: 390, zIndex: 10005, background: "rgba(34, 19, 19, 0.97)", border: "rgba(255, 124, 124, 0.24)" },
   { key: "mechanics", id: "showdnass-panel-mechanics", title: "Mechanics", width: 390, zIndex: 10006, background: "rgba(18, 23, 38, 0.97)", border: "rgba(109, 169, 255, 0.24)" },
   { key: "debug", id: "showdnass-panel-debug", title: "Debug", width: 420, zIndex: 10007, background: "rgba(24, 24, 28, 0.98)", border: "rgba(210, 210, 210, 0.18)" }
@@ -52,15 +56,25 @@ const PANEL_SETTING_KEYS = {
   debug: "showDebugPanel"
 };
 
-if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSION) {
-  window.__showdownSecondOpinionContentBridgeInstalled = true;
-  window.__showdownSecondOpinionContentBridgeVersion = CONTENT_BRIDGE_VERSION;
+// One live bridge per page. A predecessor in this world is replaced only when it is orphaned (its runtime is gone) or
+// older; one in an older extension load's world is reached through the page (bridge-hello) and retires itself.
+const priorBridge = window.__shwdn2opBridge;
+if (!priorBridge || priorBridge.version !== CONTENT_BRIDGE_VERSION || !priorBridge.alive()) {
+  try { priorBridge?.retire?.(); } catch {}
+  const BRIDGE_INSTANCE = window.crypto.randomUUID();
 
   let extensionContextValid = true;
+  let retired = false;
+  let orphanedAt = null;
+  const cleanups = [];
   let overlayVisible = true;
   let overlayCollapsed = loadBooleanSetting(OVERLAY_COLLAPSED_KEY, false);
   let latestOverlayPayload = null;
   let latestLocalIntelPayload = null;
+  let reportedResultHash = null;
+  let latestDecisionKey = null;
+  let latestDecisionRevision = -1;
+  let latestCaptureSession = null;
   let panelState = loadPanelState();
   let overlaySettings = {
     provider: "codex",
@@ -87,6 +101,10 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
   let topStackZ = 10008;
   let sidebarActiveTab = loadStringSetting(SIDEBAR_ACTIVE_TAB_KEY, "intel");
   let sidebarCollapsed = loadBooleanSetting(SIDEBAR_COLLAPSED_KEY, false);
+  let typeChartData = null;
+  let typeChartLoadStarted = false;
+
+  ensureTypeChartLoaded();
 
   function panelVisibleKey(panelKey) {
     return `${PANEL_STORAGE_PREFIX}.${panelKey}.visible`;
@@ -242,7 +260,14 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
   }
 
   function markExtensionContextInvalid(error) {
+    const changed = extensionContextValid;
     extensionContextValid = false;
+    if (changed) {
+      orphanedAt = Date.now();
+      // The background normally injects a successor within a second; only without one does the tab need a refresh.
+      window.setTimeout(() => { if (!retired) try { renderMetamonBox(); } catch {} }, ORPHAN_GRACE_MS);
+      try { renderMetamonBox(); } catch {}
+    }
     if (error instanceof Error && !/Extension context invalidated/i.test(error.message)) {
       console.warn("[showdnass] runtime messaging disabled:", error.message);
     }
@@ -266,20 +291,6 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
     }
   }
 
-  function injectPageHook() {
-    if (!extensionContextValid) return;
-    const script = document.createElement("script");
-    try {
-      script.src = chrome.runtime.getURL("page-hook.js");
-    } catch (error) {
-      markExtensionContextInvalid(error);
-      return;
-    }
-    script.async = false;
-    script.onload = () => script.remove();
-    (document.head || document.documentElement).appendChild(script);
-  }
-
   async function refreshOverlayConfig() {
     const [configResponse, healthResponse] = await Promise.all([
       safeSendRuntimeMessage({ type: "get-overlay-config" }),
@@ -292,6 +303,7 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
         ...(configResponse.providerModelOptions ?? {})
       };
       syncPanelVisibilityWithSettings();
+    refreshMetamonBanner();
     }
     overlayHealth = healthResponse?.ok ? healthResponse.health ?? null : null;
     if (!configResponse?.ok) return null;
@@ -367,6 +379,7 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
     if (!settings || typeof settings !== "object") return;
     overlaySettings = { ...overlaySettings, ...settings };
     syncPanelVisibilityWithSettings();
+    renderMetamonBox();
 
     if (overlaySettings.showOverlay === false) {
       document.getElementById(OVERLAY_ID)?.remove();
@@ -600,21 +613,12 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
     return `${Math.round(minPercent)}-${Math.round(maxPercent)}%`;
   }
 
-  function formatRemainingRange(minPercent, maxPercent, currentHpPercent) {
-    const hp = Number(currentHpPercent);
-    if (!Number.isFinite(hp) || hp <= 0) return null;
-    const minRemaining = Number(minPercent) / hp * 100;
-    const maxRemaining = Number(maxPercent) / hp * 100;
-    if (!Number.isFinite(minRemaining) || !Number.isFinite(maxRemaining)) return null;
-    if (Math.round(minRemaining) === Math.round(maxRemaining)) return `${Math.round(minRemaining)}% rem`;
-    return `${Math.round(minRemaining)}-${Math.round(maxRemaining)}% rem`;
-  }
-
-  function formatBandCoverage(coverage) {
-    if (coverage === "covers_current_hp") return "KOs";
-    if (coverage === "can_cover_current_hp") return "rolls";
-    if (coverage === "misses_current_hp") return "no KO";
-    return "unknown";
+  function formatImmediateOutcome(immediate) {
+    if (immediate?.ko === "all_rolls") return "KO on hit: all rolls";
+    if (immediate?.ko === "some_rolls") return "KO on hit: some rolls";
+    if (immediate?.ko === "conditional") return "conditional KO";
+    if (immediate?.ko === "no_ko") return "no KO on this hit";
+    return "immediate outcome unknown";
   }
 
   function compactBandLabel(label) {
@@ -624,38 +628,29 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
     return label ?? "band";
   }
 
-  function bandTone(label, coverage, outcome) {
+  function bandTone(label, immediate, outcome) {
     if (outcome === "immune") return "accent";
     if (outcome === "blocked") return "warn";
-    if (coverage === "covers_current_hp") return "positive";
-    if (coverage === "can_cover_current_hp") return "warn";
-    if (coverage === "misses_current_hp") return "danger";
-    if (label === "conservative") return "accent";
-    if (label === "high") return "danger";
+    if (immediate?.ko === "all_rolls") return "positive";
+    if (immediate?.ko === "some_rolls" || immediate?.ko === "conditional") return "warn";
     return "neutral";
   }
 
   function renderBandChip(band, currentHpPercent, likelyBandSource) {
+    const immediateText = formatImmediateOutcome(band?.immediate);
+    const note = typeof band?.immediate?.note === "string" ? band.immediate.note : "";
     if (band?.outcome && band.outcome !== "damage") {
       const outcomeText = band.detail
         ?? (band.outcome === "status" ? "non-damaging status move" : band.outcome);
-      return renderCompactChip(compactBandLabel(band?.label ?? band.outcome), outcomeText, bandTone(band?.label, band?.coverage, band?.outcome), outcomeText);
+      return renderCompactChip(compactBandLabel(band?.label ?? band.outcome), outcomeText, bandTone(band?.label, band?.immediate, band?.outcome), `${outcomeText}; ${immediateText}${note ? `; ${note}` : ""}`);
     }
-
     const rangeText = formatPercentRange(band?.minPercent, band?.maxPercent);
-    const remainingText = formatRemainingRange(band?.minPercent, band?.maxPercent, currentHpPercent);
-    const coverageText = formatBandCoverage(band?.coverage);
     const likelySourceText = band?.label === "likely" && likelyBandSource && likelyBandSource !== "calc"
-      ? likelyBandSource === "context"
-        ? "local match"
-        : likelyBandSource === "aggregate"
-          ? "local agg"
-          : likelyBandSource
-      : "";
+      ? likelyBandSource === "context" ? "local match" : likelyBandSource === "aggregate" ? "local agg" : likelyBandSource : "";
     const label = compactBandLabel(band?.label);
-    const value = remainingText ?? rangeText;
-    const detail = `${band?.label ?? "band"}: ${value}${remainingText ? ` (${rangeText} max)` : ""}; ${coverageText}${likelySourceText ? `; ${likelySourceText}` : ""}`;
-    return renderCompactChip(label, value, bandTone(band?.label, band?.coverage, band?.outcome), detail);
+    const value = `raw ${rangeText}; ${immediateText}${note ? `; ${note}` : ""}`;
+    const detail = `${band?.label ?? "band"}: ${value}${likelySourceText ? `; ${likelySourceText}` : ""}`;
+    return renderCompactChip(label, value, bandTone(band?.label, band?.immediate, band?.outcome), detail);
   }
 
   function renderCaveatChips(caveats) {
@@ -701,6 +696,20 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
         ${bands.map((band) => renderBandChip(band, currentHpPercent, likelyBandSource)).join("")}
       </div>
     `;
+  }
+
+  function renderDelayedDamageNote(delayed) {
+    const band = Array.isArray(delayed?.bands)
+      ? delayed.bands.find((entry) => entry.label === "likely") ?? delayed.bands[0] : null;
+    const range = band && Number.isFinite(band.minPercent) && Number.isFinite(band.maxPercent)
+      ? `${formatPercentRange(band.minPercent, band.maxPercent)} of max HP`
+      : band?.detail ?? "unknown";
+    const timing = delayed.scheduling === "occupied"
+      ? "Target slot already occupied: another scheduling attempt fails."
+      : delayed.scheduling === "clear" && Number.isInteger(delayed.dueTurn)
+        ? `If scheduling succeeds: end of turn ${delayed.dueTurn}, after ordinary actions.`
+        : "An earlier attack may already occupy the slot; scheduling is uncertain.";
+    return `<div style="margin-top:6px;font-size:11px;line-height:1.4">0% damage now. ${escapeHtml(timing)}<br>Conditional impact: ${escapeHtml(range)} into ${escapeHtml(delayed.targetSide)}${escapeHtml(delayed.targetPosition)}. Damage depends on the occupant and battle conditions at impact.</div>`;
   }
 
   function findLikelyBand(bands) {
@@ -751,23 +760,24 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
     `;
   }
 
-  function collectSwitchInRowsForMove(prediction, moveName) {
-    const normalizedMove = String(moveName ?? "").trim().toLowerCase();
+  function collectSwitchInRowsForMove(prediction, actionId) {
     const switchCandidates = switchCandidatesForPrediction(prediction);
-    if (!normalizedMove || switchCandidates.length === 0) return [];
+    const liveReserves = livingReserveSpeciesNames(latestOverlayPayload?.snapshot?.opponentSide);
+    if (!actionId || switchCandidates.length === 0) return [];
     const seen = new Set();
     const rows = [];
     for (const candidate of switchCandidates) {
       if (!candidate?.switchTargetSpecies || !Array.isArray(candidate?.switchTargetPlayerPreview)) continue;
-      const preview = candidate.switchTargetPlayerPreview.find((entry) => String(entry?.moveName ?? "").trim().toLowerCase() === normalizedMove);
+      const preview = candidate.switchTargetPlayerPreview.find((entry) => entry?.actionId === actionId);
       if (!preview) continue;
       const key = String(candidate.switchTargetSpecies).trim().toLowerCase();
       if (!key || seen.has(key)) continue;
+      if (liveReserves.size > 0 && !liveReserves.has(key)) continue;
       seen.add(key);
       rows.push({
         label: candidate.switchTargetSpecies,
-        damageText: formatCompactThreatBand(findLikelyBand(preview.bands)),
-        note: compactHintLabel(preview.interactionHints)
+        damageText: preview.delayed ? `0% now; conditional impact ${formatCompactThreatBand(findLikelyBand(preview.delayed.bands))}` : formatCompactThreatBand(findLikelyBand(preview.bands)),
+        note: preview.delayed ? "Only if this Pokémon occupies the slot at impact" : compactHintLabel(preview.interactionHints)
       });
     }
     return rows;
@@ -807,12 +817,18 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
   }
 
   function collectThreatSwitchRows(threatEntry) {
+    const liveReserves = livingReserveSpeciesNames(latestOverlayPayload?.snapshot?.yourSide);
     const targets = Array.isArray(threatEntry?.switchTargets) ? threatEntry.switchTargets : [];
-    return targets.map((target) => ({
-      label: target.species ?? "Unknown",
-      damageText: formatCompactThreatBand(findLikelyBand(target.bands)),
-      note: compactHintLabel(target.interactionHints) || (target.relation ? formatSpeedRelation(target.relation) : "")
-    }));
+    return targets
+      .filter((target) => {
+        const key = normalizeName(target?.species);
+        return !key || liveReserves.size === 0 || liveReserves.has(key);
+      })
+      .map((target) => ({
+        label: target.species ?? "Unknown",
+        damageText: target.delayed ? `0% now; conditional impact ${formatCompactThreatBand(findLikelyBand(target.delayed.bands))}` : formatCompactThreatBand(findLikelyBand(target.bands)),
+        note: target.delayed ? "Only if this Pokémon occupies the slot at impact" : compactHintLabel(target.interactionHints) || (target.relation ? formatSpeedRelation(target.relation) : "")
+      }));
   }
 
   function formatSpeedRange(range) {
@@ -962,6 +978,204 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
       .replace(/'/g, "&#39;");
   }
 
+  function rerenderTypeChartConsumers() {
+    if (latestOverlayPayload) {
+      void renderOverlay(latestOverlayPayload);
+      return;
+    }
+    renderPanelLayout();
+  }
+
+  function ensureTypeChartLoaded() {
+    if (typeChartData || typeChartLoadStarted || !TYPE_CHART_RESOURCE_PATH) return;
+    typeChartLoadStarted = true;
+    fetch(TYPE_CHART_RESOURCE_PATH)
+      .then((response) => (response.ok ? response.json() : null))
+      .then((chart) => {
+        if (!chart || typeof chart !== "object") return;
+        typeChartData = chart;
+        rerenderTypeChartConsumers();
+      })
+      .catch(() => {
+        // Ignore type-chart load failures and render without matchup details.
+      });
+  }
+
+  function canonicalTypeName(typeName) {
+    const raw = String(typeName ?? "").trim();
+    if (!raw || !typeChartData) return raw;
+    const normalized = normalizeName(raw);
+    return Object.keys(typeChartData).find((candidate) => normalizeName(candidate) === normalized) ?? raw;
+  }
+
+  function currentBattleTypesForDisplay(pokemon) {
+    if (!pokemon) return [];
+    const baseTypes = pokemon.terastallized && pokemon.teraType
+      ? [pokemon.teraType]
+      : Array.isArray(pokemon.types)
+        ? pokemon.types
+        : [];
+    const seen = new Set();
+    const types = [];
+    for (const rawType of baseTypes) {
+      const typeName = canonicalTypeName(rawType);
+      if (!typeName) continue;
+      const key = normalizeName(typeName);
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      types.push(typeName);
+    }
+    return types;
+  }
+
+  function matchupBucketDefinitions(profile) {
+    return [
+      { label: "4x weak", chip: "4x", tone: "danger", values: profile?.quadWeaknesses ?? [] },
+      { label: "2x weak", chip: "2x", tone: "warn", values: profile?.weaknesses ?? [] },
+      { label: "1/2 resist", chip: "1/2", tone: "positive", values: profile?.resistances ?? [] },
+      { label: "1/4 resist", chip: "1/4", tone: "accent", values: profile?.quadResistances ?? [] },
+      { label: "immune", chip: "0x", tone: "accent", values: profile?.immunities ?? [] }
+    ];
+  }
+
+  function buildTypeMatchupProfile(pokemon) {
+    ensureTypeChartLoaded();
+    const types = currentBattleTypesForDisplay(pokemon);
+    if (!typeChartData || types.length === 0) return null;
+
+    const profile = {
+      types,
+      quadWeaknesses: [],
+      weaknesses: [],
+      resistances: [],
+      quadResistances: [],
+      immunities: []
+    };
+
+    for (const attackType of Object.keys(typeChartData)) {
+      let multiplier = 1;
+      for (const defenderType of types) {
+        const next = Number(typeChartData?.[attackType]?.[defenderType] ?? 1);
+        multiplier *= Number.isFinite(next) ? next : 1;
+      }
+      if (multiplier === 4) profile.quadWeaknesses.push(attackType);
+      else if (multiplier === 2) profile.weaknesses.push(attackType);
+      else if (multiplier === 0.5) profile.resistances.push(attackType);
+      else if (multiplier === 0.25) profile.quadResistances.push(attackType);
+      else if (multiplier === 0) profile.immunities.push(attackType);
+    }
+
+    return profile;
+  }
+
+  function renderPokemonStateChips(pokemon) {
+    if (!pokemon) return "";
+    const chips = currentBattleTypesForDisplay(pokemon).map((typeName) =>
+      renderCompactChip("type", typeName, "neutral", `Current defensive typing includes ${typeName}.`)
+    );
+    if (pokemon.terastallized && pokemon.teraType) {
+      chips.push(renderCompactChip("tera", pokemon.teraType, "accent", `${pokemon.teraType} is the active Tera type.`));
+    }
+    if (pokemon.active) {
+      chips.push(renderCompactChip("active", "on field", "accent", "Currently active."));
+    }
+    if (pokemon.fainted) {
+      chips.push(renderCompactChip("state", "fainted", "danger", "This Pokemon has fainted."));
+    }
+    if (chips.length === 0) return "";
+    return `<div style="margin-top:4px;display:flex;flex-wrap:wrap;gap:6px">${chips.join("")}</div>`;
+  }
+
+  function renderTypeMatchupDisclosure(pokemon, summaryLabel = "Type matchups") {
+    if (!pokemon) return "";
+    const types = currentBattleTypesForDisplay(pokemon);
+    if (types.length === 0) return "";
+
+    const profile = buildTypeMatchupProfile(pokemon);
+    const sections = matchupBucketDefinitions(profile);
+    const summaryBits = sections
+      .filter((section) => section.values.length > 0)
+      .slice(0, 3)
+      .map((section) => `${section.label} ${section.values.slice(0, 2).join("/")}${section.values.length > 2 ? "+" : ""}`)
+      .join(" · ");
+
+    if (!profile) {
+      return `
+        <details style="margin-top:6px">
+          <summary style="cursor:pointer;font-size:11px;opacity:.72">${escapeHtml(summaryLabel)} · loading</summary>
+          ${renderPokemonStateChips(pokemon)}
+        </details>
+      `;
+    }
+
+    const filledSections = sections.filter((section) => section.values.length > 0);
+    return `
+      <details style="margin-top:6px">
+        <summary style="cursor:pointer;font-size:11px;opacity:.72">${escapeHtml(summaryLabel)}${summaryBits ? ` · ${escapeHtml(summaryBits)}` : ""}</summary>
+        ${renderPokemonStateChips(pokemon)}
+        ${filledSections.length > 0 ? `
+          <div style="margin-top:6px;display:grid;gap:6px">
+            ${filledSections.map((section) => `
+              <div>
+                <div style="font-size:11px;opacity:.62;text-transform:uppercase;letter-spacing:.05em">${escapeHtml(section.label)}</div>
+                <div style="margin-top:4px;display:flex;flex-wrap:wrap;gap:6px">
+                  ${section.values.map((typeName) => renderCompactChip(section.chip, typeName, section.tone, `${typeName} hits this Pokemon for ${section.label}.`)).join("")}
+                </div>
+              </div>
+            `).join("")}
+          </div>
+        ` : `<div style="margin-top:6px;font-size:11px;opacity:.68">No major weaknesses, resistances, or immunities captured from the current typing.</div>`}
+      </details>
+    `;
+  }
+
+  function findSnapshotPokemonBySpecies(team, species) {
+    const target = normalizeName(species);
+    if (!target || !Array.isArray(team)) return null;
+    return team.find((pokemon) => (
+      normalizeName(pokemon?.species) === target
+      || normalizeName(pokemon?.displayName) === target
+      || normalizeName(pokemon?.ident) === target
+    )) ?? null;
+  }
+
+  function renderPokemonTypeCard(pokemon, title) {
+    if (!pokemon) return "";
+    const name = title || pokemon.species || pokemon.displayName || "Pokemon";
+    return `
+      <div style="padding:8px 9px;border-radius:10px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.08)">
+        <div style="font-weight:600">${escapeHtml(name)}</div>
+        ${renderPokemonStateChips(pokemon)}
+        ${renderTypeMatchupDisclosure(pokemon, "Show matchups")}
+      </div>
+    `;
+  }
+
+  function renderTeamTypeSection(title, team) {
+    const pokemonList = Array.isArray(team)
+      ? team.filter((pokemon) => Boolean(pokemon?.species ?? pokemon?.displayName))
+      : [];
+    if (pokemonList.length === 0) return "";
+    return `
+      <div style="margin-top:12px;padding-top:10px;border-top:1px solid rgba(255,255,255,0.08)">
+        <div style="font-weight:600">${escapeHtml(title)}</div>
+        <div style="margin-top:8px;display:grid;gap:8px">
+          ${pokemonList.map((pokemon) => renderPokemonTypeCard(pokemon)).join("")}
+        </div>
+      </div>
+    `;
+  }
+
+  function livingReserveSpeciesNames(side) {
+    const living = new Set();
+    for (const pokemon of side?.team ?? []) {
+      if (!pokemon || pokemon.fainted || pokemon.active) continue;
+      const name = normalizeName(pokemon.species ?? pokemon.displayName);
+      if (name) living.add(name);
+    }
+    return living;
+  }
+
   function formatPredictionClassLabel(actionClass) {
     if (actionClass === "stay_attack") return "Stay + attack";
     if (actionClass === "switch") return "Switch";
@@ -1061,6 +1275,7 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
 
     return `
       ${renderBoardSummaryStrip(localIntel)}
+      ${prediction.replyTiming ? `<div style="margin-top:8px;opacity:.85">${escapeHtml(prediction.replyTiming.summary)}</div>` : ""}
       <div style="margin-top:8px;display:flex;flex-wrap:wrap;gap:6px">
         <span style="display:inline-flex;align-items:center;gap:6px;padding:3px 8px;border-radius:999px;border:1px solid rgba(255,255,255,0.08);${predictionClassChipStyle(prediction.topActionClass)};font-size:11px;line-height:1.2;white-space:nowrap">
           <strong style="font-weight:600">class</strong>
@@ -1105,11 +1320,513 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
     `;
   }
 
+  function renderMechanicsNotice(localIntel) {
+    const notes = String(localIntel?.note ?? "").split(",").map((note) => note.trim());
+    const messages = [
+      ["suppressed_mechanics_unavailable", "Recommendations are paused while an ability or item is disabled."],
+      ["substitute_mechanics_unavailable", "Recommendations are paused while a Substitute is active."]
+    ].filter(([limitation]) => notes.includes(limitation)).map(([, message]) => escapeHtml(message));
+    if (!messages.length) return "";
+    return `<div style="margin-top:10px;font-size:12px;opacity:.72">${messages.join(" ")}</div>`;
+  }
+
+  // The background binds the pick to its decision (and keeps it through frames that do not change the request); here it
+  // only has to be one of the shown snapshot's enabled actions. It never waits for the deterministic sections.
+  function currentMetamonAdvice() {
+    if (overlaySettings.showMetamonAdvice === false) return null;
+    const advice = latestLocalIntelPayload?.metamonAdvice;
+    const snapshot = latestLocalIntelPayload?.snapshot;
+    if (!advice?.identity || advice.identity.roomId !== latestLocalIntelPayload?.decisionIdentity?.roomId) return null;
+    if (advice.status === "ready" && !snapshot?.legalActions?.some((a) => a.id === advice.actionId && !a.disabled && a.legality !== "disabled")) return null;
+    return advice;
+  }
+
+  function renderMetamonAdvice() {
+    const advice = currentMetamonAdvice();
+    if (!advice) return "";
+    const text = advice.status === "ready" ? `Metamon: ${advice.label}`
+      : advice.status === "unavailable" ? `Metamon unavailable${advice.reason === "sync_lost" ? " (sync lost)" : ""}` : `Metamon: ${advice.status}`;
+    return `<div role="status" style="margin:8px 0;padding:10px;border:1px solid #5ed2ff;border-radius:10px;font-weight:700">${escapeHtml(text)} <small>${escapeHtml(advice.status)}${advice.latencyMs == null ? "" : ` · ${Math.round(advice.latencyMs)} ms`}</small></div>`;
+  }
+
+  // The in-battle product: show Metamon and the engine's numbers under Showdown's own move and
+  // switch buttons, not in an overlay. The extension annotates the client's controls; it never clicks or sends.
+  const metamonSeenAt = new Map(), metamonShownAfter = new Map();
+  const STRIP_STYLE = "margin:4px 0 8px;padding:7px 12px;border-radius:8px;background:#f5f9ff;color:#111827;border:1px solid #bcd3f5;border-left:5px solid #2f80ed;font:13px/1.35 system-ui,sans-serif";
+  // Inline notes must fit one line under a button: a non-damaging outcome gets a short label; the engine's full reason
+  // (e.g. "Resolved Fighting-type attack produces zero damage against Ghost-type/Fairy-type typing.") is a tooltip.
+  const OUTCOME_LABELS = { immune: "✗ no effect", blocked: "✗ blocked", status: "status" };
+  function rangeText(bands, hp) {
+    const band = findLikelyBand(bands);
+    if (band?.outcome && band.outcome !== "damage") return OUTCOME_LABELS[band.outcome] ?? band.outcome;
+    const text = formatCompactThreatBand(band);
+    // Raw damage cannot see an intact Disguise (or Sturdy / a Focus Sash at full HP): the engine's immediate assessment
+    // can. Head Smash into a Disguise once read "74–87% · may KO".
+    const shield = band?.immediate?.ko === "no_ko" && /^(?:Intact (Disguise|Ice Face) absorbs|(.+?) caps a lethal hit)/.exec(band.immediate.note ?? "");
+    if (shield) return `${text} · ${shield[1] ?? shield[2]}: no KO`;
+    if (!band || !Number.isFinite(hp)) return text;
+    return band.minPercent >= hp ? `${text} · KO` : band.maxPercent >= hp ? `${text} · may KO` : text;
+  }
+  // Hover detail: how much each move does to each Pokémon on the other side. The
+  // engine's band against every opposing Pokémon seen so far, one line each in the move's tooltip (the note stays short).
+  // A Pokémon not yet in battle is at full HP.
+  function moveTargetRows(preview, actionId) {
+    const row = (Array.isArray(preview) ? preview : []).find((entry) => entry.actionId === actionId);
+    return row ? { moveName: row.moveName, targets: (row.targets ?? []).map((target) => {
+      const hp = Number.isFinite(target.hpPercent) ? target.hpPercent : 100;
+      return { species: target.species, active: Boolean(target.active), teraType: target.teraType ?? null, hp: Math.round(hp), text: target.band ? rangeText([target.band], hp) : "–" };
+    }) } : null;
+  }
+  function moveTargetLines(preview, actionId) {
+    const row = moveTargetRows(preview, actionId);
+    if (!row?.targets.length) return [];
+    return [`${row.moveName} vs their team:`, ...row.targets.map((t) =>
+      `• ${t.species} (${[t.active ? "in" : "", t.teraType ? `Tera ${t.teraType}` : "", `${t.hp}%`].filter(Boolean).join(", ")}): ${t.text}`)];
+  }
+  // Hover detail must be visible: the note's native title appears only after ~1 s over its 14 px line, and
+  // Showdown's own move tooltip opens on the button first, so the same lines are appended to Showdown's tooltip. Showdown's
+  // tooltip classes style them; each row: name (in = active, Tera), likely band with KO, their HP.
+  function moveTipMarkup(preview, actionId, pending, stale) {
+    const row = moveTargetRows(preview, actionId);
+    const head = "<strong>vs their team</strong>";
+    if (!row?.targets.length) return `<p class="tooltip-section" data-s2o-tip>${head}: <small>${pending ? "calculating…" : row ? "no opposing Pokémon seen yet" : "no damage data for this move"}</small></p>`;
+    return `<p class="tooltip-section" data-s2o-tip${stale ? ' style="opacity:.6"' : ""}>${head}${stale ? " <small>updating…</small>" : ""}` + row.targets.map((t) =>
+      `<span data-s2o-tip-row style="display:block">${escapeHtml(t.species)}${t.active ? " <small>(in)</small>" : ""}${t.teraType ? ` <small>Tera ${escapeHtml(t.teraType)}</small>` : ""}: `
+      + `<b style="color:${/KO/.test(t.text) && !/no KO/.test(t.text) ? "#b42318" : "inherit"}">${escapeHtml(t.text)}</b> <small>· ${t.hp}% HP</small></span>`).join("") + "</p>";
+  }
+  // Showdown renders its tooltip synchronously on mouseover/focus of a .has-tooltip element (here a move button, data-tooltip
+  // "move|…") into #tooltipwrapper; the document observer then calls augment() before paint. hover() tracks that same
+  // element. A section shows only while that button carries our note (advisor on, this room's decision).
+  function moveTooltips(doc) {
+    const tips = new WeakMap();
+    let target = null, shown = null;
+    return {
+      set: (button, markup) => { tips.set(button, markup); },
+      hover: (event) => { target = event.target?.closest?.(".has-tooltip") ?? null; },
+      augment() {
+        const tooltip = doc.getElementById("tooltipwrapper")?.querySelector(".tooltip-move");
+        if (!tooltip) { shown = null; return; }
+        const markup = target?.isConnected && /^move\|/.test(target.dataset?.tooltip ?? "") && target.querySelector("[data-s2o=note]") ? tips.get(target) : undefined;
+        if (shown?.tooltip === tooltip && shown.markup === markup) return;
+        tooltip.querySelector("[data-s2o-tip]")?.remove();
+        shown = { tooltip, markup };
+        if (!markup) return;
+        const before = tooltip.getBoundingClientRect().top;
+        tooltip.insertAdjacentHTML("beforeend", markup);
+        // Showdown anchors the tooltip's bottom and placed it for its own height: a tooltip below the button keeps its top
+        // (never covers the button); one above stays on screen.
+        const after = tooltip.getBoundingClientRect().top;
+        const shift = before >= target.getBoundingClientRect().bottom - 1 ? before - after : Math.max(0, 1 - after);
+        const wrapper = tooltip.closest("#tooltipwrapper");
+        if (shift > 0 && wrapper) wrapper.style.top = `${(parseFloat(wrapper.style.top) || 0) + shift}px`;
+      }
+    };
+  }
+  // Show what the opponent's active likely carries, from the player's own games (observed history) and
+  // real ladder play (monthly Smogon usage). Revealed facts are ticked; the rest are ranked by ladder share.
+  function likelySetMarkup(intel, snapshot) {
+    const active = snapshot?.opponentSide?.active;
+    const entry = active && (intel?.opponents ?? []).find((o) => (o.instanceId && o.instanceId === active.instanceId)
+      || normalizeName(o.species) === normalizeName(active.species));
+    if (!entry) return "";
+    const pct = (share) => `${Math.round(share * 100)}%`;
+    const mine = (e) => e && !e.source && e.count > 0 ? ` (you ${e.count}/${e.sampleCount})` : "";
+    const revealed = new Set((entry.revealedMoves ?? []).map(normalizeName));
+    const moves = new Map();
+    for (const m of entry.metaMovePrior?.moves ?? []) moves.set(normalizeName(m.name), { name: m.name, ladder: m.setInclusionShare });
+    for (const m of entry.likelyMoves ?? []) {
+      const key = normalizeName(m.name), prior = moves.get(key) ?? { name: m.name };
+      if (!m.source) prior.mine = m; else prior.ladder ??= m.share;
+      moves.set(key, prior);
+    }
+    // Only list supported guesses: a ladder share or the owner's own sightings (bare names were noise).
+    const ranked = [...moves.entries()].filter(([key, m]) => !revealed.has(key) && (m.ladder != null || m.mine?.count > 0))
+      // Ladder-backed moves first (large samples), then moves seen only in your own games (often thin).
+      .sort(([, a], [, b]) => ((b.ladder != null) - (a.ladder != null)) || ((b.ladder ?? b.mine?.share ?? 0) - (a.ladder ?? a.mine?.share ?? 0))).slice(0, 6)
+      .map(([, m]) => `${escapeHtml(m.name)}${m.ladder != null ? ` ${pct(m.ladder)}` : ""}${escapeHtml(mine(m.mine))}`);
+    const line = (label, known, list) => {
+      const shown = known ? [`<b>${escapeHtml(known)}</b> ✓`]
+        : (list ?? []).slice(0, 3).map((e) => `${escapeHtml(e.name)} ${pct(e.share)}${escapeHtml(mine(e))}`);
+      return shown.length ? `<div><span style="opacity:.6">${label}:</span> ${shown.join(" · ")}</div>` : "";
+    };
+    const src = entry.metaMovePrior?.source;
+    const sources = [src ? `ladder: Smogon ${src.period} ≥${src.ratingCutoff}` : "", entry.battlesSeen ? `your games: ${entry.battlesSeen}` : ""].filter(Boolean).join(" · ");
+    return `<div style="font-weight:700;margin-bottom:2px">${escapeHtml(entry.displayName ?? entry.species)}: likely set</div>`
+      + `<div><span style="opacity:.6">Moves:</span> ${[...(entry.revealedMoves ?? []).map((m) => `<b>${escapeHtml(m)}</b> ✓`), ...ranked].join(" · ") || "unknown"}</div>`
+      + line("Item", entry.revealedItem, entry.likelyItems) + line("Ability", entry.revealedAbility, entry.likelyAbilities)
+      + line("Tera", entry.revealedTeraType, entry.likelyTeraTypes)
+      + (sources ? `<div style="margin-top:2px;font-size:11px;opacity:.55">${escapeHtml(sources)}</div>` : "");
+  }
+
+  // Shadow re-ranker (experimental): Metamon's raw pick stays the headline. A differing re-ranked pick
+  // gets its own clearly labelled line; tactical guards on either pick follow (red = penalized fact, amber = warning).
+  function metamonGuardMarkup(advice) {
+    if (advice?.status !== "ready") return "";
+    const rerank = advice.rerank?.label ? `<div data-s2o-rerank style="margin-top:3px;font-size:12px;font-weight:700;color:#5b3fa8">Re-ranked (experimental): ${escapeHtml(advice.rerank.label)}</div>` : "";
+    // One line each: the companion's short text, the full fact as a tooltip; never wraps or resizes.
+    // A KO'd-first warning on the shown pick is red: the pick never happens if it is right.
+    const guards = (Array.isArray(advice.guards) ? advice.guards : []).slice(0, 3).map((guard) => {
+      const tone = guard.severity === "red" || (guard.onPick && guard.kind === "pre_move_ko") ? "red" : "amber";
+      const text = `${guard.onPick ? "Pick · " : ""}${guard.short || guard.message}`;
+      return `<div data-s2o-guard="${tone}"${guard.onPick ? " data-s2o-guard-pick" : ""} title="${escapeHtml(guard.message)}" style="margin-top:2px;font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:${tone === "red" ? "#b42318" : "#9a5b00"}">⚠ ${escapeHtml(text)}</div>`;
+    }).join("");
+    return rerank + guards;
+  }
+
+  // A possible Illusion (one short line, detail as tooltip): the sections assume the shown species; the
+  // Illusion user's own speed follows when the engine has it. Gone once the disguise is revealed or ruled out.
+  function illusionLine(intel, snapshot) {
+    const illusion = intel?.illusion;
+    if (!illusion) return "";
+    const alt = intel.illusionAlternative;
+    // The engine's own order verdict for the Illusion user's view (speedVerdict in the companion).
+    const altSpeed = alt?.speedPreview?.verdict?.text ?? null;
+    const text = `Possible Illusion (${illusion.possible.join("/")}): numbers assume ${illusion.shown}${altSpeed ? ` · if ${alt.species}: ${altSpeed.charAt(0).toLowerCase()}${altSpeed.slice(1)}` : ""}`;
+    return `<div data-s2o-illusion title="${escapeHtml(`${text}. Its likely moves and damage are listed with "if ${alt?.species ?? illusion.possible[0]}" where known.`)}" style="margin-top:2px;font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#9a5b00">⚠ ${escapeHtml(text)}</div>`;
+  }
+  // Why the engine's sections are withheld, in words, instead of a misleading "not enough information".
+  const PAUSED = { identity_ambiguous: "an opposing Pokémon's identity is uncertain", history_lineage_conflict: "this battle's history conflicts with an earlier record",
+    recovery_public_continuity_unknown: "rebuilding the battle state after a gap", revival_ranking_unavailable: "Revival Blessing choices are not modeled",
+    preview_reset_unavailable: "team preview was reset", unsupported_generation: "not a Gen 9 battle", suppressed_mechanics_unavailable: "an ability or item is suppressed",
+    substitute_mechanics_unavailable: "your Substitute is not modeled", temporary_ability_forecasts_unavailable: "a swapped ability is not modeled",
+    transform_mechanics_unavailable: "Transform is not modeled" };
+  function pausedReason(semantic, intel) {
+    if (semantic?.capabilities?.status !== "unsupported" || intel?.illusion || intel?.opponents?.length) return null;
+    const reasons = (semantic.capabilities.limitations ?? []).map((code) => PAUSED[code]).filter(Boolean);
+    return reasons.length ? `Engine paused: ${reasons[0]}` : null;
+  }
+
+  // Every unavailable state says why in words, and what happens next.
+  function unavailableText(advice) {
+    const why = {
+      capacity: `busy: ${advice.detail ?? "all Metamon workers are in use"}`,
+      unsupported_format: "not available for this format (Gen 9 UU only)",
+      sync_lost: "lost sync; replaying this battle to resync…",
+      worker_stalled: "model stopped responding; damage and speed remain available; retrying…",
+      companion_unreachable: "companion not reachable; retrying…",
+      ended: "battle ended", idle: "stopped after inactivity", shutdown: "companion shut down", stale_advice: "pick is for an older turn"
+    }[advice.reason];
+    return why ?? `unavailable${advice.reason ? ` (${String(advice.reason).replace(/_/g, " ")})` : ""}`;
+  }
+
+  // The picked lead button's one line and tooltip (short line, detail in the tooltip). The UU lead model
+  // imitates rated human leads: "usual", never "best". A random draw must not read as advice (a review finding).
+  function leadNote(advice) {
+    if (advice?.basis === "lead_model") return { text: `usual lead ${Math.round(advice.probability * 100)}%`,
+      detail: "How often rated UU players lead this from this preview (lead model); not a win estimate" };
+    if (advice?.basis === "random_preview") return { text: "random draw", detail: "Not advice: Metamon's preview is a random draw; the strip says why" };
+    return { text: "lead", detail: "" };
+  }
+  // Which Showdown controls carry Metamon's pick. Buttons are matched by their request slot (Showdown's value), never by
+  // their text: a Tera pick also marks the Terastallize checkbox (a 96% Tera pick was once played without Tera).
+  // For a player who would rather switch: Metamon's own best switch beside a
+  // move pick (best move beside a switch pick), one line; that action's warnings (it may be taken) are in its tooltip.
+  function alternativeLine(advice) {
+    const alt = advice?.status === "ready" ? advice.alternative : null;
+    if (!alt?.label) return "";
+    const warnings = (Array.isArray(alt.guards) ? alt.guards : []).map((guard) => guard.message).join(" ");
+    const title = warnings ? `${alt.label}. Warning: ${warnings}` : `${alt.label}: Metamon's most likely ${alt.kind === "switch" ? "switch" : "move"}; no warnings for it.`;
+    return `<div data-s2o-alt title="${escapeHtml(title)}" style="margin-top:2px;font-size:12px;font-weight:600;color:#4b5563;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">↳ ${escapeHtml(alt.label)}${warnings ? ` <span style="color:#9a5b00">⚠ ${escapeHtml(alt.guards[0].short || alt.guards[0].message)}</span>` : ""}</div>`;
+  }
+  // The alternative's button gets a subtle dashed outline (the pick keeps its solid one and its words).
+  function markAlternative(el, on) {
+    if (on && el.dataset.s2oPick !== "1") { el.style.outline = "2px dashed rgba(47,128,237,.55)"; el.style.outlineOffset = "1px"; el.dataset.s2oAlt = "1"; }
+    else delete el.dataset.s2oAlt;
+  }
+
+  function pickMarks(snapshot, advice) {
+    const action = advice?.status === "ready" ? snapshot?.legalActions?.find((a) => a.id === advice.actionId) : null;
+    return { moveSlot: action?.kind === "move" ? action.moveSlot : null, tera: Boolean(action?.kind === "move" && action.terastallize),
+      switchSlot: action?.kind === "switch" ? action.targetSlot : null, leadSlot: action?.kind === "team" ? action.teamSpec?.[0] ?? null : null };
+  }
+
+  function markPick(el, on) {
+    el.style.outline = on ? "3px solid #2f80ed" : "";
+    el.style.outlineOffset = on ? "1px" : "";
+    if (on) el.dataset.s2oPick = "1"; else delete el.dataset.s2oPick;
+  }
+
+  function markTeraBox(controls, on) {
+    const box = controls.querySelector("input[name=terastallize]")?.closest("label");
+    if (!box) return;
+    markPick(box, on);
+    let badge = box.querySelector("[data-s2o=tera]");
+    if (on && !badge) { badge = document.createElement("small"); badge.dataset.s2o = "tera"; box.append(badge); }
+    if (!badge) return;
+    badge.style.cssText = on ? "display:block;font-size:11px;font-weight:700;color:#2f80ed;white-space:nowrap" : "display:none";
+    badge.textContent = on ? "★ Metamon: Terastallize" : "";
+  }
+
+  // Species of the request's party slot (1-based), from the companion's snapshot of this decision.
+  function partySpecies(snapshot, slot) {
+    const action = snapshot?.legalActions?.find((a) => a.kind === "switch" && a.targetSlot === slot);
+    const name = String(action?.target ?? "").replace(/^p\d[a-z]?:\s*/, "");
+    if (!name) return null;
+    const mon = (Array.isArray(snapshot?.yourSide?.team) ? snapshot.yourSide.team : []).find((m) => String(m?.ident ?? "").replace(/^p\d[a-z]?:\s*/, "") === name);
+    return mon?.species ?? null;
+  }
+
+  function renderMetamonBox() {
+    if (retired) return;
+    document.getElementById(`${OVERLAY_ID}-metamon-box`)?.remove();
+    const identity = latestLocalIntelPayload?.decisionIdentity;
+    // Never show nothing in a battle: without captured data, say so on the visible battle's controls.
+    const visibleBattle = [...document.querySelectorAll('[id^="room-battle-"]')].find((el) => el.offsetParent !== null);
+    const controls = (identity?.roomId && document.getElementById(`room-${identity.roomId}`)?.querySelector(".battle-controls"))
+      || visibleBattle?.querySelector(".battle-controls");
+    for (const el of document.querySelectorAll("[data-s2o]")) if (!controls || !controls.contains(el)) el.remove();
+    if (!controls) return;
+    if (overlaySettings.showMetamonAdvice === false) { for (const el of controls.querySelectorAll("[data-s2o]")) el.remove(); return; }
+    const advice = currentMetamonAdvice();
+    const key = decisionKey(identity);
+    if (key && !metamonSeenAt.has(key)) metamonSeenAt.set(key, Date.now());
+    if (advice?.status === "ready" && key && !metamonShownAfter.has(key)) metamonShownAfter.set(key, Date.now() - metamonSeenAt.get(key));
+    // Reloading the extension orphans this page script: it keeps its last state but can no longer reach the extension,
+    // which looked like "waiting for the battle…" forever (seen on one Chromium browser). Say what is wrong instead.
+    if (!chrome.runtime?.id && extensionContextValid) { markExtensionContextInvalid(); return; }
+    if (!extensionContextValid) {
+      let top = controls.querySelector("[data-s2o=strip]");
+      if (!top) { top = document.createElement("div"); top.dataset.s2o = "strip"; controls.prepend(top); }
+      top.style.cssText = STRIP_STYLE;
+      // A successor bridge normally takes over within the grace period (no refresh); a refresh is only the last resort.
+      top.innerHTML = Date.now() - (orphanedAt ?? 0) < ORPHAN_GRACE_MS
+        ? `<div style="font-weight:700">shwdn2op was updated: reconnecting…</div><div style="font-size:12px;opacity:.75">The battle resumes here without a refresh.</div>`
+        : `<div style="font-weight:700">shwdn2op was updated: refresh this tab to reconnect.</div><div style="font-size:12px;opacity:.75">A logged-in account keeps its seat; on a guest name, finish the battle first.</div>`;
+      for (const el of controls.querySelectorAll("[data-s2o]:not([data-s2o=strip])")) el.remove();
+      return;
+    }
+    if (!identity || identity.roomId !== controls.closest('[id^="room-battle-"]')?.id.slice(5)) {
+      let top = controls.querySelector("[data-s2o=strip]");
+      if (!top) { top = document.createElement("div"); top.dataset.s2o = "strip"; controls.prepend(top); }
+      top.style.cssText = STRIP_STYLE;
+      // Never advise a reload: under a guest name, reloading mid-battle can lose the player's seat.
+      top.innerHTML = `<div style="font-weight:700">shwdn2op: syncing battle data…</div><div style="font-size:12px;opacity:.75">The page re-sends the battle state automatically every 15 s.</div>`;
+      return;
+    }
+    const pick = !latestLocalIntelPayload.envelope && !advice ? "waiting for the battle…"
+      : !advice ? "waiting for your decision…"
+      : advice.status === "ready" ? advice.label
+      : advice.status === "unavailable" ? unavailableText(advice)
+      : advice.status === "warming" ? "thinking…" : advice.status;
+    const intel = getLocalIntel();
+    const semantic = latestLocalIntelPayload?.envelope?.semantic;
+    // Each section renders when its stage is ready: pending ones say so; stale ones (an earlier view of this same
+    // decision, until their replacement arrives) are dimmed.
+    const pendingSections = new Set(latestLocalIntelPayload?.pendingSections ?? (intel ? [] : ["speed", "sets", "damage", "threats"]));
+    const staleSections = new Set(latestLocalIntelPayload?.staleSections ?? []);
+    const dim = (section) => staleSections.has(section) ? ";opacity:.55" : "";
+    const ensure = (key, parent, before) => {
+      let el = parent.querySelector(`[data-s2o=${key}]`);
+      if (!el) { el = document.createElement("div"); el.dataset.s2o = key; before ? parent.prepend(el) : parent.append(el); }
+      return el;
+    };
+    // Strip: Metamon's pick, then a coloured speed tag. Kept to two short lines.
+    const speed = intel?.speedPreview;
+    // The order verdict is the engine's (companion speedVerdict): one rule, updated with every fact the engine has.
+    const verdict = speed?.verdict ?? null;
+    const tone = { faster: ["#e6f7ea", "#1e7b34"], slower: ["#fdeaea", "#b42318"], overlap: ["#fff4e0", "#9a5b00"] }[verdict?.tone] ?? ["#eef1f5", "#4b5563"];
+    const top = ensure("strip", controls, true);
+    top.style.cssText = STRIP_STYLE;
+    // Newer frames or history are being checked; the shown decision stays until a different one replaces it.
+    const updating = latestLocalIntelPayload?.updating ? ` <span data-s2o-updating style="font-weight:400;font-size:11px;opacity:.55">updating…</span>` : "";
+    top.innerHTML = `<div style="font-weight:700;font-size:14px">★ Metamon: ${escapeHtml(pick)}${updating}</div>` + alternativeLine(advice)
+      + `<div style="margin-top:3px;display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:12px">`
+      + (verdict ? `<span data-s2o-speed style="padding:1px 8px;border-radius:999px;background:${tone[0]};color:${tone[1]};font-weight:600${dim("speed")}">${escapeHtml(verdict.text)}</span>`
+        : `<span data-s2o-speed style="opacity:.7">${!intel || pendingSections.has("speed") ? "Speed: calculating…" : pausedReason(semantic, intel) ?? "Speed: not enough information yet"}</span>`)
+      + `</div>` + illusionLine(intel, latestLocalIntelPayload?.snapshot);
+    // Diagnosis without devtools: what the engine sent for this decision (no hidden information).
+    top.dataset.pick = advice?.status === "ready" ? advice.actionId : "";
+    top.dataset.rqid = String(semantic?.identity?.rqid ?? "");
+    top.dataset.engine = JSON.stringify({ status: latestLocalIntelPayload?.status ?? null, message: latestLocalIntelPayload?.message ?? null,
+      stage: semantic ? semantic.stage ?? "final" : null, pending: [...pendingSections], stale: [...staleSections],
+      limitations: semantic?.capabilities?.limitations ?? null, intel: Boolean(intel), damage: intel?.playerDamagePreview?.length ?? null,
+      threats: intel?.opponentThreatPreview?.length ?? null, speed: Boolean(intel?.speedPreview), advice: advice ? `${advice.status}/${advice.reason ?? ""}` : null });
+    const picked = advice?.status === "ready" ? advice.actionId : null;
+    const damage = Array.isArray(intel?.playerDamagePreview) ? intel.playerDamagePreview : [];
+    const ko = (text) => /KO/.test(text) ? "#b42318" : "#1f4e8c";
+    // One line inside the button; the button grows by exactly that line (Showdown gives it a fixed height), so the note
+    // never spills over the Tera checkbox or the next row. Every button gets a line, so a row stays level.
+    const note = (button, text, star, detail = "", section = "damage", extra = []) => {
+      let el = button.querySelector("[data-s2o=note]");
+      if (!el) { el = document.createElement("small"); el.dataset.s2o = "note"; button.append(el); }
+      if (!button.dataset.s2oHeight) button.dataset.s2oHeight = getComputedStyle(button).height;
+      button.style.height = "auto";
+      button.style.minHeight = button.dataset.s2oHeight;
+      if (!text && pendingSections.has(section)) { text = "…"; detail = "calculating"; }
+      el.style.cssText = `display:block;font-size:11px;line-height:14px;height:14px;margin-top:1px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:${/no effect|blocked|fails/.test(text) ? "#6b7280" : ko(text)}${dim(section)}`;
+      el.textContent = text || "\u00a0";
+      el.title = [[text, detail].filter(Boolean).join(" — "), ...extra].filter(Boolean).join("\n");
+      // Outline-only picks were missed in real games: the picked button also says so in words, on its
+      // own line so a narrow switch button never truncates it.
+      let badge = button.querySelector("[data-s2o=badge]");
+      if (star && !badge) { badge = document.createElement("small"); badge.dataset.s2o = "badge"; button.insertBefore(badge, el); }
+      if (badge) {
+        // clear:both puts it under Showdown's floated Pokémon icon, so the full button width holds the words.
+        badge.style.cssText = star ? "display:block;clear:both;text-align:center;font-size:11px;line-height:14px;margin-top:1px;font-weight:800;color:#2f80ed;white-space:nowrap" : "display:none";
+        badge.textContent = star ? "★ Metamon" : "";
+      }
+      markPick(button, star);
+    };
+    const snapshot = latestLocalIntelPayload?.snapshot;
+    const marks = pickMarks(snapshot, advice);
+    const altMarks = pickMarks(snapshot, advice?.status === "ready" && advice.alternative ? { status: "ready", actionId: advice.alternative.actionId } : null);
+    for (const button of controls.querySelectorAll("button[name=chooseMove]")) {
+      const slot = Number(button.value);
+      const plain = damage.find((d) => d.actionId === `move:${slot}|tera=0`), tera = damage.find((d) => d.actionId === `move:${slot}|tera=1`);
+      // A second delayed attack into an occupied slot fails (engine: delayed.scheduling === "occupied").
+      const raw = plain ? (plain.delayed ? (plain.delayed.scheduling === "occupied" ? "fails: already pending" : "delayed hit")
+        : rangeText(plain.bands, plain.targetCurrentHpPercent)) : "";
+      const text = /status move|setup move/.test(raw) ? "status" : raw;
+      const teraText = tera && !tera.delayed ? rangeText(tera.bands, tera.targetCurrentHpPercent) : "";
+      // The line keeps the base range; Tera shows there only when it changes the KO outcome, otherwise in the tooltip.
+      const teraKo = /KO/.test(teraText) && !/KO/.test(text) ? ` · Tera ${teraText.replace(/^.* · /, "")}` : "";
+      const alt = intel?.illusionAlternative?.playerDamagePreview?.find((d) => d.actionId === `move:${slot}|tera=0`);
+      const detail = [findLikelyBand(plain?.bands)?.detail, teraText && teraText !== raw ? `Tera: ${teraText}` : "",
+        alt && !alt.delayed ? `if ${intel.illusionAlternative.species}: ${rangeText(alt.bands, alt.targetCurrentHpPercent)}` : ""].filter(Boolean).join(" · ");
+      note(button, text + (/status|no effect/.test(text) ? "" : teraKo), marks.moveSlot === slot, detail, "damage",
+        moveTargetLines(intel?.moveTargetPreview, `move:${slot}|tera=0`));
+      moveTips.set(button, moveTipMarkup(intel?.moveTargetPreview, `move:${slot}|tera=0`, !intel || pendingSections.has("analysis"), staleSections.has("analysis")));
+      markAlternative(button, altMarks.moveSlot === slot);
+    }
+    moveTips.augment();  // an open tooltip follows each new stage
+    markTeraBox(controls, marks.tera);
+    // Metamon is a learned policy and can pick a move the rules make fail; say so plainly. The companion's guards say
+    // it (and more); this client-side line remains only for a companion that sends no guards.
+    top.insertAdjacentHTML("beforeend", metamonGuardMarkup(advice));
+    const pickedDamage = picked && damage.find((d) => d.actionId === picked);
+    if (pickedDamage?.delayed?.scheduling === "occupied" && !Array.isArray(advice?.guards)) {
+      top.insertAdjacentHTML("beforeend", `<div style="margin-top:4px;font-size:12px;font-weight:700;color:#b42318">⚠ ${escapeHtml(pickedDamage.label)} is already pending; this pick will fail.</div>`);
+    }
+    const threats = (Array.isArray(intel?.opponentThreatPreview) ? intel.opponentThreatPreview : []).slice(0, 4);
+    for (const button of controls.querySelectorAll("button[name=chooseSwitch]")) {
+      // Showdown's value is the request's party index (choice `switch value+1`). Reading the button's text matched
+      // nicknames and our own appended note, so "Arcanine" + note stopped matching "Arcanine-Hisui" every other render.
+      const slot = Number(button.value) + 1;
+      const species = partySpecies(snapshot, slot);
+      const target = species ? (threats[0]?.switchTargets ?? []).find((t) => normalizeName(t.species) === normalizeName(species)) : null;
+      // Switch buttons are narrow: the bare range (damage this switch-in takes) fits; the tooltip names it.
+      note(button, target ? rangeText(target.bands, target.targetCurrentHpPercent) : "", marks.switchSlot === slot,
+        target ? `damage ${species} takes on the switch from ${threats[0]?.moveName ?? "their likely move"}` : "", "threats");
+      markAlternative(button, altMarks.switchSlot === slot);
+    }
+    for (const button of controls.querySelectorAll("button[name=chooseTeamPreview]")) {
+      if (marks.leadSlot === Number(button.value) + 1) { const lead = leadNote(advice); note(button, lead.text, true, lead.detail); }
+      else { for (const el of button.querySelectorAll("[data-s2o=note], [data-s2o=badge]")) el.remove(); markPick(button, false); }
+    }
+    // Below the switch row: their likely moves against your active and each of your switch-ins.
+    const table = ensure("threats", controls, false);
+    // Showdown floats its buttons; clear them so this flows below and can never cover (and swallow clicks on) a button.
+    if (!controls.querySelector("button[name=chooseMove], button[name=chooseSwitch]")) { table.style.cssText = "display:none"; table.textContent = ""; }
+    else if (!threats.length) {
+      table.style.cssText = "clear:both;margin:8px 0 4px;font:12px system-ui,sans-serif;opacity:.7";
+      table.textContent = pendingSections.has("threats") ? "Their likely moves: calculating…" : intel ? "Their likely moves: none predicted yet." : "";
+    } else {
+      const active = threats[0].currentTarget?.species ?? "Your active";
+      const reserves = [...new Set(threats.flatMap((t) => (t.switchTargets ?? []).map((x) => x.species)).filter((x) => x && x !== active))];
+      const cell = (target) => {
+        if (!target) return `<td style="padding:3px 8px;text-align:center;opacity:.4">–</td>`;
+        const text = target.delayed ? "delayed" : rangeText(target.bands, target.targetCurrentHpPercent);
+        return `<td style="padding:3px 8px;text-align:center;white-space:nowrap;color:${ko(text)};font-weight:${/KO/.test(text) ? 700 : 500}">${escapeHtml(text.replace(/non-damaging status move|.*already has a non-volatile status\.?/, "status"))}</td>`;
+      };
+      table.style.cssText = `clear:both;margin:8px 0 4px;overflow-x:auto;font:12px/1.3 system-ui,sans-serif;color:#1f2937${dim("threats")}`;
+      table.innerHTML = `<div style="font-weight:700;margin-bottom:3px">Their likely moves → damage to you (% of max HP)</div>`
+        + `<table style="border-collapse:collapse;background:#fff;border:1px solid #d6dbe3;border-radius:6px">`
+        + `<tr style="background:#f3f5f9"><th style="padding:3px 8px;text-align:left">Move</th><th style="padding:3px 8px">${escapeHtml(active)} (in)</th>`
+        + reserves.map((r) => `<th style="padding:3px 8px">${escapeHtml(r)}</th>`).join("") + `</tr>`
+        + threats.map((t) => `<tr style="border-top:1px solid #e5e8ee"><td style="padding:3px 8px;white-space:nowrap"><b>${escapeHtml(t.moveName ?? t.label ?? "?")}</b>${t.moveSource ? ` <span style="opacity:.6">${escapeHtml(t.moveSource)}</span>` : ""}</td>`
+          + cell(t.currentTarget) + reserves.map((r) => cell((t.switchTargets ?? []).find((x) => x.species === r))).join("") + `</tr>`).join("")
+        // A possible Illusion: the Illusion user's two likeliest moves, labelled, as the alternative.
+        + (intel?.illusionAlternative?.opponentThreatPreview ?? []).slice(0, 2).map((t) => `<tr style="border-top:1px dashed #e5c07b;background:#fffaf0"><td style="padding:3px 8px;white-space:nowrap"><span style="opacity:.7">if ${escapeHtml(intel.illusionAlternative.species)}:</span> <b>${escapeHtml(t.moveName ?? "?")}</b></td>`
+          + cell(t.currentTarget) + reserves.map((r) => cell((t.switchTargets ?? []).find((x) => x.species === r))).join("") + `</tr>`).join("")
+        + `</table>`;
+    }
+    const set = ensure("set", controls, false);
+    const setHtml = likelySetMarkup(intel, latestLocalIntelPayload?.snapshot);
+    set.style.cssText = setHtml ? `clear:both;margin:8px 0 4px;padding:6px 10px;border-radius:6px;background:#fff;border:1px solid #d6dbe3;font:12px/1.4 system-ui,sans-serif;color:#1f2937${dim("sets")}` : "display:none";
+    set.innerHTML = setHtml;
+    const shown = advice?.status === "ready" ? metamonShownAfter.get(key) : undefined;
+    if (shown !== undefined) top.title = `Metamon ready ${(shown / 1000).toFixed(1)} s after this decision began`;
+    recordPaint(identity, pendingSections, advice);
+  }
+  // Real latency, per request (each section should show as soon as it is available): when this
+  // page saw the request and when each section first painted for it. A record is reported once the room's next request
+  // or its end arrives. Only room ids, rqids and milliseconds: no names.
+  const decisionTimings = new Map(), latestTimedRqid = new Map();
+  function noteRequestSeen(data) {
+    if (typeof data !== "string") return;
+    let roomId = null;
+    for (const line of data.split("\n")) {
+      if (line.startsWith(">")) { roomId = line.slice(1).trim(); continue; }
+      if (!roomId?.startsWith("battle-")) continue;
+      if (/^\|(?:win\||tie(?:\||$)|deinit(?:\||$))/.test(line)) { reportTimings(roomId); continue; }
+      if (!line.startsWith("|request|")) continue;
+      let request = null;
+      try { request = JSON.parse(line.slice(9)); } catch {}
+      if (!Number.isSafeInteger(request?.rqid) || request.wait) continue;
+      // A replay of the battle log (bootstrap) re-sends an old request: it is not a new decision.
+      if (request.rqid <= (latestTimedRqid.get(roomId) ?? 0)) continue;
+      latestTimedRqid.set(roomId, request.rqid);
+      reportTimings(roomId);
+      decisionTimings.set(`${roomId}#${request.rqid}`, { roomId, rqid: request.rqid, kind: request.teamPreview ? "preview" : request.forceSwitch?.[0] ? "forced_switch" : "move",
+        seenAt: Date.now(), sections: {} });
+    }
+  }
+  function recordPaint(identity, pendingSections, advice) {
+    const timing = identity && decisionTimings.get(`${identity.roomId}#${identity.rqid}`);
+    if (!timing || timing.reported) return;
+    const at = Date.now() - timing.seenAt;
+    const shown = [...["speed", "sets", "damage", "threats"].filter((section) => !pendingSections.has(section)),
+      ...(advice?.status === "ready" ? ["pick"] : []), ...(advice?.status === "ready" && !advice.guardsPending ? ["warnings"] : [])];
+    for (const section of shown) timing.sections[section] ??= at;
+  }
+  function reportTimings(roomId) {
+    for (const [key, timing] of decisionTimings) {
+      if (timing.roomId !== roomId || timing.reported) continue;
+      timing.reported = true;
+      if (Object.keys(timing.sections).length) void safeSendRuntimeMessage({ type: "decision-timing", payload: { roomId: timing.roomId, rqid: timing.rqid, kind: timing.kind, sections: timing.sections } });
+      decisionTimings.delete(key);
+    }
+  }
+
+  // Showdown redraws its controls each request; re-annotate the current room's controls at most once per frame.
+  let annotateQueued = false;
+  const moveTips = moveTooltips(document);
+  document.addEventListener("mouseover", moveTips.hover, true);
+  document.addEventListener("focusin", moveTips.hover, true);
+  cleanups.push(() => document.removeEventListener("mouseover", moveTips.hover, true), () => document.removeEventListener("focusin", moveTips.hover, true));
+  const annotator = new MutationObserver(() => {
+    if (retired) return;
+    moveTips.augment();
+    if (annotateQueued) return;
+    const roomId = latestLocalIntelPayload?.decisionIdentity?.roomId;
+    const controls = (roomId && document.getElementById(`room-${roomId}`)?.querySelector(".battle-controls"))
+      || [...document.querySelectorAll('[id^="room-battle-"]')].find((el) => el.offsetParent !== null)?.querySelector(".battle-controls");
+    if (!controls) return;
+    // Showdown can also replace the buttons under a strip that stays: annotate any move/switch button without its note.
+    // Only when a render would add the notes (an envelope for this room), or this would re-render on its own mutations.
+    const unannotated = () => latestLocalIntelPayload?.envelope && overlaySettings.showMetamonAdvice !== false && extensionContextValid
+      && controls.closest('[id^="room-battle-"]')?.id === `room-${roomId}`
+      && controls.querySelector("button[name=chooseMove]:not(:has([data-s2o=note])), button[name=chooseSwitch]:not(:has([data-s2o=note]))");
+    if (controls.querySelector("[data-s2o=strip]") && !unannotated()) return;
+    annotateQueued = true;
+    requestAnimationFrame(() => { annotateQueued = false; renderMetamonBox(); });
+  });
+  annotator.observe(document.documentElement, { childList: true, subtree: true });
+  cleanups.push(() => annotator.disconnect());
+
+  function refreshMetamonBanner() {
+    renderMetamonBox();
+    const banner = document.getElementById(`${OVERLAY_ID}-metamon`);
+    if (banner) banner.innerHTML = renderMetamonAdvice() || '<div style="margin:8px 0;padding:10px;opacity:.7">Waiting for your next decision…</div>';
+  }
+
   function renderSelfActionPanelMarkup() {
     const localIntel = getLocalIntel();
+    const mechanicsNotice = renderMechanicsNotice(localIntel);
+    if (mechanicsNotice) return mechanicsNotice;
     const recommendation = localIntel?.selfActionRecommendation ?? null;
     const leadRecommendation = localIntel?.playerLeadRecommendation ?? null;
-    if (!recommendation && leadRecommendation) {
+    if ((!recommendation || latestOverlayPayload?.snapshot?.phase === "preview") && leadRecommendation) {
       const topCandidates = Array.isArray(leadRecommendation.topCandidates) ? leadRecommendation.topCandidates : [];
       return `
         <div style="margin-top:8px;display:flex;flex-wrap:wrap;gap:6px">
@@ -1150,7 +1867,11 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
     }
 
     const rankedActions = Array.isArray(recommendation.rankedActions) ? recommendation.rankedActions : [];
+    const visibleActions = rankedActions.slice(0, 4);
+    const metamonCandidate = rankedActions.find((candidate) => candidate.actionId === currentMetamonAdvice()?.actionId);
+    if (metamonCandidate && !visibleActions.includes(metamonCandidate)) visibleActions.push(metamonCandidate);
     return `
+      <div data-shwdn2op-decision="${escapeHtml(latestLocalIntelPayload?.envelope?.resultHash ?? "")}">
       ${renderBoardSummaryStrip(localIntel)}
       <div style="margin-top:8px;display:flex;flex-wrap:wrap;gap:6px">
         <span style="display:inline-flex;align-items:center;gap:6px;padding:3px 8px;border-radius:999px;border:1px solid rgba(255,255,255,0.08);background:rgba(94,210,255,0.16);border-color:rgba(94,210,255,0.28);font-size:11px;line-height:1.2;white-space:nowrap">
@@ -1158,14 +1879,14 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
           <span>${escapeHtml(rankedActions[0]?.label ?? recommendation.topActionId ?? "Unknown")}</span>
         </span>
         <span style="display:inline-flex;align-items:center;gap:6px;padding:3px 8px;border-radius:999px;border:1px solid rgba(255,255,255,0.08);${predictionConfidenceChipStyle(recommendation.confidenceTier)};font-size:11px;line-height:1.2;white-space:nowrap">
-          <strong style="font-weight:600">confidence</strong>
+          <strong style="font-weight:600" title="Heuristic decision margin and evidence coverage, not a probability">confidence</strong>
           <span>${escapeHtml(recommendation.confidenceTier)}</span>
         </span>
       </div>
       ${rankedActions.length > 0 ? `
         <div style="margin-top:10px;display:grid;gap:8px">
-          ${rankedActions.slice(0, 4).map((candidate, index) => `
-            <div style="padding:8px 9px;border-radius:10px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.08)">
+          ${visibleActions.map((candidate, index) => `
+            <div data-metamon-match="${currentMetamonAdvice()?.actionId === candidate.actionId}" style="${currentMetamonAdvice()?.actionId === candidate.actionId ? "outline:2px solid #5ed2ff;" : ""}padding:8px 9px;border-radius:10px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.08)">
               <div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start">
                 <div>
                   <div style="font-weight:600">${index + 1}. ${escapeHtml(candidate.label ?? "Action")}</div>
@@ -1179,11 +1900,33 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
           `).join("")}
         </div>
       ` : `<div style="margin-top:10px;opacity:.72">No ranked legal actions yet.</div>`}
+      </div>
     `;
+  }
+
+  function renderMetaMovePrior(entry) {
+    const prior = entry?.metaMovePrior;
+    if (!prior) return "";
+    const source = prior.source;
+    const format = source.formatId === "gen9uu" ? "Gen 9 UU" : source.formatId;
+    const heading = `Monthly move data: Smogon · ${source.period} · ${format} · rating cutoff ${source.ratingCutoff}.`;
+    const inactive = {
+      moves_known: "All four moves have been revealed; monthly candidates are not needed.",
+      format_mismatch: "Not used for this battle format.",
+      species_missing: "No monthly move data for this species.",
+      no_supported_candidate: "No monthly move estimates available."
+    };
+    const detail = prior.status === "cold_start" || prior.status === "unrevealed_slots"
+      ? `${prior.moves.map((move) => `${move.name} (${Math.round(move.setInclusionShare * 100)}% of sets)`).join(", ")}. Percentages describe the sampled monthly sets.`
+      : inactive[prior.status] ?? "Not used.";
+    return `<div style="margin-top:6px;font-size:11px;opacity:.72">${escapeHtml(heading)} ${escapeHtml(detail)}</div>`;
   }
 
   function renderIntelPanelMarkup() {
     const localIntel = getLocalIntel();
+    const mechanicsNotice = renderMechanicsNotice(localIntel);
+    if (mechanicsNotice) return mechanicsNotice;
+    const snapshot = latestOverlayPayload?.snapshot ?? null;
     const opponents = Array.isArray(localIntel?.opponents) ? localIntel.opponents : [];
     if (opponents.length === 0) {
       return `
@@ -1196,24 +1939,38 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
     return `
       <div style="margin-top:6px;font-size:11px;opacity:.6">${localIntel?.note ?? ""}</div>
       ${opponents
-        .map(
-          (entry) => `
+        .map((entry) => {
+          const snapshotPokemon = findSnapshotPokemonBySpecies(snapshot?.opponentSide?.team, entry.species ?? entry.displayName);
+          return `
             <div style="margin-top:10px;padding-top:10px;border-top:1px solid rgba(255,255,255,0.08)">
               <div style="font-weight:600">${entry.species}</div>
-              ${renderCurrentReveal(entry)}
+              ${snapshotPokemon ? renderPokemonStateChips(snapshotPokemon) : ""}
+              ${renderCurrentReveal(entry)}${renderMetaMovePrior(entry)}
               ${renderLikelihoodList("Likely other moves", entry.likelyMoves)}
               ${entry.revealedItem ? "" : renderLikelihoodList("Likely items", entry.likelyItems)}
               ${entry.revealedAbility ? "" : renderLikelihoodList("Likely abilities", entry.likelyAbilities)}
               ${entry.revealedTeraType || entry.currentTerastallized ? "" : renderLikelihoodList("Likely Tera types", entry.likelyTeraTypes)}
+              ${renderTypeMatchupDisclosure(snapshotPokemon, "Show matchups")}
             </div>
-          `
-        )
+          `;
+        })
         .join("")}
+      ${renderTeamTypeSection("Your team matchups", snapshot?.yourSide?.team ?? [])}
     `;
   }
 
   function renderDamagePanelMarkup() {
     const localIntel = getLocalIntel();
+    const coverage = localIntel?.opponentThreatCoverage;
+    const coverageMarkup = coverage ? `<div style="margin-top:8px;font-size:11px;opacity:.8">${escapeHtml([
+      `Considered moves: ${coverage.consideredMoves.map((move) => `${move.name} (${move.source})`).join(", ") || "none"}.`,
+      `Unrevealed slots: ${coverage.unrevealedSlots}.`,
+      coverage.omittedMoves.length ? `Omitted: ${coverage.omittedMoves.map((move) => `${move.name} (${move.reason})`).join(", ")}.` : "",
+      coverage.uncomputedMoves.length ? `No damage forecast: ${coverage.uncomputedMoves.map((move) => move.name).join(", ")}.` : "",
+      coverage.note
+    ].filter(Boolean).join(" "))}</div>` : "";
+    const pending = latestOverlayPayload?.snapshot?.pendingAttacks ?? [];
+    const pendingMarkup = pending.map((attack) => `<div style="margin-top:6px;font-size:11px">${escapeHtml(attack.moveName)} → ${escapeHtml(attack.targetSide)}${escapeHtml(attack.targetPosition)}: ${attack.status === "scheduled" ? `end of turn ${escapeHtml(attack.dueTurn)}, after ordinary actions` : "timing unknown"}; occupant at impact.</div>`).join("");
     const playerDamagePreview = Array.isArray(localIntel?.playerDamagePreview) ? localIntel.playerDamagePreview : [];
     const opponentThreatPreview = Array.isArray(localIntel?.opponentThreatPreview) ? localIntel.opponentThreatPreview : [];
     const opponentActionPrediction = localIntel?.opponentActionPrediction ?? null;
@@ -1224,12 +1981,12 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
           ${playerDamagePreview
             .map(
               (entry) => {
-                const switchInRows = collectSwitchInRowsForMove(opponentActionPrediction, entry.moveName ?? entry.label);
+                const switchInRows = collectSwitchInRowsForMove(opponentActionPrediction, entry.actionId);
                 return `
                 <div style="margin-top:8px;padding-top:8px;border-top:1px solid rgba(255,255,255,0.08)">
                   <div style="font-weight:600">${entry.label}</div>
                   <div style="margin-top:2px;font-size:11px;opacity:.62">${entry.targetName ?? "Opponent active"}</div>
-                  ${renderDamageBandRow(entry.bands, entry.targetCurrentHpPercent, entry.likelyBandSource)}
+                  ${entry.delayed ? renderDelayedDamageNote(entry.delayed) : renderDamageBandRow(entry.bands, entry.targetCurrentHpPercent, entry.likelyBandSource)}
                   ${renderObservedDamageNote(entry.observedRange)}
                   ${renderCaveatChips(entry.survivalCaveats)}
                   ${renderInteractionHints(entry.interactionHints)}
@@ -1254,7 +2011,7 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
                   <div style="margin-top:8px;padding-top:8px;border-top:1px solid rgba(255,255,255,0.08)">
                   <div style="font-weight:600">${entry.moveName ?? entry.label ?? "Likely move"}${entry.moveSource ? ` · ${entry.moveSource}` : ""}</div>
                   <div style="margin-top:2px;font-size:11px;opacity:.62">${entry.currentTarget?.species ?? "Your active"}</div>
-                    ${renderDamageBandRow(entry.currentTarget?.bands, entry.currentTarget?.targetCurrentHpPercent, entry.currentTarget?.likelyBandSource)}
+                    ${entry.currentTarget?.delayed ? renderDelayedDamageNote(entry.currentTarget.delayed) : renderDamageBandRow(entry.currentTarget?.bands, entry.currentTarget?.targetCurrentHpPercent, entry.currentTarget?.likelyBandSource)}
                     ${renderObservedDamageNote(entry.currentTarget?.observedRange)}
                     ${renderInteractionHints(entry.currentTarget?.interactionHints)}
                     ${renderSwitchDamagePeek("your switches", switchRows)}
@@ -1268,6 +2025,8 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
       : "";
 
     return `
+      ${pendingMarkup}
+      ${coverageMarkup}
       ${yourMoves}
       ${threats}
     `;
@@ -1275,10 +2034,15 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
 
   function renderMechanicsPanelMarkup() {
     const localIntel = getLocalIntel();
+    const snapshot = latestOverlayPayload?.snapshot ?? null;
     const speedPreview = localIntel?.speedPreview ?? null;
     const possibleRange = speedPreview?.possibleRange ?? null;
     const switchSpeedMatchups = Array.isArray(speedPreview?.switchMatchups) ? speedPreview.switchMatchups : [];
     const speedNotes = Array.isArray(speedPreview?.historyNotes) ? speedPreview.historyNotes : [];
+    const activeTypeMarkup = [
+      snapshot?.yourSide?.active ? renderPokemonTypeCard(snapshot.yourSide.active, "You") : "",
+      snapshot?.opponentSide?.active ? renderPokemonTypeCard(snapshot.opponentSide.active, "Opponent") : ""
+    ].filter(Boolean).join("");
     const switchSpeedMarkup = switchSpeedMatchups.length > 0
       ? `${switchSpeedMatchups.map((matchup) => renderCompactChip(
           matchup.species ?? matchup.label ?? "Unknown",
@@ -1299,6 +2063,7 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
           `,
           speedNotes.length > 0 ? speedNotes.join(" ") : ""
         )}
+        ${activeTypeMarkup ? renderMechanicsCard("Active matchups", `<div style="display:grid;gap:8px">${activeTypeMarkup}</div>`) : ""}
       </div>
     `;
   }
@@ -1334,7 +2099,7 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
   function renderPanelBody(panelKey) {
     if (panelKey === "intel") return renderIntelPanelMarkup();
     if (panelKey === "opponentAction") return renderOpponentActionPanelMarkup();
-    if (panelKey === "selfAction") return renderSelfActionPanelMarkup();
+    if (panelKey === "selfAction") return renderMetamonAdvice() + renderSelfActionPanelMarkup();
     if (panelKey === "damage") return renderDamagePanelMarkup();
     if (panelKey === "mechanics") return renderMechanicsPanelMarkup();
     if (panelKey === "debug") return renderDebugPanelMarkup();
@@ -2245,56 +3010,26 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
     }
   }
 
+  // The legacy sidebar, floating panels and panel groups were retired with the Metamon-only UI.
+  // Older versions saved their layout in page storage (e.g. Threat and Line popped out and grouped), and
+  // every battle update re-rendered it with no control left to close it. Never render it; remove anything left behind.
   function renderPanelLayout() {
-    if (overlaySettings.panelLayout === "sidebar") {
-      const activeGroups = new Set();
+    for (const def of PANEL_DEFS) document.getElementById(def.id)?.remove();
+    for (const el of document.querySelectorAll(`[id^="${GROUP_DOM_PREFIX}"]`)) el.remove();
+    document.getElementById(SIDEBAR_ID)?.remove();
+    acknowledgeRenderedDecision();
+  }
 
-      for (const def of PANEL_DEFS) {
-        const state = getPanelState(def.key);
-        const panel = document.getElementById(def.id);
-        if (state.visible && !state.docked && !state.group) {
-          // Undocked + visible + standalone → render as classic floating panel
-          renderPanel(def.key);
-          const p = ensurePanel(def.key);
-          if (p) {
-            p.style.display = "block";
-            const savedPos = loadPanelPosition(def.key);
-            if (savedPos) {
-              applyPanelPosition(p, def.key, savedPos.left, savedPos.top, false);
-            } else {
-              const next = defaultPanelPosition(def.key);
-              applyPanelPosition(p, def.key, next.left, next.top, false);
-            }
-          }
-        } else if (state.visible && !state.docked && state.group) {
-          // Undocked + visible + in group → hide classic panel, track group
-          if (panel) panel.style.display = "none";
-          activeGroups.add(state.group);
-        } else if (panel) {
-          panel.style.display = "none";
-        }
-      }
-
-      // Render each active group as a tabbed container
-      for (const groupId of activeGroups) {
-        renderPanelGroup(groupId);
-      }
-
-      // Hide stale group containers
-      for (const el of document.querySelectorAll(`[id^="${GROUP_DOM_PREFIX}"]`)) {
-        const gid = el.id.slice(GROUP_DOM_PREFIX.length);
-        if (!activeGroups.has(gid)) el.remove();
-      }
-
-      renderSidebar();
-    } else {
-      hideSidebar();
-      // Also hide any group containers
-      for (const el of document.querySelectorAll(`[id^="${GROUP_DOM_PREFIX}"]`)) {
-        el.remove();
-      }
-      renderPanels();
-    }
+  function acknowledgeRenderedDecision() {
+    const envelope = latestLocalIntelPayload?.envelope;
+    if (!envelope?.resultHash || reportedResultHash === envelope.resultHash || document.visibilityState !== "visible") return;
+    const rendered = [...document.querySelectorAll("[data-shwdn2op-decision]")]
+      .some((element) => element.dataset.shwdn2opDecision === envelope.resultHash && element.getClientRects().length > 0);
+    if (!rendered) return;
+    const resultHash = envelope.resultHash;
+    reportedResultHash = resultHash;
+    void safeSendRuntimeMessage({ type: "decision-rendered", payload: { identity: envelope.semantic.identity, resultHash } })
+      .then((response) => { if (!response?.ok && reportedResultHash === resultHash) reportedResultHash = null; });
   }
 
   function renderPanels() {
@@ -2510,11 +3245,15 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
 
   async function renderOverlay(payload) {
     await refreshOverlayConfig();
+    if (payload?.decisionIdentity && latestDecisionRevision >= 0
+      && (payload.captureSession !== latestCaptureSession
+        || decisionKey(payload.decisionIdentity) !== latestDecisionKey || payload.captureRevision < latestDecisionRevision)) return;
     latestOverlayPayload = payload;
     if (payload?.health) {
       overlayHealth = payload.health;
     }
-    if (payload?.localIntel) {
+    // Keep the full intel payload (envelope + Metamon advice) when re-rendering the same intel.
+    if (payload?.localIntel && payload.localIntel !== latestLocalIntelPayload?.localIntel) {
       latestLocalIntelPayload = {
         turn: payload.turn,
         status: payload.status,
@@ -2536,7 +3275,7 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
         <div data-overlay-drag-handle style="display:flex;justify-content:space-between;align-items:center;gap:8px;cursor:move">
           <div>
             <div style="font-size:12px;opacity:.7">${BRAND_NAME}</div>
-            <div style="font-size:14px;font-weight:700;margin-top:2px">${payload.providerLabel ?? "Analysis"}</div>
+            <div style="font-size:14px;font-weight:700;margin-top:2px">Metamon</div>
           </div>
           <div style="display:flex;align-items:center;gap:8px">
             <button id="${OVERLAY_ID}-expand" style="appearance:none;border:none;background:rgba(255,255,255,0.08);color:#fff;padding:8px 10px;border-radius:8px;font:inherit;cursor:pointer">+</button>
@@ -2590,47 +3329,26 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
             : '<div style="margin-top:10px;background:rgba(255,255,255,0.06);border-radius:10px;padding:10px;opacity:.78">Move suggestions are hidden in the popup toggles.</div>'}
         `;
 
+    // Metamon-only: the old LLM providers are retired. The in-battle window shows only Metamon.
     overlay.innerHTML = `
       <div data-overlay-drag-handle style="display:flex;justify-content:space-between;align-items:center;gap:8px;cursor:move">
         <div>
           <div style="font-size:12px;opacity:.7">${BRAND_NAME}</div>
-          <div style="font-size:15px;font-weight:700;margin-top:2px">${payload.providerLabel ?? "Analysis"}</div>
+          <div style="font-size:15px;font-weight:700;margin-top:2px">Metamon</div>
         </div>
         <div style="display:flex;align-items:center;gap:8px">
-          <button id="${OVERLAY_ID}-analyze" style="appearance:none;border:none;background:${isAnalyzing ? "#7a8fff" : "#5b7cff"};color:#fff;padding:8px 10px;border-radius:8px;font:inherit;font-weight:600;cursor:pointer">${isAnalyzing ? "Ask Again" : "Ask a Friend"}</button>
           <button id="${OVERLAY_ID}-collapse" style="appearance:none;border:none;background:rgba(255,255,255,0.08);color:#fff;padding:8px 10px;border-radius:8px;font:inherit;cursor:pointer">−</button>
           <button id="${OVERLAY_ID}-close" style="appearance:none;border:none;background:transparent;color:#fff;font-size:18px;cursor:pointer;opacity:.8">×</button>
         </div>
       </div>
-      <div style="display:grid;grid-template-columns:110px 1fr;gap:8px;margin-top:10px">
-        <select id="${OVERLAY_ID}-provider" style="appearance:none;border:1px solid rgba(255,255,255,0.14);background:rgba(255,255,255,0.06);color:#fff;padding:8px 10px;border-radius:8px;font:inherit">
-          ${renderProviderOptionsMarkup(overlaySettings.provider)}
-        </select>
-        <select id="${OVERLAY_ID}-model" style="appearance:none;border:1px solid rgba(255,255,255,0.14);background:rgba(255,255,255,0.06);color:#fff;padding:8px 10px;border-radius:8px;font:inherit">
-          ${renderModelOptionsMarkup(overlaySettings.provider, getSelectedModelForProvider(overlaySettings.provider))}
-        </select>
-      </div>
-      <div style="display:grid;grid-template-columns:auto 1fr 1fr;gap:8px;margin-top:8px;align-items:center">
-        <label style="display:flex;align-items:center;gap:6px;font-size:12px;opacity:.84"><input id="${OVERLAY_ID}-compare-mode" type="checkbox" ${compareEnabled ? "checked" : ""}>Compare</label>
-        <select id="${OVERLAY_ID}-compare-provider" style="appearance:none;border:1px solid rgba(255,255,255,0.14);background:rgba(255,255,255,0.06);color:#fff;padding:8px 10px;border-radius:8px;font:inherit">
-          ${renderProviderOptionsMarkup(overlaySettings.compareProvider)}
-        </select>
-        <select id="${OVERLAY_ID}-compare-model" style="appearance:none;border:1px solid rgba(255,255,255,0.14);background:rgba(255,255,255,0.06);color:#fff;padding:8px 10px;border-radius:8px;font:inherit">
-          ${renderModelOptionsMarkup(overlaySettings.compareProvider, getSelectedCompareModelForProvider(overlaySettings.compareProvider))}
-        </select>
-      </div>
-      ${renderProviderHealthMarkup()}
-      ${askFriendMarkup}
-      <div style="margin-top:8px;font-size:12px;opacity:.68">Turn ${payload.turn ?? "?"} · confidence: ${payload?.result?.confidence ?? "unknown"}${status ? ` · ${formatTabStatusLabel(status)}` : ""}</div>
-      <div style="margin-top:4px;font-size:11px;opacity:.55">Shortcut on Showdown: Alt+Shift+S shows or hides your shwdn2op windows.</div>
+      <div id="${OVERLAY_ID}-metamon">${renderMetamonAdvice() || '<div style="margin:8px 0;padding:10px;opacity:.7">Waiting for your next decision…</div>'}</div>
+      <div style="margin-top:4px;font-size:11px;opacity:.55">Advice only: you make every move. Alt+Shift+S shows or hides this window.</div>
       <div data-overlay-resize-handle title="Resize width" style="position:absolute;top:10px;right:-4px;width:10px;height:calc(100% - 20px);cursor:ew-resize;opacity:.22;background:linear-gradient(180deg, rgba(255,255,255,.18), rgba(255,255,255,.05));border-radius:999px"></div>
-      <div data-overlay-resize-handle-y title="Resize height" style="position:absolute;left:10px;right:10px;bottom:-4px;height:10px;cursor:ns-resize;opacity:.22;background:linear-gradient(90deg, rgba(255,255,255,.05), rgba(255,255,255,.18), rgba(255,255,255,.05));border-radius:999px"></div>
     `;
+    overlay.style.height = "auto";
 
     installPanelDrag(overlay, applyOverlayPosition);
     installHorizontalResize(overlay, () => OVERLAY_WIDTH_KEY, 440);
-    installVerticalResize(overlay, () => OVERLAY_HEIGHT_KEY, 520);
-    installOverlayConfigControls(overlay);
 
     overlay.querySelector(`#${OVERLAY_ID}-analyze`)?.addEventListener("click", () => {
       void triggerAnalyzeFromPage();
@@ -2647,12 +3365,17 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
   }
 
   function handleWindowMessage(event) {
-    if (event.source !== window) return;
+    if (event.source !== window || retired) return;
     if (!event.data || event.data.source !== SOURCE) return;
+    if (event.data.kind === "bridge-hello") {
+      // A successor from a newer extension load: an orphaned bridge stops so the two never fight over the controls.
+      if (event.data.instance !== BRIDGE_INSTANCE && !chrome.runtime?.id) retire();
+      return;
+    }
     if (event.data.kind === "active-room") {
       void safeSendRuntimeMessage({
         type: "showdown-active-room",
-        payload: { roomId: event.data.roomId ?? null }
+        payload: { roomId: event.data.roomId ?? null, ambiguous: Boolean(event.data.ambiguous), captureId: event.data.captureId }
       });
       return;
     }
@@ -2663,11 +3386,14 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
           roomId: event.data.roomId ?? null,
           roomSlot: event.data.roomSlot ?? null,
           data: event.data.data ?? null,
-          timestamp: event.data.timestamp ?? Date.now()
+          timestamp: event.data.timestamp ?? Date.now(),
+          observationId: event.data.observationId,
+          captureId: event.data.captureId
         }
       });
       return;
     }
+    if (event.data.direction !== "out") noteRequestSeen(event.data.data);
     void safeSendRuntimeMessage({
       type: "showdown-frame",
       payload: event.data
@@ -2696,6 +3422,11 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
 
   function onRuntimeMessage(message, _sender, sendResponse) {
     if (!message || typeof message !== "object") return false;
+    if (message.type === "bootstrap") {
+      window.postMessage({ source: SOURCE, kind: "bootstrap-request", roomId: typeof message.roomId === "string" ? message.roomId : null }, "*");
+      sendResponse?.({ ok: true });
+      return false;
+    }
     if (message.type === "ping") {
       sendResponse({ ok: true });
       return true;
@@ -2723,7 +3454,32 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
       void renderOverlay(message.payload);
     }
     if (message.type === "update-local-intel") {
-      latestLocalIntelPayload = message.payload ?? latestLocalIntelPayload;
+      const payload = message.payload;
+      if (!payload) return false;
+      if (payload.captureSession !== latestCaptureSession) {
+        latestCaptureSession = payload.captureSession;
+        latestDecisionRevision = -1;
+        latestDecisionKey = null;
+      }
+      if (payload.captureRevision < latestDecisionRevision) return false;
+      const key = decisionKey(payload.decisionIdentity);
+      const changed = key !== latestDecisionKey || !payload.localIntel;
+      latestDecisionKey = key;
+      latestDecisionRevision = payload.captureRevision;
+      latestLocalIntelPayload = payload;
+      refreshMetamonBanner();
+      if (changed || !latestOverlayPayload) {
+        latestOverlayPayload = {
+          ...buildPlaceholderOverlayPayload(),
+          snapshot: payload.snapshot,
+          decisionIdentity: payload.decisionIdentity,
+          captureSession: payload.captureSession,
+          captureRevision: payload.captureRevision,
+          localIntel: payload.localIntel
+        };
+        if (payload.message && !payload.localIntel) latestOverlayPayload.result.summary = payload.message;
+        if (overlayVisible && document.getElementById(OVERLAY_ID)) void renderOverlay(latestOverlayPayload);
+      }
       renderPanelLayout();
     }
     if (message.type === "clear-analysis-overlay") {
@@ -2732,10 +3488,34 @@ if (window.__showdownSecondOpinionContentBridgeVersion !== CONTENT_BRIDGE_VERSIO
     return false;
   }
 
+  function decisionKey(identity) {
+    return identity ? JSON.stringify([identity.roomId, identity.rqid, identity.snapshotHash, identity.legalActionSetHash, identity.stateRevision, identity.requestKind]) : null;
+  }
+
+  // Stop everything this bridge started and drop its floating windows; the successor redraws the controls' notes.
+  function retire() {
+    if (retired) return;
+    retired = true;
+    for (const cleanup of cleanups.splice(0)) try { cleanup(); } catch {}
+    for (const el of document.querySelectorAll('[id^="showdnass"]')) el.remove();
+    if (window.__shwdn2opBridge?.instance === BRIDGE_INSTANCE) delete window.__shwdn2opBridge;
+  }
+
   window.addEventListener("message", handleWindowMessage);
   window.addEventListener("keydown", handleKeydown, true);
   chrome.runtime.onMessage.addListener(onRuntimeMessage);
+  cleanups.push(() => window.removeEventListener("message", handleWindowMessage), () => window.removeEventListener("keydown", handleKeydown, true),
+    () => chrome.runtime?.onMessage?.removeListener(onRuntimeMessage));
+  window.__shwdn2opBridge = { version: CONTENT_BRIDGE_VERSION, instance: BRIDGE_INSTANCE, alive: () => Boolean(chrome.runtime?.id) && !retired, retire };
+  window.postMessage({ source: SOURCE, kind: "bridge-hello", instance: BRIDGE_INSTANCE }, "*");
 
-  injectPageHook();
+  // page-hook.js now runs in the page's MAIN world from document_start (manifest), so a reload's opening burst is captured.
   void refreshOverlayConfig();
+  // Each message resets the MV3 service worker's ~30 s idle timer, so a long think mid-battle keeps captured state.
+  const pingTimer = window.setInterval(() => { void safeSendRuntimeMessage({ type: "ping", bridge: CONTENT_BRIDGE_VERSION }); }, 20000);
+  cleanups.push(() => window.clearInterval(pingTimer));
+  void safeSendRuntimeMessage({ type: "ping", bridge: CONTENT_BRIDGE_VERSION });
+  // Injected into a page that is already running (the extension was reloaded or updated mid-battle): the page hook kept
+  // capturing, but this bridge and the new background have no history. Ask the hook to replay every battle from |init|.
+  if (document.readyState !== "loading") window.postMessage({ source: SOURCE, kind: "bootstrap-request", roomId: null }, "*");
 }

@@ -1,11 +1,13 @@
 import fs from "node:fs/promises";
+import { createReadStream } from "node:fs";
+import { createInterface } from "node:readline";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 
 import type { ReplayDeterministicSummary, ReplayPolicyExample, ReplaySplitTag } from "../apps/companion/src/ml/replayPolicyExample.js";
 import type { BattleSnapshot, LegalAction, LocalIntelSnapshot } from "../apps/companion/src/types.js";
-// The extension parser is the canonical reducer for battle protocol.
-// It is imported directly here so replay extraction stays aligned with the live capture path.
-import { applyRawFrameToRoomMap, roomToSnapshot } from "../apps/extension/lib/showdown-parser.js";
+import { DecisionEngine } from "../apps/companion/src/state/decisionEngine.js";
+import { roomToSnapshot } from "../apps/extension/lib/showdown-parser.js";
 
 export const DEFAULT_REPLAY_DIR = "replays";
 export const DEFAULT_REPLAY_OUTPUT = "ml-artifacts/replay-policy-examples.jsonl";
@@ -20,6 +22,7 @@ type ObservedAction = {
   kind: "move" | "switch";
   label: string;
   moveName?: string | undefined;
+  terastallize?: boolean | undefined;
   switchTargetSpecies?: string | undefined;
   revealedThisTurn: boolean;
 };
@@ -43,8 +46,12 @@ function normalizeName(value: string | null | undefined) {
     .replace(/[^a-z0-9]+/g, "");
 }
 
-function moveActionId(moveName: string) {
-  return `move:${normalizeName(moveName)}`;
+function moveActionId(moveName: string, terastallize = false) {
+  return `move:${normalizeName(moveName)}|tera=${terastallize ? 1 : 0}`;
+}
+
+function teraIdentKey(ident: string) {
+  return normalizeName(ident.replace(/^(p[12])[a-z]:/, "$1:"));
 }
 
 function switchActionId(speciesName: string) {
@@ -157,7 +164,7 @@ function sanitizeSpecies(details: string | undefined) {
   return base || null;
 }
 
-function parseObservedAction(line: string, preTurnRoom: any): ObservedAction | null {
+function parseObservedAction(line: string, preTurnRoom: any, teraSides: Set<SideId>): ObservedAction | null {
   const parsed = parseProtocolLine(line);
   if (parsed.tag === "move") {
     const side = actingSideFromIdent(parsed.args[0]);
@@ -168,17 +175,23 @@ function parseObservedAction(line: string, preTurnRoom: any): ObservedAction | n
       : null;
     return {
       side,
-      actionId: moveActionId(moveName),
+      actionId: moveActionId(moveName, teraSides.has(side)),
       kind: "move",
-      label: moveName,
+      label: teraSides.has(side) ? `Tera + ${moveName}` : moveName,
       moveName,
+      terastallize: teraSides.has(side),
       revealedThisTurn: !Array.isArray(active?.knownMoves) || !active.knownMoves.includes(moveName)
     };
   }
 
   if (parsed.tag === "switch" && !PIVOT_SWITCH_RE.test(line)) {
     const side = actingSideFromIdent(parsed.args[0]);
-    const species = sanitizeSpecies(parsed.args[1]);
+    // The choice targets the existing party member. Its incoming details can
+    // use a different forme (e.g. Ogerpon-Teal-Tera after Tera) without changing
+    // which switch action was selected in the pre-turn view.
+    const knownTarget = Object.values(preTurnRoom?.sides?.[side ?? ""]?.team ?? {}).find(
+      (mon: any) => teraIdentKey(mon.ident ?? "") === teraIdentKey(parsed.args[0] ?? "")) as any;
+    const species = knownTarget?.species ?? sanitizeSpecies(parsed.args[1]);
     if (!side || !species) return null;
     return {
       side,
@@ -204,12 +217,19 @@ function inferLegalActions(preTurnRoom: any, side: SideId, observedAction: Obser
     knownMoves.push(observedAction.moveName);
   }
   for (const moveName of knownMoves) {
-    actions.push({
+    const action: LegalAction = {
       id: moveActionId(moveName),
       kind: "move",
       label: moveName,
-      moveName
-    });
+      moveName,
+      moveSlot: null,
+      actorAppearanceId: active.appearanceId,
+      terastallize: false
+    };
+    actions.push(action);
+    if (active.teraType && !Object.values(sideState.team).some((mon: any) => mon.terastallized)) {
+      actions.push({ ...action, id: moveActionId(moveName, true), label: `Tera + ${moveName}`, terastallize: true });
+    }
   }
 
   for (const pokemon of Object.values(sideState?.team ?? {})) {
@@ -219,7 +239,9 @@ function inferLegalActions(preTurnRoom: any, side: SideId, observedAction: Obser
       id: switchActionId(speciesName),
       kind: "switch",
       label: `Switch to ${speciesName}`,
-      target: speciesName
+      target: speciesName,
+      targetInstanceId: (pokemon as any).instanceId,
+      actorAppearanceId: active.appearanceId
     });
   }
 
@@ -237,11 +259,17 @@ function winnerSideFromRoom(room: any): SideId | null {
   return null;
 }
 
-function snapshotForSide(preTurnRoom: any, side: SideId, observedAction: ObservedAction) {
+function snapshotForSide(preTurnRoom: any, side: SideId, observedAction: ObservedAction, recoveredTeraTypes: Map<string, string>) {
   const clonedRoom = structuredClone(preTurnRoom);
   clonedRoom.playerSide = side;
   clonedRoom.opponentSideId = side === "p1" ? "p2" : "p1";
   clonedRoom.phase = "turn";
+  // A player's own Tera type is private knowledge from team selection. Recover
+  // it where the replay eventually proves it, without leaking that future
+  // reveal into snapshots where this Pokemon is on the opponent's side.
+  for (const mon of Object.values(clonedRoom.sides?.[side]?.team ?? {}) as any[]) {
+    mon.teraType ??= recoveredTeraTypes.get(teraIdentKey(mon.ident ?? "")) ?? null;
+  }
   clonedRoom.legalActions = inferLegalActions(clonedRoom, side, observedAction);
   return roomToSnapshot(clonedRoom) as BattleSnapshot | null;
 }
@@ -320,22 +348,45 @@ function observationFromSnapshot(snapshot: BattleSnapshot) {
   };
 }
 
-export async function extractReplayExamples(source: ReplaySource, context: ReplayExtractionContext): Promise<ReplayPolicyExample[]> {
-  const roomMap = new Map<string, any>();
+export async function extractReplayExamples(source: ReplaySource, context: ReplayExtractionContext): Promise<{ examples: ReplayPolicyExample[]; withheld: Record<string, number> }> {
+  const withheld: Record<string, number> = {};
+  const engine = new DecisionEngine();
   const preTurnRooms = new Map<number, any>();
   const actionsByTurn = new Map<number, Partial<Record<SideId, ObservedAction>>>();
+  const recoveredTeraTypes = new Map<string, string>();
+  const teraSides = new Set<SideId>();
   let currentTurn = 0;
-
-  const packet = (line: string) => `>${source.roomId}\n${line}\n`;
+  let sequence = 0;
+  let pendingLines: string[] = [];
+  let finalRoom: any;
+  const flush = async () => {
+    if (!pendingLines.length) return;
+    sequence += 1;
+    const result = await engine.ingest({
+      sessionId: "replay", observationId: `replay:${source.roomId}:${sequence}`, sequence,
+      roomId: source.roomId, source: "protocol", data: `>${source.roomId}\n${pendingLines.join("\n")}`
+    });
+    pendingLines = [];
+    finalRoom = result.room;
+  };
 
   for (const rawLine of source.lines) {
     const line = rawLine.replace(/\r/g, "");
+    if (line.startsWith("|-terastallize|")) {
+      const { args } = parseProtocolLine(line);
+      const side = actingSideFromIdent(args[0]);
+      if (side && args[0] && args[1]) {
+        teraSides.add(side);
+        recoveredTeraTypes.set(teraIdentKey(args[0]), args[1]);
+      }
+    }
     if (line.startsWith("|turn|")) {
-      applyRawFrameToRoomMap(roomMap, packet(line));
+      teraSides.clear();
+      pendingLines.push(line);
+      await flush();
       currentTurn = Number(line.split("|")[2] ?? currentTurn) || currentTurn;
-      const room = roomMap.get(source.roomId);
-      if (room) {
-        preTurnRooms.set(currentTurn, structuredClone(room));
+      if (finalRoom) {
+        preTurnRooms.set(currentTurn, structuredClone(finalRoom));
         actionsByTurn.set(currentTurn, {});
       }
       continue;
@@ -343,7 +394,7 @@ export async function extractReplayExamples(source: ReplaySource, context: Repla
 
     if (currentTurn > 0) {
       const preTurnRoom = preTurnRooms.get(currentTurn);
-      const observedAction = preTurnRoom ? parseObservedAction(line, preTurnRoom) : null;
+      const observedAction = preTurnRoom ? parseObservedAction(line, preTurnRoom, teraSides) : null;
       if (observedAction) {
         const turnActions = actionsByTurn.get(currentTurn) ?? {};
         if (!turnActions[observedAction.side]) {
@@ -353,10 +404,9 @@ export async function extractReplayExamples(source: ReplaySource, context: Repla
       }
     }
 
-    applyRawFrameToRoomMap(roomMap, packet(line));
+    pendingLines.push(line);
   }
-
-  const finalRoom = roomMap.get(source.roomId);
+  await flush();
   const winnerSide = winnerSideFromRoom(finalRoom);
   const examples: ReplayPolicyExample[] = [];
 
@@ -366,11 +416,21 @@ export async function extractReplayExamples(source: ReplaySource, context: Repla
     for (const side of ["p1", "p2"] as const) {
       const observedAction = turnActions[side];
       if (!observedAction) continue;
-      const snapshot = snapshotForSide(preTurnRoom, side, observedAction);
+      const snapshot = snapshotForSide(preTurnRoom, side, observedAction, recoveredTeraTypes);
       if (!snapshot) continue;
       if (!snapshot.yourSide.active || snapshot.legalActions.length === 0) continue;
+      if (snapshot.canonicalEvidence?.ambiguities.length) {
+        withheld.identity_ambiguous = (withheld.identity_ambiguous ?? 0) + 1;
+        continue;
+      }
 
       const notes: string[] = [];
+      if (snapshot.yourSide.team.some((mon) => recoveredTeraTypes.has(teraIdentKey(mon.ident ?? "")))) {
+        notes.push("Own Tera types proven later in this replay were restored as private team knowledge; opponent future reveals were not restored.");
+      }
+      if (!snapshot.yourSide.active.teraType && !snapshot.yourSide.team.some((mon) => mon.terastallized)) {
+        notes.push("Own Tera type is unrecoverable from this replay; candidate actions omit unknown Tera alternatives.");
+      }
       if (observedAction.revealedThisTurn && observedAction.kind === "move") {
         notes.push("Observed move was first revealed on this turn and was injected into legalActions.");
       }
@@ -389,7 +449,7 @@ export async function extractReplayExamples(source: ReplaySource, context: Repla
       const exampleId = `${snapshot.roomId}|${turn}|${side}`;
 
       examples.push({
-        schemaVersion: "replay-policy-example@0.2",
+        schemaVersion: "replay-policy-example@0.3",
         exampleId,
         extractedAt: new Date().toISOString(),
         splitTag: splitTagForBattle(snapshot.roomId),
@@ -412,6 +472,7 @@ export async function extractReplayExamples(source: ReplaySource, context: Repla
           kind: observedAction.kind,
           label: observedAction.label,
           moveName: observedAction.moveName,
+          terastallize: observedAction.terastallize,
           switchTargetSpecies: observedAction.switchTargetSpecies,
           revealedThisTurn: observedAction.revealedThisTurn
         },
@@ -422,7 +483,7 @@ export async function extractReplayExamples(source: ReplaySource, context: Repla
     }
   }
 
-  return examples;
+  return { examples, withheld };
 }
 
 export function dedupeExamples(examples: ReplayPolicyExample[]) {
@@ -447,15 +508,32 @@ export function dedupeExamples(examples: ReplayPolicyExample[]) {
 export async function writeJsonl(filePath: string, rows: unknown[]) {
   const absolutePath = path.resolve(filePath);
   await fs.mkdir(path.dirname(absolutePath), { recursive: true });
-  const text = rows.map((row) => JSON.stringify(row)).join("\n");
-  await fs.writeFile(absolutePath, text ? `${text}\n` : "", "utf8");
+  const temporaryPath = `${absolutePath}.${randomUUID()}.tmp`;
+  const file = await fs.open(temporaryPath, "wx");
+  try {
+    for (const row of rows) {
+      const line = JSON.stringify(row);
+      if (line === undefined) throw new TypeError("A JSONL row must be serializable JSON.");
+      await file.writeFile(`${line}\n`, "utf8");
+    }
+    await file.close();
+    await fs.rename(temporaryPath, absolutePath);
+  } catch (error) {
+    await file.close();
+    await fs.rm(temporaryPath, { force: true });
+    throw error;
+  }
 }
 
 export async function readJsonl<T = unknown>(filePath: string): Promise<T[]> {
-  const text = await fs.readFile(path.resolve(filePath), "utf8");
-  return text
-    .split(/\r?\n/g)
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map((line) => JSON.parse(line) as T);
+  const input = createReadStream(path.resolve(filePath), { encoding: "utf8" });
+  const lines = createInterface({ input, crlfDelay: Infinity });
+  const rows: T[] = [];
+  try {
+    for await (const line of lines) if (line.trim()) rows.push(JSON.parse(line) as T);
+    return rows;
+  } finally {
+    lines.close();
+    input.destroy();
+  }
 }

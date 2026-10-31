@@ -7,8 +7,32 @@ import { fileURLToPath } from "node:url";
 import { applyRawFrameToRoomMap, mergeRoomState, roomToSnapshot } from "./showdown-parser.js";
 import { buildTabSelection, TAB_STATUS } from "./tab-state.js";
 
+
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, "..", "..", "..");
+
+test("protocol details distinguish hidden preview level, default level 100, Tera and permanent forme changes; ties finish the battle", () => {
+  const rooms = new Map();
+  const roomId = "battle-gen9uu-details";
+  const update = (data) => {
+    applyRawFrameToRoomMap(rooms, `>${roomId}\n${data}`);
+    return rooms.get(roomId);
+  };
+  let room = update("|poke|p2|Ogerpon\n|poke|p2|Pikachu, L50");
+  assert.equal(room.sides.p2.team["p2: Ogerpon"].level, null);
+  assert.equal(room.sides.p2.team["p2: Pikachu"].level, 50);
+  room = update("|switch|p2a: Ogerpon|Ogerpon, tera:Grass|100/100");
+  const mon = room.sides.p2.team[room.sides.p2.activeKey];
+  assert.equal(mon.level, 100);
+  assert.equal(mon.terastallized, true);
+  assert.equal(mon.teraType, "Grass");
+  update("|detailschange|p2a: Ogerpon|Ogerpon-Teal-Tera, tera:Grass|90/100");
+  assert.equal(mon.species, "Ogerpon-Teal-Tera");
+  assert.equal(mon.hpPercent, 90);
+  room = update("|tie");
+  assert.equal(room.phase, "finished");
+  assert.equal(room.requestCurrent, false);
+});
 
 async function loadText(relativePath) {
   return fs.readFile(path.resolve(repoRoot, relativePath), "utf8");
@@ -294,7 +318,7 @@ test("merging a reduced room snapshot preserves known opponent team state", () =
   assert.equal(snapshot?.opponentSide?.active?.species, "Slowking");
 });
 
-test("parser preserves stacked side conditions and clears them from supplemental field state", () => {
+test("protocol side conditions survive supplemental contradiction and clear on protocol removal", () => {
   const raw = `
 >battle-gen9uu-side-conditions
 |init|battle
@@ -327,7 +351,48 @@ test("parser preserves stacked side conditions and clears them from supplemental
     reducedRooms.get("battle-gen9uu-side-conditions")
   );
   snapshot = roomToSnapshot(merged);
+  assert.deepEqual(snapshot?.field?.yourSideConditions, ["Spikes", "Spikes", "Stealth Rock"]);
+  applyRawFrameToRoomMap(new Map([[merged.roomId, merged]]), `>${merged.roomId}\n|-sideend|p1: You|Spikes\n|-sideend|p1: You|Stealth Rock`);
+  snapshot = roomToSnapshot(merged);
   assert.deepEqual(snapshot?.field?.yourSideConditions, []);
+});
+
+test("explicit clears survive the periodic two-snapshot merge, including empty values", () => {
+  const reduce = (lines) => {
+    const rooms = new Map();
+    applyRawFrameToRoomMap(rooms, `>battle-gen9uu-clears\n${lines.join("\n")}`);
+    return rooms.get("battle-gen9uu-clears");
+  };
+  const initial = reduce([
+    "|switch|p2a: Salamence|Salamence, L100|100/100 brn", "|-item|p2a: Salamence|Leftovers", "|-boost|p2a: Salamence|atk|2",
+    "|-weather|SunnyDay", "|-fieldstart|move: Electric Terrain", "|-fieldstart|move: Trick Room", "|-sidestart|p2: Them|Stealth Rock"
+  ]);
+  const clears = [
+    "|-curestatus|p2a: Salamence|brn", "|-enditem|p2a: Salamence|Leftovers", "|-clearboost|p2a: Salamence",
+    "|-weather|none", "|-fieldend|move: Electric Terrain", "|-fieldend|move: Trick Room", "|-sideend|p2: Them|Stealth Rock"
+  ];
+  const fresh = reduce(clears);
+  const merged = mergeRoomState(initial, fresh);
+  const mon = merged.sides.p2.team["p2: Salamence"];
+  assert.equal(mon.status, null);
+  assert.equal(mon.item, null);
+  assert.equal(mon.removedItem, "Leftovers");
+  assert.deepEqual(mon.boosts, {});
+  for (const field of ["weather", "terrain", "pseudoWeather"]) assert.deepEqual(merged.field[field], fresh.field[field]);
+  assert.deepEqual(merged.sideConditions.p2, []);
+
+  const supplemental = reduce([`|sso-state|${JSON.stringify({ playerSide: "p1", pokemon: [
+    { side: "p2", ident: "p2: Salamence", details: "Salamence, L100", condition: "100/100 brn", item: "Leftovers", boosts: { atk: 2 } }
+  ], field: { weather: "SunnyDay", terrain: "Electric Terrain", pseudoWeather: ["Trick Room"], opponentSideConditions: ["Stealth Rock"] } })}`]);
+  const resynced = mergeRoomState(mergeRoomState(merged, supplemental), supplemental);
+  const resyncedMon = resynced.sides.p2.team["p2: Salamence"];
+  assert.equal(resyncedMon.status, null);
+  assert.equal(resyncedMon.item, null);
+  assert.deepEqual(resyncedMon.boosts, {});
+  assert.equal(resynced.field.weather, null);
+  assert.equal(resynced.field.terrain, null);
+  assert.deepEqual(resynced.field.pseudoWeather, []);
+  assert.deepEqual(resynced.sideConditions.p2, []);
 });
 
 test("parser logs sourced HP changes so noisy damage windows can be filtered", () => {
@@ -422,4 +487,94 @@ test("parser clamps boost stages to the in-battle -6..+6 range", () => {
   const snapshot = roomToSnapshot(rooms.get("battle-gen9uu-boost-clamp"));
   assert.equal(snapshot?.yourSide?.active?.boosts?.atk, 6);
   assert.equal(snapshot?.opponentSide?.active?.boosts?.spa, -6);
+});
+
+test("canonical presentation labels never rename the side-qualified mechanics owner", () => {
+  const rooms = new Map();
+  const roomId = "battle-gen9ou-log-label";
+  applyRawFrameToRoomMap(rooms, `>${roomId}\n|switch|p2a: @team-preview-4|Mandibuzz|100/100`, { presentationName: "Mandibuzz" });
+  applyRawFrameToRoomMap(rooms, `>${roomId}\n|move|p2a: @team-preview-4|Defog|p1a: @team-preview-4`, { presentationName: "Mandibuzz" });
+  applyRawFrameToRoomMap(rooms, `>${roomId}\n|switch|p1a: @team-preview-4|Pecharunt|100/100`, { presentationName: "Pecharunt" });
+  const room = rooms.get(roomId);
+  assert.deepEqual(room.recentLog, ["Mandibuzz entered the field.", "Mandibuzz used Defog.", "Pecharunt entered the field."]);
+  assert.deepEqual(room.sides.p2.team["p2: @team-preview-4"].knownMoves, ["Defog"]);
+  assert.deepEqual(room.sides.p1.team["p1: @team-preview-4"].knownMoves, []);
+  applyRawFrameToRoomMap(rooms, `>${roomId}\n|move|p1a: Pecharunt|Shadow Ball|p2a: Mandibuzz`);
+  assert.equal(room.recentLog.at(-1), "Pecharunt used Shadow Ball.", "ordinary parser callers retain their original labels");
+});
+
+test("a null request clears prior actions while preserving the private side and party", async () => {
+  const rooms = new Map();
+  const raw = await fs.readFile(new URL("../../../examples/raw-showdown-frame.sample.txt", import.meta.url), "utf8");
+  applyRawFrameToRoomMap(rooms, raw);
+  const room = rooms.get("battle-gen9ou-123456789");
+  const before = roomToSnapshot(room);
+  assert.ok(before.legalActions.length);
+  applyRawFrameToRoomMap(rooms, `>${room.roomId}\n|request|null`);
+  const after = roomToSnapshot(room);
+  assert.equal(room.lastRequest, null);
+  assert.equal(room.requestCurrent, false);
+  assert.deepEqual(after.legalActions, []);
+  assert.equal(after.rawRequestSummary, null);
+  assert.deepEqual(after.yourSide, before.yourSide);
+  assert.deepEqual(after.opponentSide, before.opponentSide);
+  const selection = buildTabSelection({ activeRoomId: room.roomId, rooms });
+  assert.equal(selection.status, TAB_STATUS.WAITING_OR_NOT_YOUR_TURN);
+});
+
+
+test("Slow Start protocol activation belongs to its stint and survives requests and resync", () => {
+  const roomId = "battle-gen9uu-slow-start", rooms = new Map();
+  const apply = (data) => { applyRawFrameToRoomMap(rooms, `>${roomId}\n${data}`); return rooms.get(roomId); };
+  const active = (side = "p1") => { const room = rooms.get(roomId); return room.sides[side].team[room.sides[side].activeKey]; };
+  const request = (extra = {}) => `|request|${JSON.stringify({ rqid: 1, active: [{ moves: [{ move: "Protect", id: "protect", pp: 10 }] }], side: { id: "p1", pokemon: [
+    { ident: "p1: Giant", details: "Regigigas", active: true, condition: "424/424", baseAbility: "slowstart", ability: "slowstart", item: "leftovers", stats: { atk: 356, spe: 328 }, moves: ["protect"], ...extra }
+  ] } })}`;
+  apply("|switch|p1a: Giant|Regigigas|100/100\n|switch|p2a: King|Slowking|100/100");
+  assert.equal(active().slowStartActive, undefined, "entry alone cannot establish the timer");
+  apply(request({ slowStartActive: true }));
+  assert.equal(active().slowStartActive, undefined, "private request extensions cannot invent activation");
+  apply("|-start|p1a: Giant|ability: Slow Start");
+  assert.equal(active().slowStartActive, true);
+  apply(request({ slowStartActive: false }));
+  assert.equal(active().slowStartActive, true, "private requests omit the timer");
+  const before = structuredClone(rooms.get(roomId));
+  apply("|-end|p1a: Giant|Slow Start");
+  const ended = structuredClone(rooms.get(roomId));
+  assert.equal(mergeRoomState(before, ended).sides.p1.team["p1: Giant"].slowStartActive, false);
+  assert.equal(roomToSnapshot(rooms.get(roomId)).yourSide.active.slowStartActive, false);
+  apply("|switch|p1a: Nurse|Blissey|100/100\n|switch|p1a: Giant|Regigigas|100/100");
+  assert.equal(active().slowStartActive, undefined);
+  assert.equal(mergeRoomState(ended, rooms.get(roomId)).sides.p1.team["p1: Giant"].slowStartActive, undefined, "an explicit new-stint clear survives merging");
+  apply("|-start|p1a: Giant|ability: Slow Start");
+  assert.equal(active().slowStartActive, true);
+  apply("|-activate|p2a: King|Skill Swap|Slow Start|Regenerator|[of] p1a: Giant\n|-end|p1a: Giant|Slow Start|[silent]\n|-start|p2a: King|ability: Slow Start");
+  assert.equal(active().ability, "Regenerator");
+  assert.equal(active("p2").ability, "Slow Start");
+  assert.equal(active("p2").slowStartActive, true);
+  apply("|-activate|p2a: King|Skill Swap|Regenerator|Slow Start|[of] p1a: Giant\n|-end|p2a: King|Slow Start|[silent]\n|-start|p1a: Giant|ability: Slow Start");
+  assert.equal(active().ability, "Slow Start");
+  assert.equal(active().slowStartActive, true);
+  assert.equal(active("p2").ability, "Regenerator");
+  apply("|-endability|p1a: Giant|Slow Start");
+  assert.equal(active().slowStartActive, undefined);
+});
+
+// Matters: "-heal|p2a: Clodsire|…|[from] ability: Water Absorb|[of] p1a: Slowking" credited
+// Slowking with Water Absorb, so Clodsire's ability stayed unrevealed and Scald could be picked into it again. A -heal's
+// [of] is the heal's source; the effect belongs to the healed Pokémon. A -damage's [of] still owns its effect.
+test("a heal's ability belongs to the healed Pokémon; a damage line's [of] still owns its effect", () => {
+  for (const [absorber, ability, attacker] of [["Clodsire", "Water Absorb", "Slowking"], ["Lanturn", "Volt Absorb", "Rotom-Heat"]]) {
+    const rooms = new Map();
+    const roomId = `battle-gen9uu-heal-${absorber.toLowerCase()}`;
+    const update = (data) => { applyRawFrameToRoomMap(rooms, `>${roomId}\n${data}`); return rooms.get(roomId); };
+    update(`|init|battle\n|tier|[Gen 9] UU\n|switch|p1a: ${attacker}|${attacker}, L100|300/300\n|switch|p2a: ${absorber}|${absorber}, L100|73/100\n|turn|24`);
+    const room = update(`|move|p1a: ${attacker}|Scald|p2a: ${absorber}\n|-heal|p2a: ${absorber}|98/100|[from] ability: ${ability}|[of] p1a: ${attacker}\n|-damage|p1a: ${attacker}|250/300|[from] item: Rocky Helmet|[of] p2a: ${absorber}`);
+    assert.equal(room.sides.p2.team[`p2: ${absorber}`].ability, ability);
+    assert.equal(room.sides.p2.team[`p2: ${absorber}`].item, "Rocky Helmet", "a damage line's [of] owns the Rocky Helmet");
+    const fresh = new Map();
+    applyRawFrameToRoomMap(fresh, `>${roomId}\n|init|battle\n|switch|p1a: ${attacker}|${attacker}, L100|300/300\n|switch|p2a: ${absorber}|${absorber}, L100|73/100\n|-heal|p2a: ${absorber}|98/100|[from] ability: ${ability}|[of] p1a: ${attacker}`);
+    assert.equal(fresh.get(roomId).sides.p2.team[`p2: ${absorber}`].ability, ability);
+    assert.notEqual(fresh.get(roomId).sides.p1.team[`p1: ${attacker}`].ability, ability, "the attacker is not the absorber");
+  }
 });

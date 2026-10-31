@@ -7,6 +7,7 @@
     "version",
     "capturedAt",
     "roomId",
+    "title",
     "format",
     "turn",
     "phase",
@@ -49,6 +50,96 @@
         "unknown"
       ]
     },
+    "pendingAttacks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "moveId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "moveName": {
+            "type": "string",
+            "minLength": 1
+          },
+          "sourceSide": {
+            "enum": [
+              "p1",
+              "p2"
+            ]
+          },
+          "sourceInstanceId": {
+            "type": "string"
+          },
+          "sourceAppearanceId": {
+            "type": "string"
+          },
+          "targetSide": {
+            "enum": [
+              "p1",
+              "p2"
+            ]
+          },
+          "targetPosition": {
+            "const": "a"
+          },
+          "castTurn": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "dueTurn": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "phase": {
+            "const": "end_of_turn"
+          },
+          "status": {
+            "enum": [
+              "scheduled",
+              "timing_unknown"
+            ]
+          },
+          "factIds": {
+            "type": "array",
+            "minItems": 2,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "required": [
+          "moveId",
+          "moveName",
+          "sourceSide",
+          "targetSide",
+          "targetPosition",
+          "castTurn",
+          "dueTurn",
+          "phase",
+          "status",
+          "factIds"
+        ]
+      }
+    },
+    "turnCoverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "turn", "turnFactId", "requestFactId", "fromSequence", "throughSequence"],
+      "properties": {
+        "source": { "const": "owned_offline_simulator" },
+        "turn": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "turnFactId": { "type": "string", "minLength": 1 },
+        "requestFactId": { "type": "string", "minLength": 1 },
+        "fromSequence": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "throughSequence": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }
+      }
+    },
     "yourSide": {
       "$ref": "#/$defs/sideSnapshot"
     },
@@ -63,7 +154,7 @@
       "items": {
         "$ref": "#/$defs/legalAction"
       },
-      "maxItems": 30
+      "maxItems": 720
     },
     "recentLog": {
       "type": "array",
@@ -71,6 +162,84 @@
         "type": "string"
       },
       "maxItems": 25
+    },
+    "entryObservations": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "ident",
+          "species",
+          "side",
+          "turn",
+          "hazards",
+          "types",
+          "damageObserved",
+          "complete",
+          "observationIds"
+        ],
+        "properties": {
+          "ident": {
+            "type": "string"
+          },
+          "species": {
+            "type": "string"
+          },
+          "side": {
+            "type": "string"
+          },
+          "turn": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "hazards": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "types": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "damageObserved": {
+            "type": "boolean"
+          },
+          "complete": {
+            "type": "boolean"
+          },
+          "observationIds": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string"
+            }
+          },
+          "instanceId": {
+            "type": "string"
+          },
+          "appearanceId": {
+            "type": "string"
+          },
+          "factIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "identityStatus": {
+            "enum": [
+              "resolved",
+              "provisional",
+              "ambiguous"
+            ]
+          }
+        }
+      }
     },
     "rawRequestSummary": {
       "type": [
@@ -85,6 +254,332 @@
         "type": "string"
       },
       "maxItems": 20
+    },
+    "canonicalEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "type": "string"
+        },
+        "facts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string"
+              },
+              "args": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "subject": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "side": {
+                    "enum": [
+                      "p1",
+                      "p2"
+                    ]
+                  },
+                  "instanceId": {
+                    "type": "string"
+                  },
+                  "appearanceId": {
+                    "type": "string"
+                  },
+                  "candidateInstanceIds": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": []
+              },
+              "references": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "side": {
+                      "enum": [
+                        "p1",
+                        "p2"
+                      ]
+                    },
+                    "instanceId": {
+                      "type": "string"
+                    },
+                    "appearanceId": {
+                      "type": "string"
+                    },
+                    "candidateInstanceIds": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "required": []
+                }
+              },
+              "requestSlots": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "side": {
+                      "enum": [
+                        "p1",
+                        "p2"
+                      ]
+                    },
+                    "instanceId": {
+                      "type": "string"
+                    },
+                    "appearanceId": {
+                      "type": "string"
+                    },
+                    "candidateInstanceIds": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "required": []
+                }
+              },
+              "turn": {
+                "type": "integer"
+              },
+              "source": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "observationId": {
+                    "type": "string"
+                  },
+                  "sequence": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "lineIndex": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "channel": {
+                    "enum": [
+                      "protocol",
+                      "private-request",
+                      "recovery"
+                    ]
+                  },
+                  "rqid": {
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "observationId",
+                  "sequence",
+                  "lineIndex",
+                  "channel"
+                ]
+              },
+              "ownerInstanceId": {
+                "type": "string"
+              },
+              "identityStatus": {
+                "enum": [
+                  "resolved",
+                  "provisional",
+                  "ambiguous"
+                ]
+              },
+              "supportingFactIds": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "minItems": 1
+              },
+              "overlaySpecies": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "kind",
+              "args",
+              "subject",
+              "references",
+              "turn",
+              "source",
+              "identityStatus",
+              "supportingFactIds"
+            ]
+          }
+        },
+        "contributions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "instanceId": {
+                "type": "string"
+              },
+              "species": {
+                "type": "string"
+              },
+              "factIds": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "minItems": 1
+              },
+              "metric": {
+                "enum": [
+                  "battle-seen",
+                  "move",
+                  "item",
+                  "ability",
+                  "tera",
+                  "damage",
+                  "speed"
+                ]
+              },
+              "value": {
+                "type": "string"
+              },
+              "eligibility": {
+                "enum": [
+                  "active",
+                  "quarantined",
+                  "retracted"
+                ]
+              },
+              "damage": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "turn",
+                  "moveName",
+                  "percent",
+                  "attacker",
+                  "defender",
+                  "field"
+                ],
+                "properties": {
+                  "turn": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "moveName": {
+                    "type": "string"
+                  },
+                  "percent": {
+                    "type": "number",
+                    "exclusiveMinimum": 0
+                  },
+                  "attacker": {
+                    "$ref": "#/$defs/pokemonSnapshot"
+                  },
+                  "defender": {
+                    "$ref": "#/$defs/pokemonSnapshot"
+                  },
+                  "field": {
+                    "$ref": "#/$defs/fieldSnapshot"
+                  }
+                }
+              },
+              "speed": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "turn",
+                  "relation",
+                  "pokemon",
+                  "other",
+                  "moveName",
+                  "otherMoveName",
+                  "field"
+                ],
+                "properties": {
+                  "turn": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "relation": {
+                    "enum": [
+                      "first",
+                      "second"
+                    ]
+                  },
+                  "pokemon": {
+                    "$ref": "#/$defs/pokemonSnapshot"
+                  },
+                  "other": {
+                    "$ref": "#/$defs/pokemonSnapshot"
+                  },
+                  "moveName": {
+                    "type": "string"
+                  },
+                  "otherMoveName": {
+                    "type": "string"
+                  },
+                  "field": {
+                    "$ref": "#/$defs/fieldSnapshot"
+                  }
+                }
+              }
+            },
+            "required": [
+              "id",
+              "instanceId",
+              "species",
+              "factIds",
+              "metric",
+              "value",
+              "eligibility"
+            ]
+          }
+        },
+        "ambiguities": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "limitations": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "version",
+        "facts",
+        "contributions",
+        "ambiguities",
+        "limitations"
+      ]
     }
   },
   "$defs": {
@@ -108,7 +603,10 @@
           ]
         },
         "active": {
-          "$ref": "#/$defs/pokemonSnapshot"
+          "anyOf": [
+            { "$ref": "#/$defs/pokemonSnapshot" },
+            { "type": "null" }
+          ]
         },
         "team": {
           "type": "array",
@@ -120,15 +618,13 @@
       }
     },
     "pokemonSnapshot": {
-      "type": [
-        "object",
-        "null"
-      ],
+      "type": "object",
       "additionalProperties": false,
       "required": [
         "ident",
         "species",
         "displayName",
+        "level",
         "conditionText",
         "hpPercent",
         "status",
@@ -161,6 +657,9 @@
             "string",
             "null"
           ]
+        },
+        "level": {
+          "type": ["integer", "null"]
         },
         "conditionText": {
           "type": [
@@ -195,6 +694,10 @@
             "type": "integer"
           }
         },
+        "stats": {
+          "type": "object",
+          "additionalProperties": { "type": "number" }
+        },
         "knownMoves": {
           "type": "array",
           "items": {
@@ -207,6 +710,19 @@
             "string",
             "null"
           ]
+        },
+        "itemProof": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["hazard", "turn", "factIds"],
+          "properties": {
+            "hazard": { "type": "string" },
+            "turn": { "type": "integer", "minimum": 0 },
+            "factIds": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        "removedItem": {
+          "type": ["string", "null"]
         },
         "ability": {
           "type": [
@@ -229,6 +745,63 @@
         },
         "terastallized": {
           "type": "boolean"
+        },
+        "unburdenActive": {
+          "type": "boolean"
+        },
+        "slowStartActive": {
+          "type": "boolean"
+        },
+        "paradoxBoostedStat": {
+          "enum": [
+            "atk",
+            "def",
+            "spa",
+            "spd",
+            "spe",
+            null
+          ]
+        },
+        "instanceId": {
+          "type": "string"
+        },
+        "appearanceId": {
+          "type": "string"
+        },
+        "presumedInstanceId": {
+          "type": "string"
+        },
+        "canonicalSpecies": {
+          "type": "string"
+        },
+        "candidateInstanceIds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "evidenceRefs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "appearanceMoves": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "identityStatus": {
+          "enum": [
+            "resolved",
+            "provisional",
+            "ambiguous"
+          ]
+        },
+        "turnsSinceEntry": {
+          "type": "integer",
+          "minimum": 0
         }
       }
     },
@@ -295,6 +868,7 @@
           "enum": [
             "move",
             "switch",
+            "team",
             "special"
           ]
         },
@@ -306,6 +880,58 @@
             "string",
             "null"
           ]
+        },
+        "moveSlot": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1,
+          "maximum": 4
+        },
+        "targetSlot": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1,
+          "maximum": 24
+        },
+        "terastallize": {
+          "type": "boolean"
+        },
+        "actorSlot": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1
+        },
+        "moveId": {
+          "type": "string"
+        },
+        "teamSpec": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 6
+          },
+          "minItems": 1,
+          "maxItems": 6,
+          "uniqueItems": true
+        },
+        "choice": {
+          "type": "string"
+        },
+        "legality": {
+          "type": "string",
+          "enum": [
+            "certain",
+            "uncertain",
+            "disabled"
+          ]
+        },
+        "canUndo": {
+          "type": "boolean"
         },
         "target": {
           "type": [
@@ -325,11 +951,29 @@
             "null"
           ]
         },
+        "uncertainLegal": {
+          "type": "boolean"
+        },
         "details": {
           "type": [
             "string",
             "null"
           ]
+        },
+        "uncertaintyReason": {
+          "enum": [
+            "maybe_disabled",
+            "hidden_trapping_ability"
+          ]
+        },
+        "reviving": {
+          "type": "boolean"
+        },
+        "actorAppearanceId": {
+          "type": "string"
+        },
+        "targetInstanceId": {
+          "type": "string"
         }
       }
     }

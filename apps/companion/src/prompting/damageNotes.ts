@@ -1,12 +1,16 @@
 import { Dex } from "@pkmn/dex";
 import { Generations as DataGenerations } from "@pkmn/data";
-import { calculate, Field, Generations as CalcGenerations, Move, Pokemon, Side } from "@smogon/calc";
+import { calculate, Field, Generations as CalcGenerations, Move, Side } from "@smogon/calc";
+import { BattlePokemon as Pokemon, applyAbilityState, calculateDamageScenarios, exactSnapshotHp, assessImmediateDamage } from "../mechanics/calcPokemon.js";
 
 import type {
   BattleSnapshot,
   DamageAssumptionBand,
+  LadderAttackProfile,
   DamagePreview,
+  DelayedDamagePreview,
   InteractionHint,
+  ImmediateDamageAssessment,
   OpponentPosteriorPreview,
   ObservedRangeSummary,
   PokemonSnapshot,
@@ -16,6 +20,8 @@ import type {
   ThreatTargetPreview
 } from "../types.js";
 import { filterLiveLikelyHeldItemNames } from "../mechanics/liveLikelyItems.js";
+import { projectSwitchEntry, withholdEntryDamage } from "../mechanics/switchEntry.js";
+import { snapshotForAction } from "../mechanics/actions.js";
 
 const calcGens = CalcGenerations;
 const dataGens = new DataGenerations(Dex as any);
@@ -25,6 +31,8 @@ type DamageOptions = {
   likelyDefenderAbilities?: string[] | undefined;
   likelyAttackerItems?: string[] | undefined;
   likelyAttackerAbilities?: string[] | undefined;
+  /** The ladder's modal attacking spread per category and its live-plausible modal item, for the opponent's "likely" band. */
+  likelyAttackerProfile?: LadderAttackProfile | undefined;
   observedPlayerDamage?: Record<string, ObservedRangeSummary> | undefined;
   observedPlayerDamageResolver?: ((moveName: string, attacker: PokemonSnapshot, defender: PokemonSnapshot) => ObservedRangeSummary | undefined) | undefined;
   attackerPosterior?: OpponentPosteriorPreview | undefined;
@@ -36,13 +44,16 @@ type DamageProfile = "low" | "likely" | "high";
 type Range = {
   min: number;
   max: number;
+  exactMin?: number;
+  exactMax?: number;
 };
 
 type StatusOutcome = Pick<DamageAssumptionBand, "label" | "outcome" | "detail">;
 
-const MOVE_TYPE_IMMUNITY_ABILITY_LABELS: Record<string, string[]> = {
-  ground: ["Levitate"],
-  fire: ["Flash Fire"],
+/** Abilities that make a move of this type do nothing (no damage). */
+export const MOVE_TYPE_IMMUNITY_ABILITY_LABELS: Record<string, string[]> = {
+  ground: ["Levitate", "Earth Eater"],
+  fire: ["Flash Fire", "Well-Baked Body"],
   water: ["Water Absorb", "Dry Skin", "Storm Drain"],
   electric: ["Volt Absorb", "Lightning Rod", "Motor Drive"],
   grass: ["Sap Sipper"]
@@ -181,7 +192,7 @@ function applyKnownStats(pokemon: Pokemon, snapshotMon: PokemonSnapshot) {
     pokemon.stats[stat] = Number(stats[stat]);
   }
   if (Number.isFinite(stats.hp) && Number.isFinite(snapshotMon.hpPercent)) {
-    const currentHp = Math.max(1, Math.floor((Number(stats.hp) * Number(snapshotMon.hpPercent)) / 100));
+    const currentHp = exactSnapshotHp(snapshotMon, Number(stats.hp)) ?? Math.max(1, Math.floor((Number(stats.hp) * Number(snapshotMon.hpPercent)) / 100));
     pokemon.originalCurHP = Math.min(currentHp, pokemon.rawStats.hp);
   }
 }
@@ -234,6 +245,8 @@ function createPokemonFromSnapshot(
     likelyAbility?: string | undefined;
     posteriorHypothesis?: PosteriorHypothesis | undefined;
     useSnapshotStats?: boolean | undefined;
+    /** Replaces the generic "likely" attacking profile (the ladder's modal spread). */
+    attackProfile?: { nature: string; evs: Record<string, number> } | undefined;
   }
 ) {
   const species = snapshotMon.species ?? snapshotMon.displayName;
@@ -243,10 +256,11 @@ function createPokemonFromSnapshot(
   const profileOptions = posterior
     ? { evs: posterior.evs, nature: posterior.nature }
     : options.role === "attacker"
-      ? offensiveProfile(options.profile, options.category)
+      ? (options.profile === "likely" && options.attackProfile ? options.attackProfile : offensiveProfile(options.profile, options.category))
       : defensiveProfile(options.profile, options.category);
   const config: Record<string, unknown> = {
     level: normalizedBattleLevel(format, snapshotMon.level),
+    ability: "No Ability",
     boosts: calcBoosts(snapshotMon.boosts),
     ...profileOptions
   };
@@ -266,6 +280,7 @@ function createPokemonFromSnapshot(
   if (options.useSnapshotStats !== false) {
     applyKnownStats(pokemon, snapshotMon);
   }
+  applyAbilityState(pokemon, snapshotMon);
   if (options.role === "defender" && (options.useSnapshotStats === false || !snapshotMon.stats?.hp) && Number.isFinite(snapshotMon.hpPercent)) {
     pokemon.originalCurHP = Math.max(1, Math.floor((pokemon.rawStats.hp * Number(snapshotMon.hpPercent)) / 100));
   }
@@ -283,6 +298,21 @@ function lookupSpecies(gen: ReturnType<typeof dataGen>, name: string | null | un
   return undefined;
 }
 
+/** A species whose dex lists one ability has it before any reveal (Mimikyu's Disguise, Thundurus-T's Volt Absorb,
+ * Volcanion's Water Absorb). An unresolved identity (a possible Illusion) assumes nothing. A usable posterior already
+ * enumerates the species' abilities per hypothesis, so this fills only the profile (non-posterior) path. */
+function withSoleAbility(genNum: number, mon: PokemonSnapshot): PokemonSnapshot {
+  if (mon.ability || (mon.identityStatus !== undefined && mon.identityStatus !== "resolved")) return mon;
+  const abilities = [...new Set(Object.values(lookupSpecies(dataGen(genNum), mon.species ?? mon.displayName)?.abilities ?? {}))];
+  return abilities.length === 1 ? { ...mon, ability: abilities[0]! } : mon;
+}
+
+/** Knock Off's 1.5x needs a held item: an unrevealed one is assumed held (its likely item, else any) unless one was removed. */
+function knockOffHeldItem(moveName: string, defender: PokemonSnapshot, likelyItems: readonly string[]) {
+  if (normalizeName(moveName) !== "knockoff" || defender.item || defender.removedItem) return undefined;
+  return likelyItems[0] ?? "Leftovers";
+}
+
 function lookupMoveData(gen: ReturnType<typeof dataGen>, name: string | null | undefined) {
   if (!name) return undefined;
   const direct = gen.moves.get(name);
@@ -296,7 +326,7 @@ function lookupMoveData(gen: ReturnType<typeof dataGen>, name: string | null | u
 
 function currentBattleTypes(gen: ReturnType<typeof dataGen>, pokemon: PokemonSnapshot | null | undefined) {
   if (!pokemon) return [];
-  if (pokemon.terastallized && pokemon.teraType) {
+  if (pokemon.terastallized && pokemon.teraType && pokemon.teraType !== "Stellar") {
     return [pokemon.teraType];
   }
   if (Array.isArray(pokemon.types) && pokemon.types.length > 0) {
@@ -320,7 +350,7 @@ function makeStatusBand(outcome: StatusOutcome): DamageAssumptionBand {
     label: outcome.label,
     minPercent: null,
     maxPercent: null,
-    coverage: "unknown",
+    immediate: { ko: "no_ko", minHpLossPercent: 0, maxHpLossPercent: 0 },
     outcome: outcome.outcome,
     detail: outcome.detail
   };
@@ -331,7 +361,7 @@ function makeDamagingImmunityBand(outcome: StatusOutcome): DamageAssumptionBand 
     label: outcome.label,
     minPercent: 0,
     maxPercent: 0,
-    coverage: "misses_current_hp",
+    immediate: { ko: "no_ko", minHpLossPercent: 0, maxHpLossPercent: 0 },
     outcome: outcome.outcome,
     detail: outcome.detail
   };
@@ -342,11 +372,11 @@ function moveTypeImmunityAbilityOutcome(moveType: string | undefined, defenderAb
   const moveTypeId = normalizeName(moveType);
   if (!abilityId || !moveTypeId) return null;
 
-  if (abilityId === "levitate" && moveTypeId === "ground") {
-    return { label: "immune", outcome: "immune", detail: "Levitate blocks Ground-type moves." };
+  if (["levitate", "eartheater"].includes(abilityId) && moveTypeId === "ground") {
+    return { label: "immune", outcome: "immune", detail: `${defenderAbility} blocks Ground-type moves.` };
   }
-  if (abilityId === "flashfire" && moveTypeId === "fire") {
-    return { label: "immune", outcome: "immune", detail: "Flash Fire blocks Fire-type moves." };
+  if (["flashfire", "wellbakedbody"].includes(abilityId) && moveTypeId === "fire") {
+    return { label: "immune", outcome: "immune", detail: `${defenderAbility} blocks Fire-type moves.` };
   }
   if (["waterabsorb", "dryskin", "stormdrain"].includes(abilityId) && moveTypeId === "water") {
     return { label: "immune", outcome: "immune", detail: `${defenderAbility} blocks Water-type moves.` };
@@ -363,19 +393,6 @@ function moveTypeImmunityAbilityOutcome(moveType: string | undefined, defenderAb
 function airBalloonBlocksMove(move: ReturnType<typeof lookupMoveData>) {
   if (!move) return false;
   return normalizeName(move.type) === "ground" && normalizeName(move.name) !== "thousandarrows";
-}
-
-function moveTypeImmunityItemOutcome(
-  move: ReturnType<typeof lookupMoveData>,
-  defenderItem: string | null | undefined
-): StatusOutcome | null {
-  const itemId = normalizeName(defenderItem);
-  if (!itemId || !move) return null;
-
-  if (itemId === "airballoon" && airBalloonBlocksMove(move)) {
-    return { label: "immune", outcome: "immune", detail: "Air Balloon blocks Ground-type moves until it is removed." };
-  }
-  return null;
 }
 
 function targetedTypeImmunityOutcome(
@@ -638,17 +655,79 @@ function bracketFromResult(result: ReturnType<typeof calculate>, defender: Pokem
   const [minRoll, maxRoll] = result.range();
   if (!Number.isFinite(minRoll) || !Number.isFinite(maxRoll) || minRoll < 0 || maxRoll < 0) return null;
   return {
+    exactMin: minRoll / maxHp * 100, exactMax: maxRoll / maxHp * 100,
     min: Number(((minRoll / maxHp) * 100).toFixed(1)),
     max: Number(((maxRoll / maxHp) * 100).toFixed(1))
   };
 }
 
-function coverageFromRange(range: Range | null, hpPercent: number | null | undefined): DamageAssumptionBand["coverage"] {
-  if (!range || !Number.isFinite(hpPercent)) return "unknown";
-  const currentHp = Number(hpPercent);
-  if (range.min >= currentHp) return "covers_current_hp";
-  if (range.max >= currentHp) return "can_cover_current_hp";
-  return "misses_current_hp";
+const unknownImmediate = (note = "Immediate outcome is unavailable."): ImmediateDamageAssessment => ({
+  ko: "unknown", minHpLossPercent: null, maxHpLossPercent: null, note
+});
+
+/** Each represented alternative is support, not a new probability or weight. */
+function combineImmediate(values: ImmediateDamageAssessment[]): ImmediateDamageAssessment {
+  if (!values.length || values.some((value) => value.ko === "unknown")) return unknownImmediate();
+  const mixed = values.some((value) => value.ko !== values[0]!.ko);
+  const numeric = values.every((value) => value.minHpLossPercent !== null && value.maxHpLossPercent !== null);
+  // Extrema are support bounds, including for unweighted alternatives. They
+  // carry no probability or midpoint and cannot strengthen a conditional KO.
+  return { ko: mixed ? "conditional" : values[0]!.ko,
+    minHpLossPercent: numeric ? Math.min(...values.map((value) => value.minHpLossPercent!)) : null,
+    maxHpLossPercent: numeric ? Math.max(...values.map((value) => value.maxHpLossPercent!)) : null,
+    ...(mixed ? { note: "Immediate KO depends on represented set or survival alternatives." }
+      : values.some((value) => value.note) ? { note: [...new Set(values.map((value) => value.note).filter(Boolean))].join(" ") } : {}) };
+}
+
+function impactHp(snapshot: PokemonSnapshot, maxHp: number, genNum: number) {
+  const exact = exactSnapshotHp(snapshot, maxHp);
+  if (exact !== null) return { currentHp: exact, maxHp };
+  const percent = snapshot.hpPercent;
+  if (typeof percent !== "number" || !Number.isFinite(percent) || percent <= 0 || percent > 100) return { currentHp: null, maxHp };
+  // Gen 7+ public health deliberately maps a nonfull rounded 100% to 99%.
+  if (percent === 100 && genNum >= 7) return { currentHp: maxHp, maxHp };
+  if (!Number.isInteger(percent)) return { currentHp: null, maxHp };
+  return { currentHp: null, maxHp, currentHpRange: {
+    min: Math.max(1, Math.floor((percent - 1) * maxHp / 100) + 1),
+    max: percent === 99 && genNum >= 7 ? maxHp - 1 : Math.floor(percent * maxHp / 100)
+  } };
+}
+
+function supportedSingleHit(genNum: number, moveName: string, result: ReturnType<typeof calculate>) {
+  const move = lookupMoveData(dataGen(genNum), moveName);
+  return Boolean(move) && !move?.ohko && !move?.multihit && !move?.multiaccuracy && result.move.hits === 1
+    && !result.attacker.hasAbility("Parental Bond") && !(Array.isArray(result.damage) && Array.isArray(result.damage[0]));
+}
+
+function assessResults(params: {
+  genNum: number; snapshot: PokemonSnapshot; attacker: Pokemon; defender: Pokemon;
+  moveName: string; field: Field; results: ReturnType<typeof calculate>[];
+  possibleItems?: string[] | undefined; possibleAbilities?: string[] | undefined;
+}) {
+  const { genNum, snapshot, attacker, defender, moveName, field, results } = params;
+  const hp = impactHp(snapshot, defender.maxHP(), genNum);
+  const assess = (result: ReturnType<typeof calculate>) => assessImmediateDamage(result, {
+    ...hp, sequence: supportedSingleHit(genNum, moveName, result) ? "single_hit" : "unsupported",
+    defenderFormUncertain: !snapshot.species || (snapshot.identityStatus !== undefined && snapshot.identityStatus !== "resolved")
+  });
+  const assessments = results.map(assess);
+  // Explicit live facts override stale history. Candidate runs only qualify
+  // survival/bypass; they never enter raw ranges or duplicate hypothesis mass.
+  const abilityKnown = Boolean(snapshot.ability);
+  const itemKnown = Boolean(snapshot.item || snapshot.removedItem);
+  const abilities = !abilityKnown && !defender.hasAbility("Sturdy") && params.possibleAbilities?.some((value) => normalizeName(value) === "sturdy") ? ["Sturdy"] : [];
+  const items = !itemKnown ? (params.possibleItems ?? []).flatMap((value) => {
+    const id = normalizeName(value);
+    return id === "focussash" ? ["Focus Sash"] : id === "abilityshield" ? ["Ability Shield"] : id === "focusband" ? ["Focus Band"] : [];
+  }) : [];
+  for (const ability of [undefined, ...abilities]) for (const item of [undefined, ...items]) {
+    if (!ability && !item) continue;
+    const candidate = defender.clone();
+    if (ability) candidate.ability = ability as NonNullable<typeof candidate.ability>;
+    if (item) candidate.item = item as NonNullable<typeof candidate.item>;
+    assessments.push(...calculateDamageScenarios(calcGen(genNum), attacker, candidate, new Move(calcGen(genNum), moveName), field).map(assess));
+  }
+  return combineImmediate(assessments);
 }
 
 function formatRange(range: Range | null) {
@@ -657,11 +736,12 @@ function formatRange(range: Range | null) {
   return `${range.min}-${range.max}%`;
 }
 
-function coverageSummary(coverage: DamageAssumptionBand["coverage"]) {
-  if (coverage === "covers_current_hp") return "KOs current HP";
-  if (coverage === "can_cover_current_hp") return "rolls to KO";
-  if (coverage === "misses_current_hp") return "no current-HP KO";
-  return "KO unknown";
+function immediateSummary(immediate: ImmediateDamageAssessment) {
+  if (immediate.note) return immediate.note;
+  if (immediate.ko === "all_rolls") return "KOs current HP on every represented damage roll, if the hit connects";
+  if (immediate.ko === "some_rolls") return "some damage rolls KO if the hit connects";
+  if (immediate.ko === "no_ko") return "no immediate KO";
+  return immediate.ko === "conditional" ? "immediate KO conditional" : "immediate KO unknown";
 }
 
 function applyObservedLikelyBand(
@@ -686,9 +766,19 @@ function applyObservedLikelyBand(
             ...band,
             minPercent: observedRange.minPercent,
             maxPercent: observedRange.maxPercent,
-            coverage: coverageFromRange({ min: observedRange.minPercent, max: observedRange.maxPercent }, currentHpPercent)
+            immediate: unknownImmediate("Observed raw damage does not establish immediate survival at this impact.")
           }
-        : band
+        // The upper scenario never sits below what was observed.
+        : band.label === "high" && Number.isFinite(band.maxPercent) && Number.isFinite(band.minPercent)
+            && (band.maxPercent! < observedRange.maxPercent || band.minPercent! < observedRange.minPercent)
+          ? {
+              ...band,
+              minPercent: Math.max(band.minPercent!, observedRange.minPercent),
+              maxPercent: Math.max(band.maxPercent!, observedRange.maxPercent),
+              immediate: unknownImmediate("Raised to the observed damage; immediate survival is not established at this impact."),
+              detail: [band.detail, "High raised to the observed likely damage."].filter(Boolean).join(" ")
+            }
+          : band
     ),
     likelyBandSource: (observedRange.source ?? "aggregate") as "context" | "aggregate"
   };
@@ -696,16 +786,6 @@ function applyObservedLikelyBand(
 
 function posteriorConfidenceUsable(posterior: OpponentPosteriorPreview | undefined) {
   return posterior?.confidenceTier === "usable" || posterior?.confidenceTier === "strong";
-}
-
-function posteriorConsensusValue(posterior: OpponentPosteriorPreview | undefined, key: "item" | "ability" | "teraType") {
-  if (!posteriorConfidenceUsable(posterior) || !posterior) return null;
-  const topValues = posterior.topHypotheses
-    .slice(0, 3)
-    .map((hypothesis) => hypothesis[key])
-    .filter((value): value is string => Boolean(value));
-  if (topValues.length === 0) return null;
-  return topValues.every((value) => normalizeName(value) === normalizeName(topValues[0])) ? topValues[0] ?? null : null;
 }
 
 function posteriorConsensusValues(posterior: OpponentPosteriorPreview | undefined, key: "item" | "ability" | "teraType") {
@@ -717,37 +797,6 @@ function posteriorConsensusValues(posterior: OpponentPosteriorPreview | undefine
     if (values.size >= 3) break;
   }
   return [...values];
-}
-
-function buildDamagingImmunityBand(params: {
-  genNum: number;
-  snapshot: BattleSnapshot;
-  attackerMon: PokemonSnapshot;
-  defenderMon: PokemonSnapshot;
-  moveName: string;
-  defenderPosterior?: OpponentPosteriorPreview | undefined;
-}) {
-  const gen = dataGen(params.genNum);
-  const move = lookupMoveData(gen, params.moveName);
-  if (!move || move.category === "Status") return null;
-
-  const defenderTypes = currentBattleTypes(gen, params.defenderMon);
-  const resolvedAbility = params.defenderMon.ability ?? posteriorConsensusValue(params.defenderPosterior, "ability");
-  const resolvedItem = params.defenderMon.item
-    ?? (!params.defenderMon.removedItem ? posteriorConsensusValue(params.defenderPosterior, "item") : null);
-
-  if (!attackerIgnoresDefenderAbility(params.attackerMon)) {
-    const abilityOutcome = moveTypeImmunityAbilityOutcome(move.type, resolvedAbility);
-    if (abilityOutcome) return makeDamagingImmunityBand(abilityOutcome);
-  }
-
-  const typeOutcome = targetedTypeImmunityOutcome(gen, move, defenderTypes);
-  if (typeOutcome) return makeDamagingImmunityBand(typeOutcome);
-
-  const itemOutcome = moveTypeImmunityItemOutcome(move, resolvedItem);
-  if (itemOutcome) return makeDamagingImmunityBand(itemOutcome);
-
-  return null;
 }
 
 function posteriorWeightedPercentile(values: Array<{ value: number; weight: number }>, percentile: number) {
@@ -770,7 +819,9 @@ function posteriorBandsFromHypotheses(
   defenderMon: PokemonSnapshot,
   direction: "your" | "opponent",
   posterior: OpponentPosteriorPreview | undefined,
-  role: "attacker" | "defender"
+  role: "attacker" | "defender",
+  possibleItems?: string[],
+  possibleAbilities?: string[]
 ) {
   if (!posteriorConfidenceUsable(posterior) || !posterior || posterior.topHypotheses.length === 0) return null;
 
@@ -785,6 +836,7 @@ function posteriorBandsFromHypotheses(
   if (category === "Status") return null;
 
   const field = buildField(snapshot, direction);
+  const represented: ImmediateDamageAssessment[] = [];
   const samples = posterior.topHypotheses.flatMap((hypothesis) => {
     const attacker = createPokemonFromSnapshot(snapshot.format, genNum, attackerMon, {
       profile: "likely",
@@ -804,41 +856,50 @@ function posteriorBandsFromHypotheses(
       posteriorHypothesis: role === "defender" ? hypothesis : undefined,
       useSnapshotStats: role !== "defender"
     });
-    if (!attacker || !defender) return [];
-    const result = calculate(gen, attacker, defender, new Move(gen, moveName), field);
-    const range = bracketFromResult(result, defender);
-    if (!range) return [];
+    if (!attacker || !defender) { represented.push(unknownImmediate()); return []; }
+    const results = calculateDamageScenarios(gen, attacker, defender, new Move(gen, moveName), field);
+    represented.push(assessResults({ genNum, snapshot: defenderMon, attacker, defender, moveName, field, results,
+      possibleItems: role === "defender" && hypothesis.item ? undefined : possibleItems,
+      possibleAbilities: role === "defender" && hypothesis.ability ? undefined : possibleAbilities }));
+    const ranges = results.map((result) => bracketFromResult(result, defender)).filter((range): range is Range => range !== null);
+    if (!ranges.length) return [];
     return [{
       weight: hypothesis.weight,
-      minPercent: range.min,
-      maxPercent: range.max
+      uncertainActivation: attacker.abilityActivationUncertain || defender.abilityActivationUncertain,
+      exactMin: Math.min(...ranges.map((range) => range.exactMin ?? range.min)),
+      exactMax: Math.max(...ranges.map((range) => range.exactMax ?? range.max)),
+      minPercent: Math.min(...ranges.map((range) => range.min)),
+      maxPercent: Math.max(...ranges.map((range) => range.max))
     }];
   });
 
   if (samples.length === 0) return null;
+  if (samples.every((sample) => sample.maxPercent === 0) && represented.every((value) => value.ko === "no_ko")) {
+    return [makeDamagingImmunityBand({ label: "immune", outcome: "immune", detail: "All represented posterior hypotheses produce zero damage." })];
+  }
 
   const bands: DamageAssumptionBand[] = [
     {
       label: "conservative",
       minPercent: Number(posteriorWeightedPercentile(samples.map((sample) => ({ value: sample.minPercent, weight: sample.weight })), 0.1).toFixed(1)),
       maxPercent: Number(posteriorWeightedPercentile(samples.map((sample) => ({ value: sample.maxPercent, weight: sample.weight })), 0.1).toFixed(1)),
-      coverage: "unknown"
+      immediate: combineImmediate(represented)
     },
     {
       label: "likely",
       minPercent: Number(posteriorWeightedPercentile(samples.map((sample) => ({ value: sample.minPercent, weight: sample.weight })), 0.5).toFixed(1)),
       maxPercent: Number(posteriorWeightedPercentile(samples.map((sample) => ({ value: sample.maxPercent, weight: sample.weight })), 0.5).toFixed(1)),
-      coverage: "unknown"
+      immediate: combineImmediate(represented)
     },
     {
       label: "high",
       minPercent: Number(posteriorWeightedPercentile(samples.map((sample) => ({ value: sample.minPercent, weight: sample.weight })), 0.9).toFixed(1)),
       maxPercent: Number(posteriorWeightedPercentile(samples.map((sample) => ({ value: sample.maxPercent, weight: sample.weight })), 0.9).toFixed(1)),
-      coverage: "unknown"
+      immediate: combineImmediate(represented)
     }
   ].map((band) => ({
     ...band,
-    coverage: coverageFromRange({ min: band.minPercent ?? 0, max: band.maxPercent ?? 0 }, defenderMon.hpPercent)
+    ...(samples.some((sample) => sample.uncertainActivation) ? { detail: "Interval includes active and inactive ability scenarios; activation is unobserved." } : {})
   }));
 
   return bands;
@@ -859,19 +920,19 @@ function buildSurvivalCaveats(
 
   if (knownAbilityId === "sturdy") {
     caveats.push({ kind: "Sturdy", certainty: "known", note: "Known Sturdy can leave the target at 1 HP from full." });
-  } else if (likelyAbilityIds.has("sturdy")) {
+  } else if (!knownAbility && likelyAbilityIds.has("sturdy")) {
     caveats.push({ kind: "Sturdy", certainty: "historically_possible", note: "Stored history suggests Sturdy is possible from full." });
   }
 
   if (knownItemId === "focussash") {
     caveats.push({ kind: "Focus Sash", certainty: "known", note: "Known Focus Sash can leave the target at 1 HP from full." });
-  } else if (likelyItemIds.has("focussash")) {
+  } else if (!knownItem && !defender.removedItem && likelyItemIds.has("focussash")) {
     caveats.push({ kind: "Focus Sash", certainty: "historically_possible", note: "Stored history suggests Focus Sash is possible from full." });
   }
 
   if (knownAbilityId === "multiscale") {
     caveats.push({ kind: "Multiscale", certainty: "known", note: "Known Multiscale can reduce damage while the target is at full HP." });
-  } else if (likelyAbilityIds.has("multiscale")) {
+  } else if (!knownAbility && likelyAbilityIds.has("multiscale")) {
     caveats.push({ kind: "Multiscale", certainty: "historically_possible", note: "Stored history suggests Multiscale is possible at full HP." });
   }
 
@@ -887,10 +948,17 @@ function buildBands(params: {
   direction: "your" | "opponent";
   attackerPosterior?: OpponentPosteriorPreview | undefined;
   defenderPosterior?: OpponentPosteriorPreview | undefined;
+  possibleItems?: string[] | undefined;
+  possibleAbilities?: string[] | undefined;
   likelyDefenderItem?: string | undefined;
   likelyDefenderAbility?: string | undefined;
+  /** An unrevealed attacker's assumed item for the "likely" and "high" bands (the ladder's modal item). */
   likelyAttackerItem?: string | undefined;
   likelyAttackerAbility?: string | undefined;
+  /** The ladder's modal attacking spreads; the "likely" band uses the move category's. */
+  likelyAttackerProfile?: LadderAttackProfile | undefined;
+  /** Live likely items of an attacker whose item is unknown; "high" takes the strongest. */
+  highAttackerItems?: string[] | undefined;
 }): DamageAssumptionBand[] {
   const genNum = params.genNum;
   const gen = calcGen(genNum);
@@ -912,18 +980,6 @@ function buildBands(params: {
     })];
   }
 
-  const deterministicImmunityBand = buildDamagingImmunityBand({
-    genNum,
-    snapshot: params.snapshot,
-    attackerMon: params.attackerMon,
-    defenderMon: params.defenderMon,
-    moveName: params.moveName,
-    defenderPosterior: params.defenderPosterior
-  });
-  if (deterministicImmunityBand) {
-    return [deterministicImmunityBand];
-  }
-
   const posteriorDirection = params.direction === "your" ? "defender" : "attacker";
   const posterior = posteriorDirection === "attacker" ? params.attackerPosterior : params.defenderPosterior;
   const posteriorBands = posteriorBandsFromHypotheses(
@@ -933,9 +989,10 @@ function buildBands(params: {
     params.defenderMon,
     params.direction,
     posterior,
-    posteriorDirection
+    posteriorDirection,
+    params.possibleItems, params.possibleAbilities
   );
-  if (posteriorBands) return posteriorBands;
+  if (posteriorBands) return withHighItemAssumption(params, category, posteriorBands);
 
   const field = buildField(params.snapshot, params.direction === "your" ? "your" : "opponent");
   const profiles: Array<{ profile: DamageProfile; label: string }> = [
@@ -944,13 +1001,15 @@ function buildBands(params: {
     { profile: "high", label: "high" }
   ];
 
-  return profiles.map(({ profile, label }) => {
+  let resolvedZero: ReturnType<typeof calculate> | undefined;
+  const bands = profiles.map(({ profile, label }) => {
     const attacker = createPokemonFromSnapshot(params.snapshot.format, genNum, params.attackerMon, {
       profile: params.direction === "your" ? "likely" : profile,
       role: "attacker",
       category,
-      likelyItem: params.likelyAttackerItem,
-      likelyAbility: params.likelyAttackerAbility
+      likelyItem: profile === "low" ? undefined : params.likelyAttackerItem,
+      likelyAbility: params.likelyAttackerAbility,
+      attackProfile: params.likelyAttackerProfile?.[category]
     });
     const defender = createPokemonFromSnapshot(params.snapshot.format, genNum, params.defenderMon, {
       profile: params.direction === "your" ? profile : "likely",
@@ -964,24 +1023,64 @@ function buildBands(params: {
         label,
         minPercent: null,
         maxPercent: null,
-        coverage: "unknown" as const
+        immediate: unknownImmediate()
       };
     }
-    const range = bracketFromResult(calculate(gen, attacker, defender, calcMove, field), defender);
+    const results = calculateDamageScenarios(gen, attacker, defender, calcMove, field);
+    resolvedZero ??= results[0];
+    const ranges = results.map((result) => bracketFromResult(result, defender)).filter((range): range is Range => range !== null);
+    const range = ranges.length ? { min: Math.min(...ranges.map((range) => range.min)), max: Math.max(...ranges.map((range) => range.max)),
+      exactMin: Math.min(...ranges.map((range) => range.exactMin ?? range.min)), exactMax: Math.max(...ranges.map((range) => range.exactMax ?? range.max)) } : null;
     return {
       label,
       minPercent: range?.min ?? null,
       maxPercent: range?.max ?? null,
-      coverage: coverageFromRange(range, params.defenderMon.hpPercent)
+      immediate: assessResults({ genNum, snapshot: params.defenderMon, attacker, defender, moveName: params.moveName, field, results, possibleItems: params.possibleItems, possibleAbilities: params.possibleAbilities }),
+      ...(results.length > 1 ? { detail: "Interval includes active and inactive ability scenarios; activation is unobserved." } : {})
     };
   });
+  if (bands.every((band) => band.minPercent === 0 && band.maxPercent === 0 && band.immediate.ko === "no_ko")) {
+    // Explain only a zero result established by resolved calculator mechanics.
+    // Static move typing must not pre-empt Tera Blast, Weather Ball, Scrappy,
+    // Gravity or another transformation handled by the maintained calculator.
+    const effect = resolvedZero?.rawDesc.defenderAbility ?? resolvedZero?.rawDesc.defenderItem;
+    const targetTypes = resolvedZero?.defender.teraType && resolvedZero.defender.teraType !== "Stellar"
+      ? [resolvedZero.defender.teraType] : resolvedZero?.defender.types ?? [];
+    return [makeDamagingImmunityBand({
+      label: "immune", outcome: "immune", detail: `Resolved ${resolvedZero?.move.type ?? "move"}-type attack produces zero damage against ${targetTypes.map((type) => `${type}-type`).join("/")} typing${effect ? ` (${effect})` : ""}.`
+    })];
+  }
+  return withHighItemAssumption(params, category, bands);
+}
+
+/** Unknown attacker item: raise "high" to the strongest live likely item (Choice Band, Life Orb, a type booster...)
+ * and label the assumption. Items that do not change damage leave the band untouched. */
+function withHighItemAssumption(params: Parameters<typeof buildBands>[0], category: "Physical" | "Special", bands: DamageAssumptionBand[]) {
+  const attackerMon = params.attackerMon, items = params.highAttackerItems ?? [];
+  const high = bands.find((band) => band.label === "high");
+  if (!high || !items.length || attackerMon.item || attackerMon.removedItem || bands.some((band) => band.outcome && band.outcome !== "damage")) return bands;
+  const gen = calcGen(params.genNum), field = buildField(params.snapshot, params.direction === "your" ? "your" : "opponent");
+  let best: { item: string; range: Range; immediate: ImmediateDamageAssessment } | null = null;
+  for (const item of items) {
+    const attacker = createPokemonFromSnapshot(params.snapshot.format, params.genNum, attackerMon, { profile: "high", role: "attacker", category, likelyItem: item, likelyAbility: params.likelyAttackerAbility });
+    const defender = createPokemonFromSnapshot(params.snapshot.format, params.genNum, params.defenderMon, { profile: "likely", role: "defender", category, likelyItem: params.likelyDefenderItem, likelyAbility: params.likelyDefenderAbility });
+    if (!attacker || !defender) continue;
+    const results = calculateDamageScenarios(gen, attacker, defender, new Move(gen, params.moveName), field);
+    const ranges = results.map((result) => bracketFromResult(result, defender)).filter((range): range is Range => range !== null);
+    if (!ranges.length) continue;
+    const range = { min: Math.min(...ranges.map((r) => r.min)), max: Math.max(...ranges.map((r) => r.max)) };
+    if (!best || range.max > best.range.max) best = { item, range, immediate: assessResults({ genNum: params.genNum, snapshot: params.defenderMon, attacker, defender, moveName: params.moveName, field, results, possibleItems: params.possibleItems, possibleAbilities: params.possibleAbilities }) };
+  }
+  if (!best || best.range.max <= (high.maxPercent ?? Infinity)) return bands;
+  return bands.map((band) => band === high ? { ...band, minPercent: Math.max(band.minPercent ?? 0, best!.range.min), maxPercent: best!.range.max, immediate: best!.immediate,
+    detail: [band.detail, `High assumes ${best!.item}.`].filter(Boolean).join(" ") } : band);
 }
 
 function cleanDeterministicDetail(detail: string | undefined) {
   return typeof detail === "string" ? detail.replace(/[.\s]+$/g, "") : undefined;
 }
 
-function buildDamageSummary(label: string, bands: DamageAssumptionBand[], caveats: SurvivalCaveat[]) {
+export function buildDamageSummary(label: string, bands: DamageAssumptionBand[], caveats: SurvivalCaveat[]) {
   const deterministicBand = bands.length === 1 && bands[0]?.outcome && bands[0].outcome !== "damage"
     ? bands[0]
     : null;
@@ -1002,12 +1101,12 @@ function buildDamageSummary(label: string, bands: DamageAssumptionBand[], caveat
     high: "high"
   };
   const parts = bands.map((band) => {
-    const range = formatRange(band.minPercent === null || band.maxPercent === null ? null : { min: band.minPercent, max: band.maxPercent });
-    const coverage = band.coverage === "unknown" ? "" : `; ${coverageSummary(band.coverage)}`;
-    return `${labelMap[band.label] ?? band.label} ${range}${coverage}`;
+    const range = band.minPercent === null || band.maxPercent === null ? "damage unknown" : formatRange({ min: band.minPercent, max: band.maxPercent });
+    return `${labelMap[band.label] ?? band.label} raw ${range}; ${immediateSummary(band.immediate)}`;
   });
+  const uncertaintyText = [...new Set(bands.map((band) => band.detail).filter(Boolean))].join(" ");
   const caveatText = caveats.length > 0 ? `; ${caveats.map((caveat) => caveat.note).join(" ")}` : "";
-  return `${label}: ${parts.join("; ")}${caveatText}.`;
+  return `${label}: ${parts.join("; ")}${caveatText}.${uncertaintyText ? ` ${uncertaintyText}` : ""}`;
 }
 
 function moveCategoryForPreview(genNum: number, moveName: string) {
@@ -1016,29 +1115,58 @@ function moveCategoryForPreview(genNum: number, moveName: string) {
   return "Status" as const;
 }
 
+/** Calculator bands describe a conditional impact, never the cast turn. */
+export function buildDelayedDamagePreview(snapshot: BattleSnapshot, moveName: string, targetSide: "p1" | "p2", bands: DamageAssumptionBand[]): DelayedDamagePreview | undefined {
+  if (!lookupMoveData(dataGen(generationFromFormat(snapshot.format)), moveName)?.flags.futuremove) return undefined;
+  const matching = (snapshot.pendingAttacks ?? []).filter((entry) => entry.targetSide === targetSide && entry.targetPosition === "a");
+  const facts = snapshot.canonicalEvidence?.facts ?? [];
+  const complete = snapshot.turnCoverage?.source === "owned_offline_simulator" && snapshot.turnCoverage.turn === snapshot.turn
+    && snapshot.canonicalEvidence?.limitations.length === 0 && snapshot.canonicalEvidence.ambiguities.length === 0
+    && facts.some((fact) => fact.kind === "init" && fact.args[0] === "battle") && facts.some((fact) => fact.kind === "start")
+    && !facts.some((fact) => fact.source.channel === "recovery");
+  const scheduling = matching.length ? matching.every((entry) => entry.status === "scheduled" && entry.factIds.length > 0) ? "occupied" : "unknown" : complete ? "clear" : "unknown";
+  return { kind: "delayed", delayTurns: 2, phase: "end_of_turn", immediateDamagePercent: 0,
+    scheduling, dueTurn: scheduling === "clear" ? snapshot.turn + 2 : null,
+    targetSide, targetPosition: "a", recipient: "slot_at_impact",
+    factIds: [...new Set(matching.length ? matching.flatMap((entry) => entry.factIds) : complete ? [snapshot.turnCoverage!.turnFactId, snapshot.turnCoverage!.requestFactId] : [])], bands };
+}
+
+function delayedDamageSummary(label: string, delayed: DelayedDamagePreview) {
+  const ranges = delayed.bands.map((band) => `${band.label} ${band.minPercent === null || band.maxPercent === null ? "unknown damage" : formatRange({ min: band.minPercent, max: band.maxPercent })}`).join("; ");
+  const schedule = delayed.scheduling === "occupied" ? "target slot already has a pending attack; another cast fails"
+    : delayed.scheduling === "unknown" ? "scheduling is unknown from this capture" : `if the cast succeeds, impact is at the end of turn ${delayed.dueTurn}`;
+  return `${label}: zero immediate damage; ${schedule}. Conditional eventual matchup: ${ranges}. Recipient at impact and caster state may change.`;
+}
+
 export function buildDamagePreview(snapshot: BattleSnapshot, options: DamageOptions = {}): DamagePreview[] {
-  const yourActive = snapshot.yourSide.active;
-  const opponentActive = snapshot.opponentSide.active;
-  if (!yourActive || !opponentActive) return [];
+  const originalActive = snapshot.yourSide.active;
+  if (!originalActive || originalActive.fainted || (originalActive.hpPercent ?? 100) <= 0
+    || !snapshot.opponentSide.active || snapshot.opponentSide.active.fainted || (snapshot.opponentSide.active.hpPercent ?? 100) <= 0) return [];
 
   const genNum = generationFromFormat(snapshot.format);
   const defenderPosterior = options.defenderPosterior;
   const usePosterior = posteriorConfidenceUsable(defenderPosterior);
+  const opponentActive = usePosterior ? snapshot.opponentSide.active : withSoleAbility(genNum, snapshot.opponentSide.active);
   const liveLikelyDefenderItems = filterLiveLikelyHeldItemNames(snapshot.format, opponentActive, options.likelyDefenderItems, {
     recentLog: snapshot.recentLog
   });
   return snapshot.legalActions
     .filter((action) => action.kind === "move" && action.moveName)
     .map((action) => {
+      const actionSnapshot = snapshotForAction(snapshot, action);
+      const yourActive = actionSnapshot.yourSide.active!;
       const category: DamagePreview["category"] = moveCategoryForPreview(genNum, action.moveName ?? action.label);
+      const delayedMove = Boolean(lookupMoveData(dataGen(genNum), action.moveName ?? action.label)?.flags.futuremove);
       const bands = buildBands({
         genNum,
-        snapshot,
+        snapshot: actionSnapshot,
         attackerMon: yourActive,
         defenderMon: opponentActive,
         moveName: action.moveName ?? action.label,
         direction: "your",
-        defenderPosterior
+        defenderPosterior,
+        possibleItems: liveLikelyDefenderItems, possibleAbilities: options.likelyDefenderAbilities,
+        likelyDefenderItem: knockOffHeldItem(action.moveName ?? action.label, opponentActive, liveLikelyDefenderItems)
       });
       const posteriorItems = posteriorConsensusValues(defenderPosterior, "item");
       const posteriorAbilities = posteriorConsensusValues(defenderPosterior, "ability");
@@ -1054,38 +1182,40 @@ export function buildDamagePreview(snapshot: BattleSnapshot, options: DamageOpti
       });
       const interactionHints = buildPossibleAbilityInteractionHints({
         genNum,
-        snapshot,
+        snapshot: actionSnapshot,
         attackerMon: yourActive,
         defenderMon: opponentActive,
         moveName: action.moveName ?? action.label,
         likelyDefenderItems: resolvedLikelyDefenderItems,
         likelyDefenderAbilities: posteriorAbilities.length > 0 ? posteriorAbilities : options.likelyDefenderAbilities
       });
-      const observedRange = options.observedPlayerDamageResolver?.(
+      const observedRange = delayedMove ? undefined : options.observedPlayerDamageResolver?.(
         action.moveName ?? action.label,
         yourActive,
         opponentActive
-      ) ?? options.observedPlayerDamage?.[`${action.moveName ?? action.label}|${yourActive.species ?? yourActive.displayName ?? "Your active"}`];
+      ) ?? (action.terastallize ? undefined : options.observedPlayerDamage?.[`${action.moveName ?? action.label}|${yourActive.species ?? yourActive.displayName ?? "Your active"}`]);
       const narrowed = usePosterior
         ? { bands, likelyBandSource: "posterior" as const }
         : applyObservedLikelyBand(bands, observedRange, opponentActive.hpPercent ?? null);
       const likelyBandSource = narrowed.likelyBandSource;
+      const delayed = buildDelayedDamagePreview(actionSnapshot, action.moveName ?? action.label, snapshot.opponentSide.slot === "p1" ? "p1" : "p2", narrowed.bands);
       return {
         actionId: action.id,
+        terastallize: Boolean(action.terastallize),
         label: action.label,
         moveName: action.moveName ?? action.label,
         targetName: opponentActive.species ?? opponentActive.displayName ?? "Opponent active",
         targetCurrentHpPercent: opponentActive.hpPercent ?? null,
         category,
-        bands: narrowed.bands,
+        bands: delayed ? [] : narrowed.bands,
+        ...(delayed ? { delayed } : {}),
         observedRange,
         likelyBandSource,
         survivalCaveats,
         interactionHints,
-        summary: buildDamageSummary(action.label, narrowed.bands, survivalCaveats)
+        summary: delayed ? delayedDamageSummary(action.label, delayed) : buildDamageSummary(action.label, narrowed.bands, survivalCaveats)
       };
-    })
-    .slice(0, 6);
+    });
 }
 
 export function buildThreatPreview(
@@ -1097,36 +1227,44 @@ export function buildThreatPreview(
   }
 ): ThreatPreview[] {
   const yourActive = snapshot.yourSide.active;
-  const opponentActive = snapshot.opponentSide.active;
-  if (!yourActive || !opponentActive) return [];
+  if (!yourActive || !snapshot.opponentSide.active || snapshot.opponentSide.active.fainted || (snapshot.opponentSide.active.hpPercent ?? 100) <= 0) return [];
+  const currentTargetAvailable = !yourActive.fainted && (yourActive.hpPercent ?? 100) > 0;
   const genNum = generationFromFormat(snapshot.format);
+  const opponentActive = posteriorConfidenceUsable(options.attackerPosterior) ? snapshot.opponentSide.active : withSoleAbility(genNum, snapshot.opponentSide.active);
+  // The ladder's modal item stands in for an unrevealed one in "likely"/"high"; a revealed or removed item overrides it.
+  const likelyAttackerProfile = options.likelyAttackerProfile;
+  const likelyAttackerItem = opponentActive.item || opponentActive.removedItem ? undefined : likelyAttackerProfile?.item;
   const attackerPosterior = options.attackerPosterior;
   const usePosterior = posteriorConfidenceUsable(attackerPosterior);
-  const liveLikelyDefenderItems = filterLiveLikelyHeldItemNames(snapshot.format, yourActive, options.likelyDefenderItems, {
+  const liveLikelyDefenderItems = currentTargetAvailable ? filterLiveLikelyHeldItemNames(snapshot.format, yourActive, options.likelyDefenderItems, {
     recentLog: snapshot.recentLog
-  });
+  }) : [];
+  const highAttackerItems = filterLiveLikelyHeldItemNames(snapshot.format, opponentActive, options.likelyAttackerItems, { recentLog: snapshot.recentLog });
+  const likelyAttackerAbility = opponentActive.ability ? undefined : options.likelyAttackerAbilities?.[0];
 
   return options.moveCandidates
     .map((candidate) => {
       const moveData = lookupMoveData(dataGen(genNum), candidate.name);
+      const delayedMove = Boolean(moveData?.flags.futuremove);
       if (moveData?.category === "Status" && !moveTargetsSpecificFoe(moveData)) {
         return null;
       }
-      const currentBands = buildBands({
+      const currentBands = currentTargetAvailable ? buildBands({
         genNum,
         snapshot,
         attackerMon: opponentActive,
         defenderMon: yourActive,
         moveName: candidate.name,
         direction: "opponent",
-        attackerPosterior
-      });
-      const currentObservedRange = options.observedThreatResolver?.(
+        possibleItems: liveLikelyDefenderItems, possibleAbilities: options.likelyDefenderAbilities,
+        attackerPosterior, highAttackerItems, likelyAttackerAbility, likelyAttackerItem, likelyAttackerProfile
+      }) : [];
+      const currentObservedRange = currentTargetAvailable && !delayedMove ? (options.observedThreatResolver?.(
         candidate.name,
         opponentActive,
         yourActive
-      ) ?? options.observedThreats?.[`${candidate.name}|${yourActive.species ?? yourActive.displayName ?? "Your active"}`];
-      const currentInteractionHints = buildPossibleAbilityInteractionHints({
+      ) ?? options.observedThreats?.[`${candidate.name}|${yourActive.species ?? yourActive.displayName ?? "Your active"}`]) : undefined;
+      const currentInteractionHints = currentTargetAvailable ? buildPossibleAbilityInteractionHints({
         genNum,
         snapshot,
         attackerMon: opponentActive,
@@ -1134,34 +1272,45 @@ export function buildThreatPreview(
         moveName: candidate.name,
         likelyDefenderItems: liveLikelyDefenderItems,
         likelyDefenderAbilities: options.likelyDefenderAbilities
-      });
+      }) : [];
       const narrowedCurrent = usePosterior
         ? { bands: currentBands, likelyBandSource: "posterior" as const }
         : applyObservedLikelyBand(currentBands, currentObservedRange, yourActive.hpPercent ?? null);
-      const currentBandSource = narrowedCurrent.likelyBandSource;
+      const currentBandSource = currentTargetAvailable ? narrowedCurrent.likelyBandSource : undefined;
+      const currentDelayed = buildDelayedDamagePreview(snapshot, candidate.name, snapshot.yourSide.slot === "p2" ? "p2" : "p1", narrowedCurrent.bands);
       const currentTarget: ThreatTargetPreview = {
+        instanceId: yourActive.instanceId,
         species: yourActive.species ?? yourActive.displayName ?? "Your active",
         targetCurrentHpPercent: yourActive.hpPercent ?? null,
         relation: "unknown",
-        bands: narrowedCurrent.bands,
+        bands: currentDelayed ? [] : narrowedCurrent.bands,
+        ...(currentDelayed ? { delayed: currentDelayed } : {}),
         observedRange: currentObservedRange,
         likelyBandSource: currentBandSource,
         interactionHints: currentInteractionHints,
-        summary: buildDamageSummary(`${candidate.name} into ${yourActive.species ?? yourActive.displayName ?? "your active"}`, narrowedCurrent.bands, [])
+        summary: currentTargetAvailable
+          ? currentDelayed ? delayedDamageSummary(`${candidate.name} into ${yourActive.species ?? yourActive.displayName ?? "your active"}`, currentDelayed)
+            : buildDamageSummary(`${candidate.name} into ${yourActive.species ?? yourActive.displayName ?? "your active"}`, narrowedCurrent.bands, [])
+          : `${yourActive.species ?? yourActive.displayName ?? "Your active"} has fainted; compare living switch targets.`
       };
       const switchTargets: ThreatTargetPreview[] = snapshot.yourSide.team
-        .filter((pokemon) => !pokemon.fainted && !pokemon.active)
+        .filter((pokemon) => !pokemon.fainted && (pokemon.hpPercent ?? 100) > 0 && !pokemon.active)
         .map((pokemon) => {
-          const bands = buildBands({
+          // A future entry starts a new Slow Start stint, even after prior expiry.
+          const entry = projectSwitchEntry(snapshot, pokemon, "your");
+          pokemon = entry.pokemon;
+          const bands = entry.fainted ? [] : buildBands({
             genNum,
             snapshot,
             attackerMon: opponentActive,
             defenderMon: pokemon,
             moveName: candidate.name,
             direction: "opponent",
-            attackerPosterior
+            possibleItems: filterLiveLikelyHeldItemNames(snapshot.format, pokemon, options.likelyDefenderItems, { recentLog: snapshot.recentLog }),
+            possibleAbilities: options.likelyDefenderAbilities,
+            attackerPosterior, highAttackerItems, likelyAttackerAbility, likelyAttackerItem, likelyAttackerProfile
           });
-          const observedRange = options.observedThreatResolver?.(
+          const observedRange = delayedMove || !entry.damageQualified || entry.notes.length > 0 ? undefined : options.observedThreatResolver?.(
             candidate.name,
             opponentActive,
             pokemon
@@ -1180,16 +1329,22 @@ export function buildThreatPreview(
           const narrowed = usePosterior
             ? { bands, likelyBandSource: "posterior" as const }
             : applyObservedLikelyBand(bands, observedRange, pokemon.hpPercent ?? null);
-          const bandSource = narrowed.likelyBandSource;
+          if (!entry.damageQualified) narrowed.bands = withholdEntryDamage(narrowed.bands, entry.notes, true);
+          else if (!entry.hpCertain || (!entry.speedCertain && ["gyroball", "electroball"].includes(normalizeName(candidate.name)))) narrowed.bands = narrowed.bands.map((band) => ({ ...band, outcome: undefined, minPercent: null, maxPercent: null, immediate: unknownImmediate(), detail: [band.detail, ...entry.notes].filter(Boolean).join(" ") }));
+          const bandSource = entry.damageQualified ? narrowed.likelyBandSource : undefined;
+          const delayed = buildDelayedDamagePreview(snapshot, candidate.name, snapshot.yourSide.slot === "p2" ? "p2" : "p1", narrowed.bands);
           return {
+            instanceId: pokemon.instanceId,
             species: pokemon.species ?? pokemon.displayName ?? "Switch target",
             targetCurrentHpPercent: pokemon.hpPercent ?? null,
             relation: "unknown",
-            bands: narrowed.bands,
+            bands: delayed ? [] : narrowed.bands,
+            ...(delayed ? { delayed } : {}),
             observedRange,
             likelyBandSource: bandSource,
-            interactionHints,
-            summary: buildDamageSummary(`${candidate.name} into ${pokemon.species ?? pokemon.displayName ?? "switch target"}`, narrowed.bands, [])
+            interactionHints: entry.damageQualified ? interactionHints : [],
+            summary: entry.fainted ? "Projected entry hazards KO this switch target before the reply." : [delayed ? delayedDamageSummary(`${candidate.name} into ${pokemon.species ?? pokemon.displayName ?? "switch target"}`, delayed)
+              : buildDamageSummary(`${candidate.name} into ${pokemon.species ?? pokemon.displayName ?? "switch target"}`, narrowed.bands, []), ...entry.notes].join(" ")
           };
         });
       return {

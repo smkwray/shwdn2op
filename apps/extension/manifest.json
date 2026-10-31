@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "shwdn2op",
   "version": "0.1.0",
-  "description": "Showdown second opinion with local model CLIs and deterministic battle-state analysis.",
+  "description": "Shows Metamon's pick with deterministic damage, speed, threat and likely-set notes from a local companion.",
   "permissions": [
     "storage",
     "activeTab",
@@ -51,13 +51,29 @@
         "https://play.pokemonshowdown.com/*",
         "https://pokemonshowdown.com/*"
       ],
-      "js": ["content-bridge.js"],
+      "js": [
+        "page-hook.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://play.pokemonshowdown.com/*",
+        "https://pokemonshowdown.com/*"
+      ],
+      "js": [
+        "content-bridge.js"
+      ],
       "run_at": "document_start"
     }
   ],
   "web_accessible_resources": [
     {
-      "resources": ["page-hook.js"],
+      "resources": [
+        "page-hook.js",
+        "assets/type-chart.json"
+      ],
       "matches": [
         "https://play.pokemonshowdown.com/*",
         "https://pokemonshowdown.com/*"

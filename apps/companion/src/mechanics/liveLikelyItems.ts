@@ -1,7 +1,7 @@
 import { Dex } from "@pkmn/dex";
 import { Generations } from "@pkmn/data";
 
-import type { InferenceEvent, LikelihoodEntry, PokemonSnapshot } from "../types.js";
+import type { BattleSnapshot, InferenceEvent, LikelihoodEntry, OpponentIntelEntry, PokemonSnapshot } from "../types.js";
 
 const gens = new Generations(Dex as any);
 
@@ -135,6 +135,36 @@ function hazardExplainedByTypesOrAbility(
   return false;
 }
 
+/** Two different moves in one stint rule out every Choice item while the item is unrevealed (a revealed one is a fact:
+ * Trick can hand over a Choice item mid-stint). The one rule for sets, the posterior, Speed and the order verdict. */
+export function choiceRefutedByStint(pokemon: PokemonSnapshot | null | undefined) {
+  return Boolean(pokemon && !pokemon.item && (pokemon.appearanceMoves?.length ?? 0) >= 2);
+}
+
+/** One move used again and again since switching in: the move and its uses (2 or more). Moves another move called or a
+ * lock forced carry "[from]" and do not count; Encore, Disable or Torment on the stint make repeats uninformative. */
+export function stintRepeat(snapshot: BattleSnapshot | undefined, pokemon: PokemonSnapshot | null | undefined) {
+  const facts = snapshot?.canonicalEvidence?.facts, appearance = pokemon?.appearanceId;
+  if (!facts || !appearance) return null;
+  const stint = facts.filter((fact) => fact.subject.appearanceId === appearance && fact.source?.channel !== "recovery");
+  if (stint.some((fact) => fact.kind === "-start" && /encore|disable|torment/i.test(fact.args[1] ?? ""))) return null;
+  const moves = stint.filter((fact) => fact.kind === "move" && !fact.args.some((arg) => arg.startsWith("[from]")) && normalizeName(fact.args[1]) !== "struggle").map((fact) => fact.args[1]!);
+  return moves.length >= 2 && new Set(moves.map(normalizeName)).size === 1 ? { move: moves[0]!, uses: moves.length } : null;
+}
+
+/** Items this battle's posterior believes once it has battle evidence (damage, order, item events, repeats); before that its
+ * shares are only its generic defaults, no reason to think an item possible. */
+export function battlePosteriorItems(entry: OpponentIntelEntry | undefined) {
+  const posterior = entry?.posterior;
+  return posterior?.evidenceKinds?.some((kind) => ["damage", "speed", "inference"].includes(kind)) ? posterior.itemShares ?? [] : [];
+}
+
+/** The Speed engine's own conclusion that only a Choice Scarf fits the observed turn order (the item stays unrevealed). */
+export function choiceScarfImplied(pokemon: PokemonSnapshot | null | undefined, speedEvidence: Array<{ kind: string; label: string }> | undefined) {
+  return Boolean(pokemon && !pokemon.item && !pokemon.removedItem
+    && speedEvidence?.some((entry) => entry.kind === "item_ability_assumption" && /^Choice Scarf implied/.test(entry.label)));
+}
+
 type LiveLikelyItemContext = {
   recentLog?: string[] | undefined;
   inferenceEvents?: InferenceEvent[] | undefined;
@@ -153,7 +183,7 @@ function itemStillLive(
   if (!itemId) return false;
 
   if (["choicescarf", "choiceband", "choicespecs"].includes(itemId)) {
-    const sameStintMoveCount = revealedDistinctMoveCountInCurrentStint(pokemon, context.recentLog);
+    const sameStintMoveCount = pokemon.instanceId ? pokemon.appearanceMoves?.length ?? null : revealedDistinctMoveCountInCurrentStint(pokemon, context.recentLog);
     if (sameStintMoveCount !== null && sameStintMoveCount >= 2) {
       return false;
     }
@@ -170,7 +200,7 @@ function itemStillLive(
   const events = context.inferenceEvents;
   if (Array.isArray(events) && events.length > 0) {
     const monEvents = events.filter((e) =>
-      normalizeName(e.species) === normalizeName(pokemon.species ?? pokemon.displayName)
+      pokemon.instanceId ? e.instanceId === pokemon.instanceId : normalizeName(e.species) === normalizeName(pokemon.species ?? pokemon.displayName)
     );
 
     // attack_recoil from Life Orb → item IS Life Orb
@@ -208,22 +238,17 @@ function itemStillLive(
 
       // Check if types/ability already explain ALL hazard immunities.
       // If so, no item evidence — don't filter.
-      const typesExplainAll = hazardEvents.every((e) =>
-        e.hazards.every((h) => hazardExplainedByTypesOrAbility(h, e.monTypes, pokemon.ability))
-      );
+      const species = dataGen(format).species.get(pokemon.species ?? pokemon.displayName ?? "");
+      const abilities = pokemon.ability ? [pokemon.ability] : Object.values(species?.abilities ?? {});
+      const typesExplainAll = abilities.length === 0 || abilities.some((ability) => hazardEvents.every((e) =>
+        e.hazards.every((h) => hazardExplainedByTypesOrAbility(h, e.monTypes, ability))
+      ));
       if (typesExplainAll) {
         return true; // no item conclusion from this evidence
       }
 
       // Some hazards can't be explained by type/ability → item needed
-      const hazardImmunityItems = new Set(["heavydutyboots"]);
-      const allHazardsToxicSpikesOnly = hazardEvents.every(
-        (e) => e.hazards.length > 0 && e.hazards.every((h) => normalizeName(h) === "toxicspikes")
-      );
-      if (allHazardsToxicSpikesOnly) {
-        hazardImmunityItems.add("safetygoggles");
-      }
-      return hazardImmunityItems.has(itemId);
+      return itemId === "heavydutyboots";
     }
   }
 
