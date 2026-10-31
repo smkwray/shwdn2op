@@ -1,0 +1,13 @@
+# Linux/WSL WSL2 / Python 3.12 CUDA runtime. Compile with uv 0.11.17 using this
+# file as both input and --overrides to pin upstream's floating VCS dependencies.
+# FlashAttention is deliberately not installed: the separately qualified runtime
+# selects AMAGO's official SlidingWindowFlexAttention(window_size=96).
+metamon @ git+https://github.com/UT-Austin-RPL/metamon.git@0a00a759c9a4382a2877088d828302ec294a05a5
+amago @ git+https://github.com/UT-Austin-RPL/amago.git@0974781a9096ff43df1b708312256f96fc2ab127
+poke-env @ git+https://github.com/UT-Austin-RPL/poke-env.git@e1268d270c3f2bd32c7ff5713e01062302020579
+torch==2.11.0
+# Metamon's annotations use np.bool, restored as a scalar alias in NumPy 2.
+numpy==2.2.6
+gymnasium==0.29.1
+psutil==7.2.2
+uv==0.11.17
