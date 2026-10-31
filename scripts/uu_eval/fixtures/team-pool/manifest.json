@@ -1,0 +1,91 @@
+{
+ "schema_version": 1,
+ "kind": "synthetic_test_rosters",
+ "format": "gen9uu",
+ "families": [
+  {
+   "key": "Arcanine-Hisui|Cobalion|Donphan|Hydreigon|Slowking|Thundurus-Therian",
+   "sha256": "4ee8cfd32c4b55e56839893b92790fed724aa8664fa681fc274d3942f7e069b4",
+   "split": "dev",
+   "representative": "teams/uu_dev_v1/gen9uu/team_000001.gen9uu_team",
+   "members": [
+    "Arcanine-Hisui",
+    "Cobalion",
+    "Donphan",
+    "Hydreigon",
+    "Slowking",
+    "Thundurus-Therian"
+   ]
+  },
+  {
+   "key": "Clefable|Garchomp|Rotom-Wash|Skarmory|Volcarona|Weavile",
+   "sha256": "27e393b994b1b91ae1ac13fb2670c36e7ba224df9c21845848aa67adc0e58669",
+   "split": "dev",
+   "representative": "teams/uu_dev_v1/gen9uu/team_000002.gen9uu_team",
+   "members": [
+    "Clefable",
+    "Garchomp",
+    "Rotom-Wash",
+    "Skarmory",
+    "Weavile",
+    "Volcarona"
+   ]
+  },
+  {
+   "key": "Azumarill|Mienshao|Scizor|Tentacruel|Torkoal|Venusaur",
+   "sha256": "df7b9d204ec31309194650d53ed5746e5dea02cf7bc35bfcf410c734ba384a2e",
+   "split": "dev",
+   "representative": "teams/uu_dev_v1/gen9uu/team_000003.gen9uu_team",
+   "members": [
+    "Azumarill",
+    "Mienshao",
+    "Scizor",
+    "Tentacruel",
+    "Torkoal",
+    "Venusaur"
+   ]
+  },
+  {
+   "key": "Bisharp|Chansey|Excadrill|Latios|Mandibuzz|Primarina",
+   "sha256": "16a76695311ad0fd7890feee8b07b1a77ea5ee6e021c90336e8c77b86ffc74d2",
+   "split": "dev",
+   "representative": "teams/uu_dev_v1/gen9uu/team_000004.gen9uu_team",
+   "members": [
+    "Bisharp",
+    "Chansey",
+    "Excadrill",
+    "Latios",
+    "Mandibuzz",
+    "Primarina"
+   ]
+  },
+  {
+   "key": "Altaria|Krookodile|Magnezone|Noivern|Quagsire|Toxapex",
+   "sha256": "99727a72192fa0aeeb71d9956eb5be613fb1dfbedf84ddb972b4e758a59bca79",
+   "split": "train",
+   "representative": "teams/uu_train_v1/gen9uu/team_000005.gen9uu_team",
+   "members": [
+    "Altaria",
+    "Krookodile",
+    "Magnezone",
+    "Noivern",
+    "Quagsire",
+    "Toxapex"
+   ]
+  },
+  {
+   "key": "Ambipom|Florges|Hippowdon|Infernape|Jellicent|Lokix",
+   "sha256": "6360671e21f4635f71b4bee7adabcbe431ceb13973cec5aa6827603bfd2e8fae",
+   "split": "held-out",
+   "representative": "teams/uu_held_out_v1/gen9uu/team_000006.gen9uu_team",
+   "members": [
+    "Ambipom",
+    "Florges",
+    "Hippowdon",
+    "Infernape",
+    "Jellicent",
+    "Lokix"
+   ]
+  }
+ ]
+}
